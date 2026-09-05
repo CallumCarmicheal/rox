@@ -39,9 +39,13 @@ jobs:
           cache-directories: vendor
 
       # vendor/ is gitignored; [patch.crates-io] points at it, so rebuild it
-      # from crates.io + patches/ before anything compiles.
-      - name: Vendor patched crates
-        run: scripts/vendor-gpui.sh
+      # from crates.io + patches/ before anything compiles. The projectM
+      # source goes the same way: rox-milkdrop-sys's build script refuses to
+      # run without it.
+      - name: Vendor patched crates and libprojectM
+        run: |
+          scripts/vendor-gpui.sh
+          scripts/vendor-projectm.sh
 
       - name: Format
         run: cargo fmt --all --check

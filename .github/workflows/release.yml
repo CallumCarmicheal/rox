@@ -123,10 +123,15 @@ jobs:
           save-if: ${{ runner.os != 'macOS' }}
 
       # vendor/ is gitignored; [patch.crates-io] points at it, so rebuild it
-      # from crates.io + patches/ before the build.
-      - name: Vendor patched crates
+      # from crates.io + patches/ before the build. The projectM source goes
+      # the same way: rox-milkdrop-sys's build script refuses to run without
+      # it. bash on every runner, so the Windows job gets curl, tar and
+      # sha256sum from Git Bash.
+      - name: Vendor patched crates and libprojectM
         shell: bash
-        run: scripts/vendor-gpui.sh
+        run: |
+          scripts/vendor-gpui.sh
+          scripts/vendor-projectm.sh
 
       # rox-mcp ships beside the app: the MCP settings page hands out a
       # config pointing at it, so every artifact has to carry it.
