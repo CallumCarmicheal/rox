@@ -53,14 +53,30 @@ fn main() {
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
     println!("cargo:rustc-link-search=native={}/lib64", dst.display());
 
-    // One library, not two: the static build merges projectm-eval and the
-    // rest of the vendored objects into libprojectM-4.a (checked on this
-    // machine, where the install landed in lib64 and carries the prjm_eval_*
-    // symbols; the generated projectM-4.pc lists -lprojectM-4 alone). On
-    // Windows the static prefix is forced to "lib" by the top-level
-    // CMakeLists, so the file is libprojectM-4.lib and static= resolves it
-    // from the same link name.
-    println!("cargo:rustc-link-lib=static=projectM-4");
+    // One library, not two: the static build folds projectm-eval and the
+    // rest of the vendored objects into the projectM archive through
+    // TARGET_OBJECTS (src/libprojectM/CMakeLists.txt), so there's no second
+    // archive to name. What the archive is called is the platform's call:
+    // libprojectM-4.a on Linux and macOS, and libprojectM-4.lib on Windows,
+    // where the top-level CMakeLists forces a "lib" prefix onto static
+    // libraries so they can share a directory with the import libraries.
+    // rustc's `static=projectM-4` only looks for projectM-4.lib on MSVC, so
+    // the file is named verbatim instead, whichever one the install left.
+    let mut archive = None;
+    for dir in ["lib", "lib64"] {
+        for name in ["libprojectM-4.a", "libprojectM-4.lib", "projectM-4.lib"] {
+            if dst.join(dir).join(name).exists() {
+                archive.get_or_insert(name);
+            }
+        }
+    }
+    let archive = archive.unwrap_or_else(|| {
+        panic!(
+            "libprojectM built but no archive was found under {}/lib or lib64",
+            dst.display()
+        )
+    });
+    println!("cargo:rustc-link-lib=static:+verbatim={archive}");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
