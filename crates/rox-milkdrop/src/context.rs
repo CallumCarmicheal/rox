@@ -269,7 +269,7 @@ fn step_error(step: &str, error: &impl std::fmt::Display) -> String {
 /// shuts down.
 #[cfg(windows)]
 mod windows_helper {
-    use std::ptr::NonNull;
+    use std::num::NonZeroIsize;
 
     use raw_window_handle::{RawWindowHandle, Win32WindowHandle};
     use windows_sys::core::PCWSTR;
@@ -358,12 +358,12 @@ mod windows_helper {
         }
 
         pub fn raw_handle(&self) -> RawWindowHandle {
+            // raw-window-handle wants the HWND as a non-zero integer, not a
+            // pointer; `create` already refused a null one.
             let mut handle = Win32WindowHandle::new(
-                NonNull::new(self.hwnd)
-                    .expect("checked non-null at creation")
-                    .as_ptr() as isize,
+                NonZeroIsize::new(self.hwnd as isize).expect("checked non-null at creation"),
             );
-            handle.hinstance = std::num::NonZeroIsize::new(self.instance as isize);
+            handle.hinstance = NonZeroIsize::new(self.instance as isize);
             RawWindowHandle::Win32(handle)
         }
     }
