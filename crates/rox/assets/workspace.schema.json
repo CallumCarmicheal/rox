@@ -126,6 +126,11 @@
           "color": "theme"
         },
         "hide_menubar": false,
+        "menubar_buttons": {
+          "tasks": true,
+          "sleep": true,
+          "rescan": true
+        },
         "os_decorations": true,
         "resize_border": true
       }
@@ -610,6 +615,15 @@
           "type": "boolean",
           "default": false
         },
+        "menubar_buttons": {
+          "description": "Which of the bar's status-side buttons show. All on by default.",
+          "$ref": "#/$defs/MenubarButtons",
+          "default": {
+            "tasks": true,
+            "sleep": true,
+            "rescan": true
+          }
+        },
         "os_decorations": {
           "description": "Whether the main workspace windows get the OS's own decorations\n(titlebar, borders). Off asks the compositor for a bare\nclient-drawn window; the window controls panel stands in for the\nmissing buttons. Child windows (settings, popouts, editors) keep\nthe OS chrome either way.",
           "type": "boolean",
@@ -750,6 +764,27 @@
           "const": "cover"
         }
       ]
+    },
+    "MenubarButtons": {
+      "description": "Which of the menubar's status-side buttons draw. Each is on by default;\na right-click on that side of the bar flips them.",
+      "type": "object",
+      "properties": {
+        "tasks": {
+          "description": "The tasks button, the clock that opens the library tasks window.",
+          "type": "boolean",
+          "default": true
+        },
+        "sleep": {
+          "description": "The sleep timer button and its dropdown.",
+          "type": "boolean",
+          "default": true
+        },
+        "rescan": {
+          "description": "The rescan button that shows once a library folder is known.",
+          "type": "boolean",
+          "default": true
+        }
+      }
     }
   },
   "required": [

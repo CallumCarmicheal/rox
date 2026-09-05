@@ -38,7 +38,7 @@ use crate::lastfm::import;
 use crate::panel_settings;
 use crate::pass_prompt;
 use crate::replaygain_job;
-use crate::startup::updater;
+use crate::startup::{updater, updates};
 use crate::tempo_job;
 use crate::workspace::{ApplyShaders, Workspace};
 use rox_core::settings::layouts::Preset;
@@ -640,6 +640,7 @@ struct SettingsWindow {
     recording: Option<&'static str>,
     /// Whether launch runs the daily update check, the Application page toggle.
     check_updates: bool,
+    prerelease_updates: bool,
     /// Whether a check that finds a newer release also downloads it, the
     /// row under the check toggle. Only shown where the install can
     /// replace itself.
@@ -1298,6 +1299,7 @@ impl SettingsWindow {
             dialog_focus: cx.focus_handle(),
             focus: focus.clone(),
             check_updates: settings.check_updates,
+            prerelease_updates: settings.prerelease_updates,
             download_updates: settings.download_updates,
             ai_enabled: settings.ai_enabled,
             mcp_enabled: settings.mcp_enabled,
@@ -4698,6 +4700,18 @@ impl SettingsWindow {
                         &["release", "version", "upgrade"],
                         panel::toggle(self.check_updates, Self::set_check_updates, cx),
                     )
+                    .keyed(
+                        "settings-application-prerelease-updates",
+                        &[
+                            "release",
+                            "candidate",
+                            "rc",
+                            "prerelease",
+                            "beta",
+                            "preview",
+                        ],
+                        panel::toggle(self.prerelease_updates, Self::set_prerelease_updates, cx),
+                    )
                     // Meaningless where the install can't replace itself (a
                     // distro package, a read-only folder), so the row only
                     // exists where the updater can act on it.
@@ -6643,6 +6657,17 @@ impl SettingsWindow {
     fn set_check_updates(&mut self, on: bool, cx: &mut Context<Self>) {
         self.check_updates = on;
         Settings::update(move |s| s.check_updates = on);
+        cx.notify();
+    }
+
+    /// The candidates toggle: into the file, and the menubar chip
+    /// recomputed against it, so a candidate the last check cached shows
+    /// or hides at once rather than after the next daily check.
+    fn set_prerelease_updates(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.prerelease_updates = on;
+        Settings::update(move |s| s.prerelease_updates = on);
+        updates::refresh_available(&Settings::load());
+        cx.refresh_windows();
         cx.notify();
     }
 

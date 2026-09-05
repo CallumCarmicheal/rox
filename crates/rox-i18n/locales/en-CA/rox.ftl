@@ -617,6 +617,8 @@ settings-appearance-theme-system = System
 
 settings-application-check-updates = Check for Updates
     .description = Look for a newer release once a day when rox starts; the About window checks now either way
+settings-application-prerelease-updates = Include Release Candidates
+    .description = Offer release candidates, the previews published ahead of a release for testing; a candidate build always sees the next one either way
 settings-application-download-updates = Download Updates
     .description = When a check finds a newer release, download and stage it in the background; the next start runs it
 settings-application-enable-ai = Enable AI Features

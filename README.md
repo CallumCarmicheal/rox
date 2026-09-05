@@ -146,6 +146,8 @@ These all ship in the box, one click away on the welcome window or in settings:
 ## Download
 
 Grab your platform's build from the [releases page](https://github.com/zealsprince/rox/releases/latest).
+Release candidates ship ahead of a release as GitHub prereleases; the in-app update check
+offers them once you turn on Include Release Candidates under Settings > Application.
 
 - **Linux**
   - **Arch Linux** - Available on the AUR as [`rox-player`](https://aur.archlinux.org/packages/rox-player).

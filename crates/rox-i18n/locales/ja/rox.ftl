@@ -582,6 +582,8 @@ settings-appearance-theme-system = システム
 ## Settings: application
 settings-application-check-updates = 更新を確認
     .description = rox の起動時に一日一度、新しいリリースを探す。バージョン情報のウィンドウはどちらにせよその場で確認する
+settings-application-prerelease-updates = リリース候補も含める
+    .description = リリース前にテスト用として公開されるリリース候補も候補に入れる。候補版のビルドはどちらにせよ次の候補を見つける
 settings-application-download-updates = 更新をダウンロード
     .description = 新しいリリースが見つかったら、裏でダウンロードして用意しておく。次回の起動でそれが動く
 settings-application-enable-ai = AI 機能を有効にする

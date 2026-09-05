@@ -582,6 +582,8 @@ settings-appearance-theme-system = 系统
 ## Settings: application
 settings-application-check-updates = 检查更新
     .description = rox 启动时每天查一次有没有新版本；不管开不开，“关于”窗口都会当场检查
+settings-application-prerelease-updates = 包含候选版本
+    .description = 也提供候选版本，也就是正式发布前放出来供测试的预览版；候选版本的构建不管开不开都会看到下一个
 settings-application-download-updates = 下载更新
     .description = 检查到新版本时在后台下载并准备好；下次启动就用它
 settings-application-enable-ai = 启用 AI 功能

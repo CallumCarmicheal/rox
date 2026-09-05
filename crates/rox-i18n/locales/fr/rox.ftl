@@ -601,6 +601,8 @@ settings-appearance-theme-system = Système
 ## Settings: application
 settings-application-check-updates = Rechercher les mises à jour
     .description = Chercher une version plus récente une fois par jour au démarrage de rox ; la fenêtre À propos vérifie tout de suite dans les deux cas
+settings-application-prerelease-updates = Inclure les versions candidates
+    .description = Proposer aussi les versions candidates, les avant-premières publiées avant une version pour la tester ; une build candidate voit la suivante dans tous les cas
 settings-application-download-updates = Télécharger les mises à jour
     .description = Quand une vérification trouve une version plus récente, la télécharger et la préparer en arrière-plan ; le prochain démarrage la lance
 settings-application-enable-ai = Activer les fonctions IA

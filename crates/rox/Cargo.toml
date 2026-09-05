@@ -100,6 +100,11 @@ ureq = "2"
 # The updater's checksum verify; already in the tree through rox-acoustic,
 # same 0.10 line.
 sha2 = "0.10"
+# The update check's version ordering. Release candidates tag as
+# 1.25.0-rc.1 and have to sort below 1.25.0 and above 1.24.x, which is the
+# spec's prerelease rule and not worth reimplementing; already in the tree
+# through several build scripts, same 1.x line.
+semver = "1"
 # The logging facade the app and rox-playback write through; our own backend
 # (crate::logging) fans each line to stderr, a rolling file, and the console
 # window's ring. Already in the tree, and chrono for the wall-clock stamp on

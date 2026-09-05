@@ -1246,7 +1246,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let current = settings::menubar_buttons();
-        let rows: [(&str, fn(&mut MenubarButtons) -> &mut bool); 3] = [
+        type Field = fn(&mut MenubarButtons) -> &mut bool;
+        let rows: [(&str, Field); 3] = [
             ("menubar-button-tasks", |b| &mut b.tasks),
             ("menubar-button-sleep", |b| &mut b.sleep),
             ("menubar-button-rescan", |b| &mut b.rescan),

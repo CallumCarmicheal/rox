@@ -596,6 +596,8 @@ settings-appearance-theme-system = Системная
 ## Settings: application
 settings-application-check-updates = Проверять обновления
     .description = Искать более новый выпуск раз в день при запуске rox; окно «О программе» проверяет прямо сейчас в любом случае
+settings-application-prerelease-updates = Предлагать кандидаты в выпуски
+    .description = Предлагать и кандидаты в выпуски, предварительные сборки, которые выходят перед выпуском для проверки; сборка-кандидат видит следующую в любом случае
 settings-application-download-updates = Скачивать обновления
     .description = Когда проверка находит более новый выпуск, скачивать и готовить его в фоне; следующий запуск пойдёт уже с ним
 settings-application-enable-ai = Включить возможности ИИ

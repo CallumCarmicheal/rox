@@ -586,6 +586,8 @@ settings-appearance-theme-system = System
 ## Settings: application
 settings-application-check-updates = Nach Updates suchen
     .description = Einmal am Tag beim Start von rox nach einer neueren Version schauen; das Über-Fenster prüft so oder so sofort
+settings-application-prerelease-updates = Release Candidates einbeziehen
+    .description = Auch Release Candidates anbieten, die Vorabversionen, die vor einem Release zum Testen erscheinen; ein Candidate-Build sieht den nächsten so oder so
 settings-application-download-updates = Updates herunterladen
     .description = Findet eine Prüfung eine neuere Version, wird sie im Hintergrund geladen und bereitgelegt; der nächste Start führt sie aus
 settings-application-enable-ai = KI-Funktionen aktivieren

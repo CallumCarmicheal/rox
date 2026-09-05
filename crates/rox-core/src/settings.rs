@@ -579,6 +579,13 @@ pub struct Settings {
     /// day. The About page's toggle flips it; off leaves only the manual
     /// button.
     pub check_updates: bool,
+    /// Whether the check considers release candidates, the prereleases
+    /// the workflow tags with a suffix (1.25.0-rc.1) ahead of a release.
+    /// Off by default, so a stable install only ever hears about stable
+    /// releases; a build that is itself a candidate reads as opted in
+    /// whatever this says, since it has to learn about the next candidate
+    /// and the release that closes the cycle.
+    pub prerelease_updates: bool,
     /// Whether a check that finds a newer release also downloads and
     /// stages it, so the next start runs it. Off by default, leaving a check
     /// notify-only, and moot wherever the install can't update itself (a
@@ -1231,9 +1238,9 @@ impl MenubarButtons {
     const RESCAN: u8 = 4;
 
     fn to_bits(self) -> u8 {
-        (self.tasks as u8) * Self::TASKS
-            | (self.sleep as u8) * Self::SLEEP
-            | (self.rescan as u8) * Self::RESCAN
+        ((self.tasks as u8) * Self::TASKS)
+            | ((self.sleep as u8) * Self::SLEEP)
+            | ((self.rescan as u8) * Self::RESCAN)
     }
 
     fn from_bits(bits: u8) -> Self {
@@ -3785,6 +3792,7 @@ impl Default for Settings {
             design_mode: true,
             resize_lock: false,
             check_updates: true,
+            prerelease_updates: false,
             download_updates: false,
             experimental: false,
             ai_enabled: false,

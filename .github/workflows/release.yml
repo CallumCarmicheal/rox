@@ -4,6 +4,14 @@
 # tests. The version gate is tag existence, not commit diffing: if v<version>
 # is already tagged, nothing runs, so re-runs and non-bump commits are no-ops
 # and a failed run can be retried safely.
+#
+# A release candidate is the same push with a semver prerelease suffix on the
+# workspace version (1.25.0-rc.1). It builds and tags like any other version
+# and publishes as a GitHub prerelease, which keeps it off the "latest"
+# endpoint the site and the in-app check read for stable builds; both offer
+# candidates only to people who opted in. The AUR is skipped for candidates,
+# since rox-player tracks stable and pacman versions can't carry the hyphen
+# anyway. Cutting the release itself is then a bump to the bare version.
 name: Release
 
 on:
@@ -29,6 +37,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       release: ${{ steps.version.outputs.release }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -38,6 +47,12 @@ jobs:
         run: |
           version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # A hyphen is semver's prerelease marker, and cargo has already
+          # refused anything that isn't a version.
+          case "$version" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
           if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
             echo "release=false" >> "$GITHUB_OUTPUT"
           else
@@ -281,24 +296,41 @@ jobs:
         run: |
           cd artifacts
           sha256sum * > SHA256SUMS.txt
+      # The generated notes start at the newest stable tag rather than at
+      # whatever GitHub picks as the previous release: a candidate's notes
+      # then cover everything since the last release, and the release that
+      # follows a run of candidates covers the same span instead of only the
+      # commits since rc.N. The checkout has no tags, so ask the remote.
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
           # Under workflow_run, github.sha is the default branch tip at trigger
           # time, which can drift past the commit CI actually vetted. Tag the
           # vetted one.
           TARGET_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
-          gh release create "v${{ needs.check.outputs.version }}" \
+          previous=$(git ls-remote --tags --refs origin 'v[0-9]*' |
+            sed 's|.*refs/tags/||' | grep -v -e '-' | sort -V | tail -n1)
+          flags=()
+          if [ -n "$previous" ]; then
+            flags+=(--notes-start-tag "$previous")
+          fi
+          if [ "$PRERELEASE" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "v$VERSION" \
             --target "$TARGET_SHA" \
-            --title "v${{ needs.check.outputs.version }}" \
-            --generate-notes \
+            --title "v$VERSION" \
+            --generate-notes "${flags[@]}" \
             artifacts/*
 
       # rox.music bakes the version and asset URLs into its download page at
       # build time, so it only learns about a release when something tells it to
       # rebuild. github.token cannot reach another repo, so this needs a PAT with
-      # contents:write on rox.music, stored as ROX_WEBSITE_TOKEN.
+      # contents:write on rox.music, stored as ROX_WEBSITE_TOKEN. Candidates
+      # dispatch too: the site lists the newest one beside the stable download.
       #
       # continue-on-error because a missing or expired secret is not worth
       # failing a good release over. The site keeps serving the previous version
@@ -314,7 +346,8 @@ jobs:
           fi
           gh api repos/zealsprince/rox.music/dispatches \
             --field event_type=rox-release \
-            --field "client_payload[version]=${{ needs.check.outputs.version }}"
+            --field "client_payload[version]=${{ needs.check.outputs.version }}" \
+            --field "client_payload[prerelease]=${{ needs.check.outputs.prerelease }}"
 
   # The AUR update can't hang off `release: published` in its own workflow:
   # the release above is created with github.token, and events made with that
@@ -322,6 +355,10 @@ jobs:
   # run at all.
   aur:
     needs: [check, release]
+    # Candidates never reach the AUR: rox-player is the stable package, and
+    # a pkgver can't hold the hyphen anyway. The stable release that follows
+    # publishes as usual.
+    if: needs.check.outputs.prerelease != 'true'
     permissions: {}
     uses: ./.github/workflows/aur.yml
     with:

@@ -89,7 +89,7 @@ impl UpdateCheck {
                     url: cache.url.clone(),
                     assets: Vec::new(),
                 };
-                if release.is_new() {
+                if release.offered(settings) {
                     UpdateCheck::Available(release)
                 } else {
                     UpdateCheck::UpToDate
