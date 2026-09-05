@@ -91,6 +91,14 @@ pub struct Shared {
     /// The fade came from a Previous rather than a Next or a track
     /// boundary, so the transport can sweep the way the skip went.
     pub fade_back: AtomicBool,
+    /// The A-B loop's two marks, track-relative seconds as `f64::to_bits`,
+    /// with `u64::MAX` in `ab_a` meaning nothing is looping. Two atomics
+    /// rather than a lock: the transport asks on every frame and the decode
+    /// thread writes only when the loop is set, moved, or cleared. Written
+    /// b first and read a first, so a reader never sees a new A against an
+    /// old B.
+    pub ab_a: AtomicU64,
+    pub ab_b: AtomicU64,
     /// Linear volume as f32 bits.
     pub volume_bits: AtomicU32,
     /// Frames the callback actually sent to the device (excludes flushed
@@ -129,6 +137,8 @@ impl Shared {
             fade_at: AtomicU64::new(0),
             fade_len: AtomicU64::new(0),
             fade_back: AtomicBool::new(false),
+            ab_a: AtomicU64::new(u64::MAX),
+            ab_b: AtomicU64::new(0),
             volume_bits: AtomicU32::new(1.0f32.to_bits()),
             frames_consumed: AtomicU64::new(0),
             ended: AtomicBool::new(false),
@@ -207,6 +217,18 @@ impl Shared {
             return None;
         }
         Some((done as f32 / len as f32, self.fade_back.load(Relaxed)))
+    }
+
+    /// The section on repeat, both marks in track-relative seconds. None
+    /// when nothing is looping, which is nearly always. The engine owns the
+    /// loop and this is the only copy anyone else reads (ADR 16).
+    pub fn ab(&self) -> Option<(f64, f64)> {
+        let a = self.ab_a.load(std::sync::atomic::Ordering::Acquire);
+        if a == u64::MAX {
+            return None;
+        }
+        let b = self.ab_b.load(std::sync::atomic::Ordering::Relaxed);
+        Some((f64::from_bits(a), f64::from_bits(b)))
     }
 
     /// Resolve the current position from the output clock: which track, and

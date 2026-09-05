@@ -2775,6 +2775,75 @@ mod tests {
         );
     }
 
+    /// The same cue rip through XSPF. Worth its own test because this is the
+    /// one place the three formats differ in a way the resolver can see: a
+    /// location is a URI, so the subsong number rides in a real URI fragment
+    /// and the path is percent-encoded on the way out.
+    #[test]
+    fn xspf_fragments_round_trip_a_cue_rip() {
+        use rox_library::cue::TrackKey;
+        use rox_library::playlists::ExportTrack;
+        use rox_library::xspf;
+        use std::path::{Path, PathBuf};
+
+        let mut conn = rox_library::rusqlite::Connection::open_in_memory().unwrap();
+        store::init_schema(&conn).unwrap();
+        let image = "/m/Album/disc one.flac";
+        store::insert_batch(
+            &mut conn,
+            &[
+                cue_row(image, 1, 0, Some(180_000)),
+                cue_row(image, 2, 180_000, Some(400_000)),
+                plain_row("/m/Album/loose.mp3"),
+            ],
+        )
+        .unwrap();
+
+        let keys = [
+            TrackKey {
+                path: PathBuf::from(image),
+                sub: 2,
+            },
+            TrackKey {
+                path: PathBuf::from(image),
+                sub: 1,
+            },
+            TrackKey::from(PathBuf::from("/m/Album/loose.mp3")),
+        ];
+        let rows: Vec<ExportTrack> = keys
+            .iter()
+            .map(|key| ExportTrack {
+                path: key.to_fragment(),
+                title: "Song".into(),
+                artist: "X".into(),
+                duration_secs: 180,
+            })
+            .collect();
+        let document = xspf::to_xspf(&rows);
+        // The space is percent-encoded, the subsong is not: it is a fragment,
+        // which is exactly what the `#` means in a URI.
+        assert!(
+            document.contains("<location>file:///m/Album/disc%20one.flac#2</location>"),
+            "{document}"
+        );
+
+        let read: Vec<i64> = xspf::parse(&document)
+            .iter()
+            .filter_map(|entry| resolve_m3u_entry(&conn, Path::new("/m/Album"), entry))
+            .collect();
+        let want: Vec<i64> = keys
+            .iter()
+            .map(|key| {
+                store::queue_meta_for_key(&conn, key.path.to_str().unwrap(), key.sub)
+                    .unwrap()
+                    .id
+                    .expect("every fixture key is in the library")
+            })
+            .collect();
+        assert_eq!(read, want, "each location comes back as the row it was");
+        assert_ne!(read[0], read[1]);
+    }
+
     /// A row for a plain file: the fields the fragment round trip reads.
     fn plain_row(path: &str) -> rox_library::TrackRow {
         rox_library::TrackRow {

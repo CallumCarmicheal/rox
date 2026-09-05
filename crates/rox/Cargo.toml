@@ -58,6 +58,10 @@ rox-net = { path = "../rox-net" }
 # windows. Re-exported at crate::panel, crate::panel_settings,
 # crate::signal_ui and the rest of the old paths.
 rox-panel-api = { path = "../rox-panel-api" }
+# libprojectM behind a worker thread (ADR 28). The Milkdrop panel drives its
+# own engine out of rox-panels; the binary drives one more for the app-wide
+# backdrop, in crate::backdrop_visual.
+rox-milkdrop = { path = "../rox-milkdrop" }
 # The shared widget layer, re-exported through crate::panel and
 # crate::settings::ui so the panels' paths into it read the way they always
 # have.

@@ -32,7 +32,8 @@ pub mod edit;
 
 pub use chain::{
     fallback_cover, parse_chain, register_program, resolve_assets, uses_cover, uses_mask,
-    validate_program, AssetImage, AssetRef, ChainSpec, PassSpec, ProgramCtx, COVER_SOURCE,
+    validate_frame_pass, validate_program, AssetImage, AssetRef, ChainSpec, PassSpec, ProgramCtx,
+    COVER_SOURCE,
 };
 pub use cursor::{cursor_presence, reads_cursor, watch_cursor, CURSOR_FADE, CURSOR_HOLD};
 
@@ -1535,6 +1536,17 @@ fn body_rect(bounds: Bounds<Pixels>, inset: Sides) -> Bounds<Pixels> {
         origin: bounds.origin + gpui::point(left, top),
         size: gpui::size(width - left - right, height - top - bottom),
     }
+}
+
+/// The player behind a window, off the same registry [`note_window`] fills.
+///
+/// Public because the app's backdrop layers paint from a hook that gets a
+/// window and nothing else: no `AppState`, no view, no way to reach a
+/// player except by asking which one this window was registered with. None
+/// for a window that opened before its workspace registered, and for one
+/// whose workspace has since gone away.
+pub fn window_player(window: &Window, cx: &App) -> Option<gpui::Entity<Player>> {
+    window_feed(window, cx).map(|(_, player)| player)
 }
 
 fn window_feed(window: &Window, cx: &App) -> Option<(Arc<SignalHub>, gpui::Entity<Player>)> {

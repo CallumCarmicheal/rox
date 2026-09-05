@@ -564,8 +564,10 @@ impl MenuPanel {
             MenuAction::ToggleArtTheming => palette::art_theming(),
             _ => false,
         };
-        let is_playing = self.state.player.read(cx).is_playing();
-        let (label, item_icon) = menu_item_display(item, is_playing);
+        let player = self.state.player.read(cx);
+        let (is_playing, ab) = (player.is_playing(), player.ab_state());
+        let sleep = player.sleep_remaining().map(|left| left.as_secs());
+        let (label, item_icon) = menu_item_display(item, is_playing, ab, sleep);
         row()
             .on_mouse_down(
                 MouseButton::Left,

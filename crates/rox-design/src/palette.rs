@@ -1620,6 +1620,20 @@ pub fn window_tint(player: EntityId) -> Tint {
     }
 }
 
+/// The cover seed a player is carrying right now, None while nothing
+/// plays or the cover had no color worth taking.
+///
+/// For surfaces that color themselves off the art directly instead of
+/// through the derived palette: the seed is kept whatever the song-theming
+/// switch says, so what they read follows the cover in both theme modes.
+pub fn seed(player: EntityId) -> Option<Seed> {
+    TINTS
+        .read()
+        .unwrap()
+        .get(&player)
+        .and_then(|tint| tint.seed)
+}
+
 /// Push a window tint for the duration of `f`, matching [`scoped`]. The
 /// accessors' base fallback reads from it while it's active, and a
 /// panel scope still layers on top. The pop happens in a drop guard so an

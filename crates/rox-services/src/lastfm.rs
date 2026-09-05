@@ -3,7 +3,11 @@
 //! player's pump ticks, accumulates how much of the playing track has
 //! actually sounded (seeks don't count), sends the now-playing update
 //! when a track starts, and scrobbles once the listened time crosses the
-//! configured threshold of the duration. All HTTP runs blocking on the
+//! configured threshold of the duration. That threshold is one knob for
+//! every scrobble destination: the crossing goes out as [`Crossed`], and
+//! the ListenBrainz and Libre.fm publishers send on it the same as the
+//! Last.fm submission here does. History keeps to [`Listened`], the fixed
+//! listen rule, which the knob never moves. All HTTP runs blocking on the
 //! background executor, like the decoders and the database do their
 //! work; failures log and never touch playback. The API key and secret
 //! come from the build's own identity ([`keys`]), with the settings
@@ -35,7 +39,7 @@ use gpui::{Context, Entity, EventEmitter, SharedString, Subscription};
 use rox_library::cue::TrackKey;
 use rox_library::store::TrackMeta;
 
-use rox_core::settings::{Lastfm, LastfmSession, Settings};
+use rox_core::settings::{clamp_threshold, Lastfm, LastfmSession, Settings};
 
 use crate::catalog::{Library, LibraryEvent};
 use crate::player::Player;
@@ -77,6 +81,57 @@ pub struct Listened {
     pub genre: String,
     /// When the play began, unix seconds.
     pub started: u64,
+    /// How long the track runs, where the watch knew: a stream that never
+    /// reported a duration has none. ListenBrainz wants it on the
+    /// submission, and it's already in hand here.
+    pub duration_secs: Option<f64>,
+}
+
+/// A play crossed the scrobble threshold, the user's knob: the one signal
+/// every scrobble destination sends on, so they all count a play at the
+/// same moment and the marker the panels draw is true for each of them.
+/// Fires whether or not any account is connected, but never while the
+/// shared switch is off; past that, what rides it decides for itself.
+/// History doesn't ride this. It keeps to [`Listened`].
+pub struct Crossed {
+    pub key: TrackKey,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    /// When the play began, unix seconds: the scrobble's timestamp.
+    pub started: u64,
+    pub duration_secs: Option<f64>,
+}
+
+/// A new track is under watch: the tags the scrobbler resolved for it,
+/// before any threshold or account gate. It says a play started, not that
+/// one counted, so playing-now signals ride this while [`Listened`] stays
+/// the "real listen" line. Only tracks the library holds tags for are
+/// announced; there's nothing to send about the rest.
+pub struct Started {
+    pub key: TrackKey,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration_secs: Option<f64>,
+}
+
+/// The start signal for a watch that just began, or None for a file the
+/// library holds no tags for. Its own function so the "tags or nothing"
+/// rule is testable without a headless app and a database behind it.
+fn started_event(
+    key: &TrackKey,
+    meta: Option<&TrackMeta>,
+    duration: Option<f64>,
+) -> Option<Started> {
+    let meta = meta?;
+    Some(Started {
+        key: key.clone(),
+        title: meta.title.clone(),
+        artist: meta.artist.clone(),
+        album: meta.album.clone(),
+        duration_secs: duration,
+    })
 }
 
 /// The wall clock as unix seconds, the scrobble timestamp's unit.
@@ -122,6 +177,10 @@ struct Watch {
     /// The listen signal fired for this watch; set on the listen-rule
     /// crossing whether or not scrobbling is armed.
     listened: bool,
+    /// The threshold signal fired for this watch, armed or not, the same
+    /// way.
+    crossed: bool,
+    /// The Last.fm scrobble itself went out.
     scrobbled: bool,
     /// Where the scrobble rule crossed, 0 to 1: stamped once so the
     /// marker stays put after the fact instead of trailing later seeks.
@@ -216,12 +275,17 @@ struct LoveSend {
 }
 
 /// The scrobbler entity, one per workspace beside its player. Holds the
-/// live Last.fm config (the settings window edits it here and persists
-/// through it), so the panels' threshold markers and the scrobble math
-/// never read the settings file per frame.
+/// live Last.fm config and the shared threshold (the settings window
+/// edits both here and persists through it), so the panels' threshold
+/// markers and the scrobble math never read the settings file per frame.
 pub struct Scrobbler {
     library: Entity<Library>,
     config: Lastfm,
+    /// The scrobble switch, one for every destination: off, and neither
+    /// this account nor the others hear about a play.
+    scrobbling: bool,
+    /// The scrobble threshold, 0.1 to 1, the knob every destination reads.
+    threshold: f32,
     phase: AuthPhase,
     watch: Option<Watch>,
     /// The favourite track ids as the mirror last saw them, the diff's
@@ -240,6 +304,8 @@ pub struct Scrobbler {
 }
 
 impl EventEmitter<Listened> for Scrobbler {}
+impl EventEmitter<Started> for Scrobbler {}
+impl EventEmitter<Crossed> for Scrobbler {}
 
 impl Scrobbler {
     pub fn new(player: &Entity<Player>, library: &Entity<Library>, cx: &mut Context<Self>) -> Self {
@@ -264,9 +330,12 @@ impl Scrobbler {
                 _ => {}
             },
         );
+        let settings = Settings::load();
         Scrobbler {
             library: library.clone(),
-            config: Settings::load().accounts.lastfm,
+            config: settings.accounts.lastfm,
+            scrobbling: settings.scrobbling,
+            threshold: settings.scrobble_threshold,
             phase: AuthPhase::Idle,
             watch: None,
             favourites: None,
@@ -287,6 +356,17 @@ impl Scrobbler {
         &self.phase
     }
 
+    /// The shared scrobble switch, the settings toggle's value.
+    pub fn scrobbling(&self) -> bool {
+        self.scrobbling
+    }
+
+    /// The shared scrobble threshold, 0.1 to 1: the settings slider's
+    /// value and the line the marker draws.
+    pub fn threshold(&self) -> f32 {
+        self.threshold
+    }
+
     /// How many hearts are still waiting on the network, for the settings
     /// page's readout.
     pub fn loves_pending(&self) -> usize {
@@ -299,18 +379,17 @@ impl Scrobbler {
         self.love_error.clone()
     }
 
-    /// Where the threshold marker goes, 0 to 1, or None while scrobbling
-    /// couldn't happen anyway, so the panels never draw a line that lies.
-    /// Only audio that actually sounds counts toward the threshold, so
-    /// the line follows the watch: seeks shift where the crossing falls.
+    /// Where the threshold marker goes, 0 to 1, or None once the play has
+    /// seeked past any chance of crossing. Only audio that actually sounds
+    /// counts toward the threshold, so the line follows the watch: seeks
+    /// shift where the crossing falls. Whether a line should show at all
+    /// is the caller's question, since it depends on every destination
+    /// and this entity only knows its own: the panels ask through
+    /// `AppState::scrobble_marker`.
     pub fn marker(&self) -> Option<f32> {
-        if !self.armed() {
-            return None;
-        }
-        let threshold = self.config.threshold;
         match &self.watch {
-            Some(watch) => watch.marker(threshold),
-            None => Some(threshold),
+            Some(watch) => watch.marker(self.threshold),
+            None => Some(self.threshold),
         }
     }
 
@@ -365,8 +444,8 @@ impl Scrobbler {
 
     /// Whether a played track would actually scrobble: the switch is on
     /// and the account is connected.
-    fn armed(&self) -> bool {
-        self.config.scrobbling && self.connected()
+    pub fn armed(&self) -> bool {
+        self.scrobbling && self.connected()
     }
 
     /// Whether a heart would actually be sent to Last.fm. Its own switch beside
@@ -378,7 +457,13 @@ impl Scrobbler {
 
     fn persist(&self) {
         let lastfm = self.config.clone();
-        Settings::update(move |s| s.accounts.lastfm = lastfm);
+        let scrobbling = self.scrobbling;
+        let threshold = self.threshold;
+        Settings::update(move |s| {
+            s.accounts.lastfm = lastfm;
+            s.scrobbling = scrobbling;
+            s.scrobble_threshold = threshold;
+        });
     }
 
     /// Persist once the edit burst settles, the store-then-settle shape the
@@ -413,7 +498,7 @@ impl Scrobbler {
     }
 
     pub fn set_scrobbling(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.config.scrobbling = on;
+        self.scrobbling = on;
         self.persist();
         cx.notify();
     }
@@ -436,9 +521,8 @@ impl Scrobbler {
     }
 
     pub fn set_threshold(&mut self, threshold: f32, cx: &mut Context<Self>) {
-        // The same band the settings loader enforces; the slider's low end
-        // stops short of a threshold that scrobbles on the first note.
-        self.config.threshold = threshold.clamp(0.1, 1.0);
+        // The same band the settings loader enforces.
+        self.threshold = clamp_threshold(threshold);
         // Settled, not straight through: this happens during a slider scrub, the one
         // scrobbler write that can fire per mouse move.
         self.persist_soon(cx);
@@ -797,8 +881,9 @@ impl Scrobbler {
         }
 
         // Evaluate both rules once against the current watch: the fixed
-        // listen rule drives history, the user's threshold drives the
-        // scrobble. They accrue off the same clock but cross apart.
+        // listen rule drives history, the user's threshold drives every
+        // scrobble destination. They accrue off the same clock but cross
+        // apart.
         let listens = self.watch.as_ref().is_some_and(Self::qualifies_listen);
         let scrobbles = self
             .watch
@@ -807,6 +892,7 @@ impl Scrobbler {
 
         // The listen signal fires on the listen-rule crossing no matter
         // where scrobbling stands: history records every real listen.
+        let scrobbling = self.scrobbling;
         if let Some(watch) = self.watch.as_mut() {
             if listens && !watch.listened {
                 watch.listened = true;
@@ -834,6 +920,7 @@ impl Scrobbler {
                         .map(|m| m.genre.clone())
                         .unwrap_or_default(),
                     started: watch.started,
+                    duration_secs: watch.duration,
                 });
             }
             // Pin the marker at the crossing, armed or not: where the
@@ -843,6 +930,27 @@ impl Scrobbler {
                     .duration
                     .filter(|d| *d > 0.0)
                     .map(|d| (watch.last_pos / d).clamp(0.0, 1.0) as f32);
+            }
+            // And announce it the same way, so the other destinations count
+            // the play at this moment whatever the Last.fm account is doing.
+            // Not while the switch is off, though: that's the one gate
+            // every destination shares, and it's kept here so none of
+            // them has to ask.
+            if scrobbles && !watch.crossed {
+                watch.crossed = true;
+                if scrobbling {
+                    let tag = |pick: fn(&TrackMeta) -> &String| {
+                        watch.meta.as_ref().map(pick).cloned().unwrap_or_default()
+                    };
+                    cx.emit(Crossed {
+                        key: watch.key.clone(),
+                        title: tag(|m| &m.title),
+                        artist: tag(|m| &m.artist),
+                        album: tag(|m| &m.album),
+                        started: watch.started,
+                        duration_secs: watch.duration,
+                    });
+                }
             }
         }
 
@@ -885,7 +993,7 @@ impl Scrobbler {
         watch
             .duration
             .filter(|d| *d > MIN_TRACK_SECS)
-            .is_some_and(|d| watch.played >= d * self.config.threshold as f64)
+            .is_some_and(|d| watch.played >= d * self.threshold as f64)
     }
 
     /// Point the watch at a track that just came up. The listened clock
@@ -903,6 +1011,19 @@ impl Scrobbler {
             Some((id, meta)) => (Some(id), Some(meta)),
             None => (None, None),
         };
+        // The start signal goes out here rather than at the caller, so a
+        // track that loops back to the top announces itself as a fresh
+        // play the same way a track change does. Before any account gate:
+        // what rides this decides for itself whether it has an account to
+        // send to. Only the shared switch stands ahead of it, since off
+        // means no destination should hear a thing. A file the library
+        // holds no tags for says nothing, since there'd be no artist or
+        // title to send.
+        if self.scrobbling {
+            if let Some(event) = started_event(&key, meta.as_ref(), duration) {
+                cx.emit(event);
+            }
+        }
         self.watch = Some(Watch {
             key,
             id,
@@ -915,6 +1036,7 @@ impl Scrobbler {
             last_pos: position,
             now_playing_sent: false,
             listened: false,
+            crossed: false,
             scrobbled: false,
             scrobble_at: None,
         });
@@ -993,6 +1115,7 @@ mod tests {
             last_pos: pos,
             now_playing_sent: false,
             listened: false,
+            crossed: false,
             scrobbled: false,
             scrobble_at: None,
         }
@@ -1092,5 +1215,32 @@ mod tests {
             queue.is_empty(),
             "and the push is dropped, not retried forever"
         );
+    }
+
+    #[test]
+    fn a_watch_only_announces_a_start_when_it_has_tags() {
+        let key = TrackKey::from(std::path::PathBuf::from("/music/track.flac"));
+        let meta = TrackMeta {
+            title: "Roygbiv".into(),
+            artist: "Boards of Canada".into(),
+            album: "Music Has the Right to Children".into(),
+            track_no: 8,
+            album_artist: "Boards of Canada".into(),
+            year: 1998,
+            genre: "Electronic".into(),
+            duration_ms: 151_000,
+            codec: "flac".into(),
+            bitrate_kbps: 900,
+            sample_rate_hz: 44_100,
+            bit_depth: 16,
+            rating: 0,
+        };
+        let event = started_event(&key, Some(&meta), Some(151.0)).expect("tags in hand");
+        assert_eq!(event.artist, "Boards of Canada");
+        assert_eq!(event.title, "Roygbiv");
+        assert_eq!(event.duration_secs, Some(151.0));
+        // A file the library doesn't hold has no artist or title to send,
+        // so nothing goes out about it.
+        assert!(started_event(&key, None, Some(151.0)).is_none());
     }
 }

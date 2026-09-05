@@ -7,8 +7,11 @@ contract from
 [components](../02-architecture/02-components.md#visualizer-subsystem) concrete, within
 the call made in [ADR 8](../02-architecture/decisions/08-adr-visualizer-rendering.md)
 (spectrum and waveform draw with gpui primitives; the generative visual waits on a real
-GPU shader). Version-sensitive: the tap ring is rtrb, the FFT is hand-rolled, the paint
-path is gpui's `canvas()`.
+GPU shader), plus the one panel that takes the other side of that trade: Milkdrop, under
+[ADR 28](../02-architecture/decisions/28-adr-milkdrop.md). Version-sensitive: the tap
+ring is rtrb, the FFT is hand-rolled, the paint path is gpui's `canvas()`, and the
+Milkdrop engine is libprojectM pinned to master commit `88f23c76` (CMake version 4.2.0;
+the pin lives in `scripts/vendor-projectm.sh` and `flake.nix`, bumped together).
 
 ## From the tap to the feed
 
@@ -162,6 +165,129 @@ The panel's load is one background task: `peaks::load` first, and on a miss
 decode never touches the UI thread. A generation counter drops a result that arrives after
 the track already changed.
 
+## Milkdrop panel
+
+A MilkDrop preset is a program, not a shader: a per-frame equation block, a warp mesh,
+custom waves and shapes, and hand-written GLSL for the composite. Twenty years of them
+exist and nothing but libprojectM runs them, so rox links libprojectM in and gives it
+the three things it asks for: a current OpenGL context, a framebuffer, and audio. None
+of rox's renderers (blade on Vulkan and Metal, Direct3D 11 on Windows) will let a
+second renderer into their swapchain, which is why the engine lives on a thread with a
+context of its own and the frame comes back over the CPU. That readback is the cost
+ADR 8 refused for the generative visual and ADR 28 takes here on purpose, because the
+alternative is porting MilkDrop to WGSL.
+
+```
+ rox-milkdrop worker (own GL context)            UI thread (MilkdropPanel canvas)
+ ────────────────────────────────────            ───────────────────────────────
+ drain commands
+ feed.since(cursor) ──▶ projectm_pcm_add_float
+ projectm_opengl_render_frame_fbo(fbo)
+ glReadPixels ──▶ PBO[n]      (async)
+ map PBO[n-1], flip rows ──▶ Frame { seq }  ──slot──▶ frame_after(last_seq)
+ sleep to the next 1/fps deadline                     update_user_texture(id, rgba8)
+                                                      paint_screen_shader(one-pass chain)
+```
+
+Three crates split the work. `rox-milkdrop-sys` is the C API: `build.rs` runs cmake on
+the vendored projectM source and links the static library and the C++ runtime, and
+`src/lib.rs` is hand-written `extern "C"` declarations checked against the headers, no
+bindgen. `rox-milkdrop` is the engine, DSP-adjacent like `rox-viz` and drawing nothing.
+The panel sits in `rox-panels` beside every other panel.
+
+**The worker.** `Engine::spawn` starts one thread named `rox-milkdrop` and returns at
+once, since a cold driver can take a second to hand over a context. The thread makes a
+windowless context (`context.rs`: EGL surfaceless on Linux through glutin, CGL on macOS,
+WGL on Windows behind a 1x1 window nobody shows, a 1x1 pbuffer where surfaceless is
+refused), creates the projectM instance with a load proc that resolves GL through
+glutin, and loops on a wall-clock deadline at `1/fps`. A slow frame is absorbed rather
+than drifting the schedule. Each iteration drains the command channel, pulls what
+arrived on the `AudioFeed` since its cursor (`AudioFeed::since`, the one addition this
+made to `rox-viz`; a slow reader gets a gap, never a repeat), pushes it as stereo PCM
+in chunks capped at `projectm_pcm_get_max_samples`, and renders into an FBO. The
+readback runs through two pixel buffer objects: frame N's `glReadPixels` starts into one
+while frame N-1 is mapped out of the other, one frame of latency spent on not stalling
+the pipeline. The mapped rows are flipped top-first into a publish buffer and swapped
+into the shared slot with a sequence number. Failure at any step is a
+`Status::Failed(message)` the panel shows as body text, never a panic: a machine with
+no usable GL keeps every other panel working.
+
+The GL the crate calls for itself (framebuffer, texture storage, the PBOs, `glGetString`
+for the log) is sixteen `extern "system"` pointers in `gl.rs`, resolved by name off the
+same load proc. No `gl` or `glow` crate for sixteen functions.
+
+Preset switches are the one reentrant path: projectM's callbacks fire from inside its
+own render call, so they only record what happened and the actual load runs on the
+next loop iteration. The switch-requested callback picks the next preset from the
+library's rotation (random unless locked), the failed callback queues an
+`Event::PresetFailed` the panel drains each frame.
+
+**Frames are shared, not copied.** `frame_after` used to clone the buffer out of the
+slot, and the texture upload copied it again; at a 776x1049 panel that measured 2.6 ms
+of UI thread per frame, almost all of it two three-megabyte allocations faulting in a
+page at a time. The pixels now live behind an `Arc`, the panel hands the same handle to
+the upload, and the worker takes the buffer back once the last handle drops, so the
+steady state allocates nothing on either side.
+
+**The panel.** `MilkdropPanel` (`crates/rox-panels/src/milkdrop.rs`) spawns the engine
+lazily on the first paint with a real size and pushes its config down as commands
+(duration, beat sensitivity, hard cuts, lock, rotation, the saved preset) so a restored
+layout comes up as it was left. The paint closure runs in order:
+
+1. Work out the render size: the panel's device pixels times the config's `scale`,
+   each side clamped to 128..=4096. A new size is only acted on when it's seen for a
+   second consecutive frame (one `request_animation_frame` of debounce), so a drag
+   doesn't thrash the FBO. When it commits: release the old dynamic texture, register a
+   new one at the new size, send `Command::Resize`, drop the chain so it re-registers.
+2. `engine.frame_after(last_seq)`: a newer frame at the texture's size goes up through
+   `update_user_texture`; one from before a resize is dropped, its seq still advancing so
+   it's dropped once.
+3. Register the one-pass chain if missing: `register_user_shader_chain` with `FRAME_WGSL`
+   as `main` and the texture bound as the asset `frame`. A chain with an asset can only
+   run as a screen pass, so it's painted with `paint_screen_shader` keyed by the panel's
+   entity id, the same branch the shader panel's feedback buffer takes. Fade, hue turn,
+   tint, the grade and the flips ride the signal slots into the pass.
+4. `request_animation_frame` while animating: a docked panel renders cached, and the
+   recorded pass replays with stale values unless the view is dirtied every frame.
+
+Texture and chain are keyed by the window that issued them, because a compiled
+pipeline and an uploaded texture both belong to one window's renderer. Popping the
+panel out registers a fresh pair in the new window; the pair left behind dies with the
+old window, the same life a registered image has there.
+
+Why a dynamic texture and a chain rather than `img()` with a fresh `RenderImage` per
+frame: that path runs through the sprite atlas and wants an allocation and a `drop_image`
+every frame for what is really a video stream. The chain path also means a Milkdrop
+frame composes like any other shader surface, so the panel takes a surface shader over
+the top. The three window calls it relies on (`register_dynamic_texture`,
+`update_user_texture`, `release_user_texture`) are the `z4-dynamic-user-textures.patch`
+addition to the vendored gpui, on both the blade and DirectX backends.
+
+**Parking.** A paused track is still the track, so the panel sends `Command::Pause` and
+keeps the last frame up: the worker stops rendering and reading back, and every UI frame
+after that samples a texture that's already there. A stopped queue fades to black first
+and parks at the bottom of the fade, since a parked worker publishes nothing and pausing
+on the stop event would freeze the picture the fade is taking away. Play, or focus on
+the panel, sends `Resume`.
+
+**Presets on disk.** `settings::milkdrop_dir()` is `data_dir()/milkdrop`, with
+`presets/` and `textures/` under it, plus any extra roots from the config. Nothing
+creates it; the packs are the user's download, and the settings page names the three
+worth having. `PresetLibrary::scan` walks the roots for `*.milk` case-insensitively and
+sorts them, reading nothing inside the files: only libprojectM's parser can tell a
+broken preset from a working one, and that answer arrives as `PresetFailed`. The
+directory layout is the one structure it keeps, since the packs organise themselves by
+category folder, and a `Rotation` narrows what Next, Previous and the timed switch walk
+to one folder or to the favourites list. With no presets found projectM's built-in idle
+preset renders, so the panel is never blank.
+
+**What it costs.** `cargo run -p rox-milkdrop --release --example headless -- <presets>`
+runs the engine for ten seconds with no UI and prints the baseline the zero-copy
+follow-up is judged against. At 1920x1080 and 60 fps over the Cream of the Crop pack
+on a desktop GPU: 600 frames delivered in 10.0 s, average readback (map and flip) of
+1.7 ms per frame. The cmake build of libprojectM inside `cargo build` is about 18 s
+cold on a 32-thread machine and cached after that.
+
 ## Reference
 
 The shared analysis is in `crates/rox-viz`: `feed.rs` (`AudioFeed`, the tap-to-view
@@ -171,3 +297,12 @@ seam), `analysis.rs` (`Analyzer`, the Hann-windowed FFT and `log_bands`), `lib.r
 (`WaveformPanel`, the peaks load and the morphing strip), `peaks.rs` (the cache format),
 `player.rs` (`drain_tap`, `prime_feed`). The tap producer and the offline decoders
 (`decode_peaks`, `decode_window`) are in `crates/rox-playback`: `output.rs`, `engine.rs`.
+Milkdrop is three crates: `crates/rox-milkdrop-sys` (`build.rs` runs cmake on
+`vendor/projectm`, `src/lib.rs` is the FFI surface), `crates/rox-milkdrop` (`lib.rs` for
+`Engine`, `Frame`, `Command`, `Status`; `worker.rs` the render thread; `context.rs` the
+headless GL context per platform; `gl.rs` the sixteen raw GL calls; `library.rs`
+`PresetLibrary` and `Rotation`; `examples/headless.rs` the cost baseline), and
+`crates/rox-panels/src/milkdrop.rs` (`MilkdropPanel`, `MilkdropConfig`, `FRAME_WGSL`, the
+paint closure and the settings pages). `AudioFeed::since` in `crates/rox-viz/src/feed.rs`
+is the worker's audio pull, and `patches/gpui/z4-dynamic-user-textures.patch` carries
+the three window calls the panel draws through.

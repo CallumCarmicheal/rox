@@ -23,6 +23,7 @@ pub mod history;
 pub mod library;
 pub mod lyrics;
 pub mod metadata;
+pub mod milkdrop;
 pub mod oscilloscope;
 pub mod output;
 pub mod particles;

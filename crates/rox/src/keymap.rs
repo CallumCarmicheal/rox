@@ -32,14 +32,14 @@ use rox_panel_api::actions::{
 use rox_panels::lyrics::StampLine;
 
 use crate::workspace::{
-    AnalyzeTempo, BuildAcoustic, ClosePanelAction, CloseWindow, CycleLoop, DecreaseFontSize,
-    FillSortNames, FindDuplicates, FocusSearch, ImportWorkspace, IncreaseFontSize,
-    MeasureReplayGain, NewEmptyWindow, NewWindow, NextTrack, OpenAbout, OpenConsole, OpenEqualizer,
-    OpenHealth, OpenPowerSearch, OpenQuickPlay, OpenSettings, OpenSignals, OpenStats, OpenTasks,
-    OpenWelcome, PlayRandom, PreviousTrack, Quit, RescanLibrary, ResetFontSize, RomanizeLibrary,
-    StopPlayback, TagGenres, ToggleArtTheming, ToggleDecorations, ToggleDesignMode, ToggleMenubar,
-    ToggleMute, TogglePostShader, ToggleQuitToTray, ToggleResizeLock, ToggleShuffle,
-    ToggleStopAfter, ToggleTheme, VolumeDown, VolumeUp,
+    AbRepeat, AnalyzeTempo, BuildAcoustic, ClosePanelAction, CloseWindow, CycleLoop,
+    DecreaseFontSize, FillSortNames, FindDuplicates, FocusSearch, ImportWorkspace,
+    IncreaseFontSize, MeasureReplayGain, NewEmptyWindow, NewWindow, NextTrack, OpenAbout,
+    OpenConsole, OpenEqualizer, OpenHealth, OpenPowerSearch, OpenQuickPlay, OpenSettings,
+    OpenSignals, OpenStats, OpenTasks, OpenWelcome, PlayRandom, PreviousTrack, Quit, RescanLibrary,
+    ResetFontSize, RomanizeLibrary, StopPlayback, TagGenres, ToggleArtTheming, ToggleDecorations,
+    ToggleDesignMode, ToggleMenubar, ToggleMute, TogglePostShader, ToggleQuitToTray,
+    ToggleResizeLock, ToggleShuffle, ToggleStopAfter, ToggleTheme, VolumeDown, VolumeUp,
 };
 
 /// Bindings match key contexts along the focus path, so this scope holds
@@ -234,6 +234,7 @@ mod defaults {
     pub const NEXT_TRACK: &[&str] = &["cmd-right"];
     pub const PREVIOUS_TRACK: &[&str] = &["cmd-left"];
     pub const STOP: &[&str] = &["cmd-."];
+    pub const AB_REPEAT: &[&str] = &["l", "cmd-shift-l"];
     pub const PLAY_RANDOM: &[&str] = &["cmd-r"];
     pub const MUTE: &[&str] = &["cmd-shift-m"];
     pub const DESIGN_MODE: &[&str] = &["cmd-shift-d"];
@@ -261,6 +262,7 @@ mod defaults {
     pub const NEXT_TRACK: &[&str] = &["ctrl-right"];
     pub const PREVIOUS_TRACK: &[&str] = &["ctrl-left"];
     pub const STOP: &[&str] = &["ctrl-."];
+    pub const AB_REPEAT: &[&str] = &["l", "ctrl-shift-l"];
     pub const PLAY_RANDOM: &[&str] = &["ctrl-r"];
     pub const MUTE: &[&str] = &["ctrl-shift-m"];
     pub const DESIGN_MODE: &[&str] = &["ctrl-shift-d"];
@@ -313,6 +315,19 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             defaults::STOP,
             StopPlayback,
             rox_i18n::t_static("keymap-stop-playback.description")
+        ),
+        // Bare l is mpv's ab-loop key, and the same three-press cycle, so
+        // the muscle memory carries over. It sits on the playback scope
+        // like space: out of the search box, widened when rebound onto a
+        // modified chord.
+        command!(
+            "ab_repeat",
+            rox_i18n::t_static("keymap-ab-repeat"),
+            Group::Playback,
+            PLAYBACK,
+            defaults::AB_REPEAT,
+            AbRepeat,
+            rox_i18n::t_static("keymap-ab-repeat.description")
         ),
         command!(
             "next_track",

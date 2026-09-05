@@ -25,7 +25,7 @@ use crate::panel::{
     self, align_row, justify, Align, AppState, PanelChrome, PanelSettings, ScrubState,
 };
 use crate::panel_settings;
-use crate::player::observe_view;
+use crate::player::{fmt_time, observe_view, AbState};
 use crate::rating_ui;
 use crate::settings::ShuffleMode;
 use crate::source::TrackSource;
@@ -69,6 +69,9 @@ pub enum PlaybackItem {
     /// The stop-after-current toggle: armed, the playing track ends the
     /// motion and the next one cues up paused.
     StopAfter,
+    /// The A-B button: mark the start of a section, mark its end, and the
+    /// player repeats what's between them until a third press clears it.
+    AbRepeat,
     /// The heart over the playing track, the same toggle the favourite
     /// panel and the library's heart column run.
     Favourite,
@@ -159,6 +162,12 @@ const ITEMS: &[panel::ArrangeSpec<PlaybackItem>] = &[
         key: "playback-item-stop-after",
         icon: Some(icons::SQUARE_DASHED),
         value: PlaybackItem::StopAfter,
+        repeats: false,
+    },
+    panel::ArrangeSpec {
+        key: "playback-item-ab-repeat",
+        icon: Some(icons::MOVE_HORIZONTAL),
+        value: PlaybackItem::AbRepeat,
         repeats: false,
     },
     panel::ArrangeSpec {
@@ -369,6 +378,10 @@ pub struct TransportPanel {
     /// the sweep. The gated observer goes quiet the moment the fade ends,
     /// so the render drives these frames itself.
     outro: Option<(Instant, bool)>,
+    /// When the A-B cycle took its first mark, while it waits for the
+    /// second. The button pulses through that wait, and nothing else
+    /// wakes the panel for it, so the render drives those frames too.
+    ab_waiting: Option<Instant>,
     /// Bumped on every press of a mode button, so a stale hold check can
     /// tell it belongs to a press that is already over.
     press_seq: u64,
@@ -494,6 +507,14 @@ const VOLUME_POP_W: Pixels = px(120.);
 /// may never be seen.
 const OUTRO_FROM: f32 = 0.85;
 
+/// One breath of the A-B button's waiting dot, bright to dim and back.
+const AB_PULSE_SECS: f32 = 1.6;
+/// How dim the dot gets at the bottom of a breath: never out, since a dot
+/// that vanishes reads as the mark being dropped.
+const AB_PULSE_FLOOR: f32 = 0.35;
+/// The waiting dot's diameter.
+const AB_DOT: Pixels = px(5.);
+
 /// The layer an open flyout hangs over: window-sized, so every press that
 /// isn't on the flyout itself hits it and closes it. Sized off the window
 /// rather than `size_full`, which would only span this panel; the transport
@@ -535,6 +556,7 @@ impl TransportPanel {
             items_stash: None,
             last_fade: None,
             outro: None,
+            ab_waiting: None,
             press: None,
             mode_menu: None,
             volume_at: None,
@@ -571,6 +593,10 @@ impl TransportPanel {
             (
                 rox_i18n::t!("playback-menu-stop-after"),
                 PlaybackItem::StopAfter,
+            ),
+            (
+                rox_i18n::t!("playback-menu-ab-repeat"),
+                PlaybackItem::AbRepeat,
             ),
             (
                 rox_i18n::t!("playback-menu-favourite"),
@@ -1253,7 +1279,7 @@ impl Render for TransportPanel {
         // The afterglow runs after the fade the observer was watching is
         // gone, so nothing else wakes this panel; it asks for its own
         // frames until the glow reaches zero.
-        if self.outro.is_some() {
+        if self.outro.is_some() || self.ab_waiting.is_some() {
             window.request_animation_frame();
         }
         body
@@ -1356,6 +1382,39 @@ impl TransportPanel {
             rox_i18n::t!("playback-stop-after-armed")
         } else {
             rox_i18n::t!("playback-stop-after-tip")
+        };
+        // A-B runs the same dim-to-lit ramp with a step in the middle:
+        // nothing marked reads as off, one mark reads as waiting, and a
+        // section repeating takes the accent like any armed control.
+        let ab = player.ab_state();
+        let ab_color = match ab {
+            AbState::Off => palette::text_faint(),
+            AbState::ASet(_) => palette::text(),
+            AbState::Looping(..) => palette::accent(),
+        };
+        // The wait for B is the state a glance has to catch: the first
+        // press changed nothing audible, so without a sign the button looks
+        // like it did nothing. A dot in the corner breathes until the
+        // second mark lands or the cycle is dropped.
+        match ab {
+            AbState::ASet(_) => {
+                if self.ab_waiting.is_none() {
+                    self.ab_waiting = Some(Instant::now());
+                }
+            }
+            _ => self.ab_waiting = None,
+        }
+        let ab_pulse = self.ab_waiting.map(|since| {
+            let phase = since.elapsed().as_secs_f32() * std::f32::consts::TAU / AB_PULSE_SECS;
+            AB_PULSE_FLOOR + (1.0 - AB_PULSE_FLOOR) * (0.5 + 0.5 * phase.cos())
+        });
+        let ab_tip = match ab {
+            AbState::Off => rox_i18n::t!("playback-ab-tip-off").to_string(),
+            AbState::ASet(a) => rox_i18n::t!("playback-ab-tip-a", a = fmt_time(a)).to_string(),
+            AbState::Looping(a, b) => {
+                rox_i18n::t!("playback-ab-tip-looping", a = fmt_time(a), b = fmt_time(b))
+                    .to_string()
+            }
         };
         // A crossfade in flight sweeps across the button that started it,
         // so the overlap the ear is hearing is visible and reads in the
@@ -1585,6 +1644,31 @@ impl TransportPanel {
                     },
                     cx,
                 )
+                .into_any_element(),
+                // One button for the whole cycle: mark, mark, clear. There's
+                // no secondary click on these controls, and a third press
+                // is a shorter way out than a modifier nobody would find.
+                PlaybackItem::AbRepeat => panel::icon_control(
+                    icons::MOVE_HORIZONTAL,
+                    ab_color,
+                    panel::Tip::keyed("ab-repeat", ab_tip.clone()),
+                    |this: &mut Self, cx| this.state.player.update(cx, |p, cx| p.ab_mark(cx)),
+                    cx,
+                )
+                .when_some(ab_pulse, |d, strength| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .top(px(2.))
+                            .right(px(2.))
+                            .size(AB_DOT)
+                            .rounded_full()
+                            .bg(palette::alpha(
+                                palette::accent(),
+                                (0xff as f32 * strength) as u8,
+                            )),
+                    )
+                })
                 .into_any_element(),
                 // The heart over the playing track, the same catalog toggle
                 // the favourite panel and the library's heart column run,

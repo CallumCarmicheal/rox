@@ -1,0 +1,35 @@
+--- a/src/executor.rs
++++ b/src/executor.rs
+@@ -168,8 +168,14 @@
+         label: Option<TaskLabel>,
+     ) -> Task<R> {
+         let dispatcher = self.dispatcher.clone();
+-        let (runnable, task) =
+-            async_task::spawn(future, move |runnable| dispatcher.dispatch(runnable, label));
++        // rox patch: propagate_panic polls the future inside catch_unwind, so a
++        // panicking task no longer unwinds out of Runnable::run and kills the
++        // worker thread for good. See spawn_local_with_source_location for the
++        // same flag on the foreground side.
++        let (runnable, task) = async_task::Builder::new().propagate_panic(true).spawn(
++            |()| future,
++            move |runnable| dispatcher.dispatch(runnable, label),
++        );
+         runnable.schedule();
+         Task(TaskState::Spawned(task))
+     }
+@@ -549,7 +555,14 @@
+         location: Location::caller(),
+     };
+ 
+-    unsafe { async_task::spawn_unchecked(future, schedule) }
++    // rox patch: propagate_panic, matching BackgroundExecutor::spawn_internal. The
++    // Checked wrapper above still supplies the source location, since the builder
++    // only changes how the future is polled.
++    unsafe {
++        async_task::Builder::new()
++            .propagate_panic(true)
++            .spawn_unchecked(|()| future, schedule)
++    }
+ }
+ 
+ /// Scope manages a set of tasks that are enqueued and waited on together. See [`BackgroundExecutor::scoped`].

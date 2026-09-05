@@ -1,0 +1,976 @@
+//! The Milkdrop visual behind the whole app: one engine, every window.
+//!
+//! ADR 10's backdrop is the playing track's art, downscaled and blurred once
+//! per track change and stretched behind the window. This adds a second
+//! layer straight over it: a live MilkDrop frame, composited at a strength
+//! the user sets, while something is playing. Zero strength is the art
+//! alone, so the whole feature folds back to what ADR 10 already does.
+//!
+//! ## One engine
+//!
+//! [`rox_milkdrop::Engine`] renders on a thread of its own into a private GL
+//! context and reads the pixels back, and the readback is the bill: about
+//! 2.5 ms a frame at 1080p on this machine. Nothing about that cost gets
+//! cheaper by paying it twice, so there is exactly one engine for the app,
+//! it renders at one size, and every window uploads the same frame into a
+//! texture of its own. Textures and compiled chains belong to the window
+//! that handed them out, so that part can't be shared and isn't.
+//!
+//! The one size is the per-axis maximum over the windows currently painting
+//! the layer, times the render scale. Each window then draws it cover-fit,
+//! filling its bounds and cropping the overflow rather than letterboxing:
+//! a backdrop with bars down the side isn't a backdrop. Taking the max
+//! rather than, say, the frontmost window's size is what makes cover-fit
+//! never upscale in any of them, since a source at least as wide and at
+//! least as tall as a window covers it at a scale of one or less. A small
+//! child window therefore reads a crop out of the middle of the workspace's
+//! frame, which is the right answer for a defocused wash and the wrong one
+//! for anything you'd look at.
+//!
+//! ## Composite
+//!
+//! The pass writes `vec4(rgb * a, a)` with `a` the strength times the fade.
+//! The region pipeline blends premultiplied-over, so that lands the result
+//! exactly `a` of the way from whatever is already on the screen (the
+//! blurred cover) to the frame. The strength control is the alpha; there's
+//! no mix to invent, and nothing has to guess what the layer under it
+//! painted.
+//!
+//! ## Cost
+//!
+//! This runs the entire time audio is playing, which a panel doesn't. The
+//! defaults are chosen against that: half scale (a quarter of the pixels,
+//! so roughly a quarter of the readback) at 30 fps, which is about an
+//! eighth of what a full-size 60 fps panel costs. It parks the worker at
+//! the bottom of the fade, so a stopped player costs one atomic load per
+//! window per frame and nothing else.
+//!
+//! ADR 28 is the decision the engine sits under; the layering here is
+//! ADR 10's.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+
+use gpui::{
+    canvas, div, prelude::*, px, AnyElement, App, Entity, UserShaderChain, UserShaderId,
+    UserShaderPass, UserTextureId, Window,
+};
+
+use rox_core::settings::{self, BackdropVisualConfig, MilkdropColor, Settings};
+use rox_design::palette::{self, Mode};
+use rox_milkdrop::library::Shuffle;
+use rox_milkdrop::{Command, Engine, EngineOptions, Event, PresetLibrary, Rotation, Status};
+use rox_panel_api::panel::shader as surface;
+use rox_panel_kit::fade::{self, Fade};
+use rox_panel_kit::grade::{self, Grade, GradeMode};
+use rox_panel_kit::PickRow;
+use rox_services::player::Player;
+
+/// The smallest and largest render each side gets. The floor keeps a window
+/// dragged down to a sliver from asking projectM for a 4x1 framebuffer; the
+/// ceiling keeps a maximised window on a 5K display from turning the
+/// readback into a 30 MB memcpy per frame.
+const MIN_SIDE: u32 = 128;
+const MAX_SIDE: u32 = 4096;
+
+/// How long the visual takes to come up when playback starts and to go away
+/// when it stops. Fixed rather than exposed: the panel offers a fade slider
+/// because the panel is the thing you're looking at, and a backdrop that
+/// takes its own sweet time reads as a bug.
+const FADE: Duration = Duration::from_millis(700);
+
+/// How long a window's stated size counts after its last paint. A window
+/// that stopped drawing the layer, because it was gated off or hidden,
+/// stops reporting, and its size must stop inflating the render the other
+/// windows share.
+const WINDOW_STALE: Duration = Duration::from_secs(1);
+
+/// Keys the region's scratch texture. Everywhere else in rox that's a view's
+/// entity id; this layer has no view, so it takes a value the entity
+/// counter will never reach. The only requirement is that no two live
+/// regions in one window share it.
+const INSTANCE: u64 = u64::MAX;
+
+/// The one pass: sample the frame, cover-fit it into the window, run it
+/// through the theme grade, and carry the strength as premultiplied alpha.
+///
+/// Cover rather than the Milkdrop panel's aspect-fit, because a backdrop
+/// has to reach every corner. The source is never smaller than the window
+/// on either axis (see the module header on how the size is picked), so the
+/// fit only ever crops.
+///
+/// The grade is what makes the light theme work at all: a frame drawn on
+/// black composited at a third over a pale cover wash is a grey smear, and
+/// the same frame with its lightness flipped is the pale wash with the
+/// preset's shapes moving in it. The maths is [`rox_panel_kit::grade`]'s,
+/// prepended to this source; the slots it reads are filled below.
+const FRAME_WGSL: &str = "
+fn fs_user(uv: vec2<f32>) -> vec4<f32> {
+    let weight = clamp(params.signals[0].x, 0.0, 1.0);
+    if (weight <= 0.0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let frame_size = max(vec2<f32>(textureDimensions(frame)), vec2<f32>(1.0, 1.0));
+    let bounds = max(params.resolution, vec2<f32>(1.0, 1.0));
+    let fill = max(bounds.x / frame_size.x, bounds.y / frame_size.y);
+    let covered = frame_size * fill;
+    let margin = (covered - bounds) * 0.5;
+    let source = clamp((uv * bounds + margin) / covered, vec2<f32>(0.0), vec2<f32>(1.0));
+    let graded = grade(textureSample(frame, samp, source).rgb);
+    return vec4<f32>(graded * weight, weight);
+}
+";
+
+/// One window's texture and compiled chain. Both belong to the window that
+/// handed them out, so there's one of these per window painting the layer.
+struct Target {
+    texture: UserTextureId,
+    width: u32,
+    height: u32,
+    /// The one-pass chain binding `texture`. Registered on the first paint
+    /// after the texture is made, and dropped with it on a resize.
+    chain: Option<UserShaderId>,
+    /// The newest frame this window has uploaded. The engine hands back
+    /// anything past it and nothing else, so a UI frame with no new render
+    /// behind it costs one atomic load.
+    last_seq: u64,
+}
+
+/// One window's slice of the layer: how big it wants the render, when it
+/// last said so, and where its own fade stands.
+///
+/// The fade is per window rather than shared because the thing it follows
+/// is per window. Each window's backdrop answers to its own workspace's
+/// player, and the gate that keeps the visual out of child windows is per
+/// window too, so one settings window fading out must not take the
+/// workspace's visual with it.
+struct Pane {
+    size: (u32, u32),
+    at: Instant,
+    fade: Fade,
+}
+
+impl Pane {
+    /// Whether this window has anything on screen, fading in or out
+    /// included. A dark pane costs the engine nothing and doesn't count
+    /// toward the shared render size.
+    fn lit(&self, now: Instant) -> bool {
+        (self.fade.to > 0.0 || self.fade.running(FADE))
+            && now.duration_since(self.at) < WINDOW_STALE
+    }
+}
+
+/// Everything the layer owns, shared by every window that paints it.
+///
+/// A global rather than an entity because the paint that drives it runs
+/// from the backdrop service's shade hook, which is handed a window and an
+/// app and nothing else. That's the same reason the backdrop shader's
+/// compile message lives in a static beside the workspace.
+#[derive(Default)]
+struct Visual {
+    engine: Option<Engine>,
+    /// The player whose audio the running engine was spawned against. The
+    /// feed is fixed at spawn, so switching players means a new context,
+    /// which is only ever done from parked.
+    driving: Option<gpui::EntityId>,
+    /// Every window painting the layer, by window id.
+    panes: HashMap<u64, Pane>,
+    targets: HashMap<u64, Target>,
+    /// The size the engine renders at, and a size seen once and not yet
+    /// acted on: a second sighting is what commits it, so dragging a window
+    /// edge doesn't reallocate the framebuffer on every pixel of the drag.
+    size: Option<(u32, u32)>,
+    pending: Option<(u32, u32)>,
+    parked: bool,
+    /// What the window or the worker last said went wrong, for the settings
+    /// page's readout.
+    error: Option<String>,
+    /// The presets, scanned once when the layer first runs. A backdrop has
+    /// no settings page of its own to press Rescan on; it picks up new
+    /// packs the next time the app starts, which is the same deal the
+    /// panel's worker makes with its own snapshot.
+    library: Option<PresetLibrary>,
+    /// The play state each workspace's player was last seen in, so a pump
+    /// tick that says the same thing as the last one costs nothing.
+    playing: HashMap<gpui::EntityId, bool>,
+    /// The preset the worker last said it switched to, for the settings
+    /// page's readout and the favorite star beside it.
+    current: Option<PathBuf>,
+    /// The knobs the running worker was last told, so a paint can tell
+    /// whether the settings moved with one compare rather than re-sending
+    /// every command every frame.
+    applied: Option<Applied>,
+    /// The library as the Appearance page's picker lists it, built once
+    /// per scan and shared from there: ten thousand rows is not something
+    /// to rebuild per settings render.
+    rows: Option<Arc<Vec<PickRow>>>,
+}
+
+/// The slice of the config that goes to the worker as commands, plus the
+/// favorites edit it was resolved against.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Applied {
+    favorites_only: bool,
+    lists_gen: u64,
+    locked: bool,
+    duration_secs: f64,
+}
+
+impl Applied {
+    fn of(config: &BackdropVisualConfig) -> Applied {
+        Applied {
+            favorites_only: config.favorites_only,
+            lists_gen: settings::milkdrop_gen(),
+            locked: config.locked,
+            duration_secs: config.duration_secs,
+        }
+    }
+}
+
+/// What the config's rotation means to the engine: the favorites while
+/// the switch is on, the whole library otherwise. The backdrop has no
+/// folder pick; the panel's rotation is a panel's business.
+fn rotation(config: &BackdropVisualConfig) -> Rotation {
+    if config.favorites_only {
+        Rotation::Set(settings::milkdrop_favorites())
+    } else {
+        Rotation::All
+    }
+}
+
+fn grade_mode(color: MilkdropColor) -> GradeMode {
+    match color {
+        MilkdropColor::Preset => GradeMode::Preset,
+        MilkdropColor::Theme => GradeMode::Theme,
+        MilkdropColor::Palette => GradeMode::Palette,
+        MilkdropColor::Cover => GradeMode::Cover,
+    }
+}
+
+/// The scan the backdrop walks: the same folders every panel walks, plus
+/// whatever is starred.
+fn scan_library() -> PresetLibrary {
+    let roots = settings::milkdrop_scan_roots();
+    let textures = settings::milkdrop_dir().join("textures");
+    let textures = textures.is_dir().then_some(textures);
+    let mut library = PresetLibrary::scan(&roots, textures);
+    library.extend(&settings::milkdrop_favorites());
+    library
+}
+
+impl Visual {
+    /// Forget the windows that have closed.
+    ///
+    /// Keyed on the window still existing rather than on how long since it
+    /// last painted: a workspace with the visual parked doesn't repaint at
+    /// all, and dropping its target out from under it would have its next
+    /// paint register a second texture in the same window. The texture
+    /// itself dies with the window, the way a registered image does.
+    fn forget_closed(&mut self, live: &[u64]) {
+        self.panes.retain(|id, _| live.contains(id));
+        self.targets.retain(|id, _| live.contains(id));
+    }
+
+    /// Whether anything is on screen anywhere. What the worker's park waits
+    /// for: one window's fade bottoming out isn't a reason to freeze the
+    /// picture in another.
+    fn any_lit(&self, now: Instant) -> bool {
+        self.panes.values().any(|pane| pane.lit(now))
+    }
+
+    /// The sizes the lit windows want, folded to the per-axis maximum.
+    /// None while nothing is showing.
+    fn wanted_size(&self, now: Instant) -> Option<(u32, u32)> {
+        let mut side: Option<(u32, u32)> = None;
+        for pane in self.panes.values().filter(|pane| pane.lit(now)) {
+            side = Some(match side {
+                Some((w, h)) => (w.max(pane.size.0), h.max(pane.size.1)),
+                None => pane.size,
+            });
+        }
+        side
+    }
+}
+
+/// The layer's own lock rather than a gpui global.
+///
+/// The paint runs with a `&mut App` already in hand and has to touch this
+/// state at the same time, which a global borrow can't do. The Milkdrop
+/// panel keeps its own paint state behind a mutex for exactly that reason;
+/// this is the same shape, one level up.
+static VISUAL: Mutex<Option<Visual>> = Mutex::new(None);
+
+fn visual() -> MutexGuard<'static, Option<Visual>> {
+    let mut guard = VISUAL.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(Visual::default());
+    }
+    guard
+}
+
+/// Whether the visual is switched on. Cheap enough for a hot path: one
+/// read lock on the settings cache.
+pub(crate) fn enabled() -> bool {
+    settings::backdrop_visual().enabled
+}
+
+/// What the layer last failed at, for the settings page's banner. None is
+/// a clean run or nothing running.
+pub(crate) fn error() -> Option<String> {
+    let mut guard = visual();
+    let visual = guard.as_mut()?;
+    if let Some(error) = visual.error.clone() {
+        return Some(error);
+    }
+    match visual.engine.as_ref().map(Engine::status) {
+        Some(Status::Failed(message)) => Some(message),
+        _ => None,
+    }
+}
+
+/// The preset on screen, for the Appearance page's readout. None before
+/// the first switch or while nothing runs.
+pub(crate) fn current_preset() -> Option<PathBuf> {
+    visual().as_ref().and_then(|visual| visual.current.clone())
+}
+
+/// The library the backdrop walks, scanned on first ask and held.
+fn library(visual: &mut Visual) -> &PresetLibrary {
+    if visual.library.is_none() {
+        visual.library = Some(scan_library());
+    }
+    visual.library.as_ref().expect("just scanned")
+}
+
+/// The picker's rows: every preset by file stem, its folder as the hidden
+/// search term so "fractal" finds a pack's whole category. Built once
+/// per scan; the picker holds the `Arc`.
+pub(crate) fn preset_rows() -> Arc<Vec<PickRow>> {
+    let mut guard = visual();
+    let visual = guard.as_mut().expect("initialised on first lock");
+    if let Some(rows) = visual.rows.clone() {
+        return rows;
+    }
+    let roots = library(visual).roots().to_vec();
+    let rows: Vec<PickRow> = library(visual)
+        .presets()
+        .iter()
+        .map(|path| {
+            let folder = roots
+                .iter()
+                .filter_map(|root| path.parent()?.strip_prefix(root).ok())
+                .map(|relative| relative.to_string_lossy().to_lowercase())
+                .next()
+                .unwrap_or_default();
+            PickRow {
+                label: preset_label(path).into(),
+                value: Some(path.to_string_lossy().into_owned().into()),
+                terms: if folder.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![folder.into()]
+                },
+            }
+        })
+        .collect();
+    let rows = Arc::new(rows);
+    visual.rows = Some(rows.clone());
+    rows
+}
+
+/// What the picker and the readout call a preset: its file stem, the
+/// same name the panel's banner uses.
+fn preset_label(path: &std::path::Path) -> String {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+/// Put a preset up, from the Appearance page. Works with nothing
+/// playing: the worker takes the load while parked, and a worker that
+/// hasn't started yet gets the pick at start, since it's written to the
+/// config either way. The readout moves now rather than on the worker's
+/// answer, so a pick with the visual off still reads back.
+pub(crate) fn pick_preset(path: PathBuf, cx: &mut App) {
+    let mut config = settings::backdrop_visual();
+    config.preset = Some(path.clone());
+    settings::note_backdrop_visual(config.clone());
+    Settings::update(move |s| s.backdrop_visual = config);
+    {
+        let mut guard = visual();
+        if let Some(visual) = guard.as_mut() {
+            visual.current = Some(path.clone());
+            if let Some(engine) = visual.engine.as_ref() {
+                engine.send(Command::LoadPreset { path, smooth: true });
+            }
+        }
+    }
+    wake(cx);
+}
+
+/// A random pick from the rotation, chosen here rather than by the worker
+/// so it works before the worker exists. Avoids the preset that's up.
+pub(crate) fn random_preset(cx: &mut App) {
+    let picked = {
+        let mut guard = visual();
+        let visual = guard.as_mut().expect("initialised on first lock");
+        let config = settings::backdrop_visual();
+        let current = visual.current.clone();
+        let library = library(visual);
+        let mut indices = library.rotation_indices(&rotation(&config));
+        if indices.is_empty() {
+            indices = library.rotation_indices(&Rotation::All);
+        }
+        let except = current
+            .as_deref()
+            .and_then(|path| library.index_of(path))
+            .and_then(|index| indices.iter().position(|i| *i == index));
+        Shuffle::new()
+            .pick(indices.len(), except)
+            .map(|slot| library.presets()[indices[slot]].clone())
+    };
+    if let Some(path) = picked {
+        pick_preset(path, cx);
+    }
+}
+
+/// Whether a player's play state moved since the last time it was noted.
+/// The workspace's pump observer fires sixty times a second, and only the
+/// flip is worth waking every window in the app for.
+pub(crate) fn note_playing(player: gpui::EntityId, playing: bool) -> bool {
+    let mut guard = visual();
+    let Some(visual) = guard.as_mut() else {
+        return false;
+    };
+    visual.playing.insert(player, playing) != Some(playing)
+}
+
+/// Wake every window so a switch, a slider, or a play-state flip reaches
+/// the layer. The paint sustains itself with frame requests while it's
+/// running; this is what restarts it once it has parked.
+///
+/// Deferred, because the callers are a settings write and a player
+/// notification, and neither is a safe place to reach back into the window
+/// that's mid-update.
+pub(crate) fn wake(cx: &mut App) {
+    cx.defer(|cx| {
+        for handle in cx.windows() {
+            handle.update(cx, |_, window, _| window.refresh()).ok();
+        }
+    });
+}
+
+/// The element the backdrop's shade hook adds: a window-filling canvas
+/// drawn over the blurred cover and under everything else.
+///
+/// `allowed` is the app's own copy of the backdrop gate: which windows get
+/// the layer at all. A window that loses it fades the visual out and hands
+/// its texture back rather than cutting.
+///
+/// None when there's nothing to do, which is the common case: switched off
+/// and this window holding no texture to give back. A window that still
+/// holds one gets a canvas anyway, because releasing it is something only
+/// its own paint can do.
+pub(crate) fn layer(window: &Window, allowed: bool) -> Option<AnyElement> {
+    let id = window.window_handle().window_id().as_u64();
+    let holding = visual()
+        .as_ref()
+        .is_some_and(|visual| visual.targets.contains_key(&id));
+    if (!enabled() || !allowed) && !holding {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .inset_0()
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, cx| paint(bounds, window, cx, allowed),
+                )
+                .size_full(),
+            )
+            .into_any_element(),
+    )
+}
+
+/// What the engine renders at, from a window's bounds: device pixels times
+/// the config's scale, clamped to what a framebuffer should ever be. Pure,
+/// so the clamp is testable without a window.
+fn render_size(width: f32, height: f32, scale_factor: f32, scale: f32) -> (u32, u32) {
+    let side = |logical: f32| {
+        let device = logical * scale_factor * scale;
+        // NaN and negatives both land on the floor: `max` on f32 takes the
+        // other operand when one is NaN, and the cast saturates.
+        (device.round().max(0.0) as u32).clamp(MIN_SIDE, MAX_SIDE)
+    };
+    (side(width), side(height))
+}
+
+/// The alpha the pass writes: the user's strength scaled by where the fade
+/// has got to, shaped so the fade reads even.
+fn weight(strength: f32, opacity: f32) -> f32 {
+    // `max` after each clamp is the NaN guard, the same one the fade
+    // shaping carries: clamp passes a NaN straight through, and a NaN in
+    // the uniform block is a layer that draws nothing.
+    let strength = strength.clamp(0.0, 1.0).max(0.0);
+    (strength * fade::mix(opacity)).clamp(0.0, 1.0).max(0.0)
+}
+
+fn paint(bounds: gpui::Bounds<gpui::Pixels>, window: &mut Window, cx: &mut App, allowed: bool) {
+    if bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
+        return;
+    }
+    let config = settings::backdrop_visual();
+    let id = window.window_handle().window_id().as_u64();
+    let now = Instant::now();
+    let mut guard = visual();
+    let Some(visual) = guard.as_mut() else {
+        return;
+    };
+
+    // The window's own player, off the registry every workspace fills as it
+    // opens. A window nobody registered (a dialog that opened first) reads
+    // as nothing playing, which fades the layer out there rather than
+    // guessing at another window's audio.
+    let player = surface::window_player(window, cx);
+    let playing = player
+        .as_ref()
+        .is_some_and(|player| player.read(cx).is_playing());
+
+    // This window's own slice: what it wants rendered, and where its fade
+    // is heading. Switching the visual off, or gating this window out,
+    // fades it away rather than cutting, and the teardown waits for the
+    // bottom.
+    let wants = render_size(
+        f32::from(bounds.size.width),
+        f32::from(bounds.size.height),
+        window.scale_factor(),
+        config.scale,
+    );
+    let pane = visual.panes.entry(id).or_insert_with(|| Pane {
+        size: wants,
+        at: now,
+        // Dark and settled: a window that opens mid-track fades its visual
+        // in rather than snapping it on.
+        fade: Fade::settled(0.0),
+    });
+    pane.size = wants;
+    pane.at = now;
+    pane.fade.retarget(
+        if config.enabled && allowed && playing {
+            1.0
+        } else {
+            0.0
+        },
+        FADE,
+    );
+    let opacity = pane.fade.opacity(FADE);
+    let running = pane.fade.running(FADE);
+
+    // The worker takes commands while parked, and the Appearance page can
+    // send it one with nothing playing. Its answer has to be read even
+    // while this window is dark, or the readout there never moves.
+    if let Some(engine) = visual.engine.clone() {
+        drain(visual, &engine, &config, cx);
+    }
+
+    if opacity <= 0.0 && !running {
+        // Nothing on screen here, so this is the cheap moment to drop what
+        // closed windows left behind rather than doing it on every frame.
+        let live: Vec<u64> = cx
+            .windows()
+            .iter()
+            .map(|h| h.window_id().as_u64())
+            .collect();
+        visual.forget_closed(&live);
+        // Hand the texture back if this window has stopped showing the
+        // layer for good; a stop with the switch still on keeps it, so the
+        // next play doesn't pay to register a texture and compile a chain
+        // again.
+        if !config.enabled || !allowed {
+            release(visual, id, window);
+        }
+        // Once no window is showing anything, park the worker: freeze it
+        // rather than tear it down, so a resume doesn't pay for a GL
+        // context. Switched off everywhere, let the engine go entirely.
+        if !visual.any_lit(now) {
+            if !visual.parked && visual.engine.is_some() {
+                visual.parked = true;
+                if let Some(engine) = visual.engine.as_ref() {
+                    engine.send(Command::Pause);
+                }
+            }
+            if !config.enabled && visual.targets.is_empty() {
+                visual.engine = None;
+                visual.driving = None;
+                visual.size = None;
+                visual.pending = None;
+                visual.error = None;
+            }
+        }
+        return;
+    }
+
+    let want = visual.wanted_size(now).unwrap_or((MIN_SIDE, MIN_SIDE));
+    if visual.size == Some(want) {
+        // A drag that came back where it started leaves a size sitting in
+        // `pending` that nothing will ever commit, and the next real resize
+        // to that same size would skip its own debounce.
+        visual.pending = None;
+    } else if visual.size.is_none() || visual.pending == Some(want) {
+        visual.pending = None;
+        visual.size = Some(want);
+        if let Some(engine) = visual.engine.as_ref() {
+            engine.send(Command::Resize {
+                width: want.0,
+                height: want.1,
+            });
+        }
+    } else {
+        // First sighting of this size. Ask for another frame so the second
+        // sighting arrives even if nothing else is moving, and keep drawing
+        // at the old size meanwhile.
+        visual.pending = Some(want);
+        window.request_animation_frame();
+    }
+    let Some(size) = visual.size else {
+        return;
+    };
+
+    // The engine, started on the first paint that has both a size and a
+    // player to listen to. A different player only ever takes over from
+    // parked: swapping the feed means a new GL context, and paying for one
+    // mid-track would show as a hole in the visual.
+    if let Some(player) = player.as_ref() {
+        let swap = visual
+            .driving
+            .is_none_or(|driving| driving != player.entity_id() && visual.parked);
+        if visual.engine.is_none() || swap {
+            start(visual, player, size, cx);
+        }
+    }
+    if visual.parked {
+        visual.parked = false;
+        if let Some(engine) = visual.engine.as_ref() {
+            engine.send(Command::Resume);
+        }
+    }
+    let Some(engine) = visual.engine.clone() else {
+        return;
+    };
+    sync(visual, &engine, &config);
+
+    // This window's texture, remade whenever the shared render size moves.
+    let fits = visual
+        .targets
+        .get(&id)
+        .is_some_and(|target| (target.width, target.height) == size);
+    if !fits {
+        release(visual, id, window);
+        match window.register_dynamic_texture(size.0, size.1) {
+            Ok(texture) => {
+                visual.error = None;
+                visual.targets.insert(
+                    id,
+                    Target {
+                        texture,
+                        width: size.0,
+                        height: size.1,
+                        chain: None,
+                        last_seq: 0,
+                    },
+                );
+            }
+            Err(message) => {
+                visual.error = Some(message);
+                return;
+            }
+        }
+    }
+    let Some(target) = visual.targets.get_mut(&id) else {
+        return;
+    };
+
+    // The newest render, if there's one past what this window already has.
+    // A frame from before a resize is dropped rather than stretched; its
+    // seq still moves on, so it's dropped once and not re-fetched.
+    if let Some(frame) = engine.frame_after(target.last_seq) {
+        target.last_seq = frame.seq;
+        if frame.width == target.width && frame.height == target.height {
+            if let Err(message) = window.update_user_texture(target.texture, frame.rgba8) {
+                visual.error = Some(message);
+                return;
+            }
+        }
+    }
+
+    if target.chain.is_none() {
+        let chain = UserShaderChain {
+            passes: vec![UserShaderPass {
+                name: "main".to_string(),
+                source: grade::wgsl(FRAME_WGSL),
+                scale: 1.0,
+            }],
+            assets: vec![("frame".to_string(), target.texture)],
+        };
+        match window.register_user_shader_chain(&chain) {
+            Ok(shader) => {
+                target.chain = Some(shader);
+                visual.error = None;
+            }
+            Err(message) => {
+                visual.error = Some(message);
+                return;
+            }
+        }
+    }
+    let Some(shader) = visual.targets.get(&id).and_then(|target| target.chain) else {
+        return;
+    };
+
+    // A chain that binds an asset can only run as a screen pass, so this is
+    // always the region branch, the same as the Milkdrop panel's.
+    let meta = surface::meta_slots(window, cx);
+    let mut signals = [0.0f32; 16];
+    signals[grade::SLOT_FADE] = weight(config.strength, opacity);
+    // The grade reads the app-wide theme rather than any panel's scope:
+    // this layer sits under every panel, so it's the window's theme it
+    // has to agree with. The resolved palette carries the cover tint when
+    // song theming is on, which is how the palette ramp follows the art.
+    let theme = palette::resolved();
+    let cover = player
+        .as_ref()
+        .and_then(|player| palette::seed(player.entity_id()))
+        .and_then(|seed| seed.primary);
+    Grade::new(
+        grade_mode(config.color),
+        palette::mode() == Mode::Light,
+        theme.bg_root,
+        theme.accent,
+        cover,
+    )
+    .write(&mut signals);
+    // Everything this layer owns has been read; the record and the frame
+    // request below don't need it, so the lock goes back first.
+    drop(guard);
+    window.paint_screen_shader(bounds, shader, INSTANCE, signals, meta);
+    window.request_animation_frame();
+}
+
+/// Give a window its texture back. Only that window's own registry can free
+/// it, which is why this runs from the paint and not from a settings write.
+fn release(visual: &mut Visual, id: u64, window: &mut Window) {
+    if let Some(old) = visual.targets.remove(&id) {
+        window.release_user_texture(old.texture);
+    }
+}
+
+/// Start the worker against a player's feed. Replaces a parked engine
+/// wholesale, since the feed is fixed at spawn.
+fn start(visual: &mut Visual, player: &Entity<Player>, size: (u32, u32), cx: &App) {
+    if visual.library.is_none() {
+        visual.library = Some(scan_library());
+    }
+    let library = visual.library.clone().expect("just scanned");
+    let config = settings::backdrop_visual();
+    // Dropping the old engine joins its thread, so the two contexts are
+    // never alive at once.
+    visual.engine = None;
+    let engine = Engine::spawn(EngineOptions {
+        feed: player.read(cx).feed(),
+        library,
+        fps: settings::BACKDROP_VISUAL_FPS,
+        width: size.0,
+        height: size.1,
+    });
+    // The knobs the config carries, pushed once at startup so a restart
+    // comes up the way it was left rather than at projectM's defaults.
+    engine.send(Command::SetPresetDuration(config.duration_secs));
+    engine.send(Command::SetLocked(config.locked));
+    engine.send(Command::SetRotation(rotation(&config)));
+    // The preset that was picked or locked last time comes back up. An
+    // unlocked backdrop moves on from it after the duration, which is
+    // what unlocked means; it still starts where it was left.
+    if let Some(path) = config.preset.clone().filter(|path| path.is_file()) {
+        engine.send(Command::LoadPreset {
+            path,
+            smooth: false,
+        });
+    }
+    visual.applied = Some(Applied::of(&config));
+    visual.engine = Some(engine);
+    visual.driving = Some(player.entity_id());
+    visual.parked = false;
+    visual.current = None;
+    // Every window's texture now belongs to a frame stream that starts over
+    // at seq zero, so nothing carries.
+    for target in visual.targets.values_mut() {
+        target.last_seq = 0;
+    }
+}
+
+/// Push whatever moved in the settings since the worker last heard: the
+/// lock, the duration, the favorites switch, or the favorites list itself.
+/// One compare per paint, and nothing goes down the channel while nothing
+/// changed.
+fn sync(visual: &mut Visual, engine: &Engine, config: &BackdropVisualConfig) {
+    let want = Applied::of(config);
+    let Some(had) = visual.applied else {
+        visual.applied = Some(want);
+        return;
+    };
+    if had == want {
+        return;
+    }
+    if had.locked != want.locked {
+        engine.send(Command::SetLocked(want.locked));
+    }
+    if had.duration_secs != want.duration_secs {
+        engine.send(Command::SetPresetDuration(want.duration_secs));
+    }
+    if had.lists_gen != want.lists_gen {
+        // A folder edit is the one thing that earns a rescan. A new
+        // favorite is folded into the library already held instead: this
+        // runs on the paint, and a walk of the pack per star is a click
+        // that hangs every window.
+        let library = library(visual);
+        let before = library.presets().len();
+        let mut grown = if library.roots() != settings::milkdrop_scan_roots().as_slice() {
+            scan_library()
+        } else {
+            library.clone()
+        };
+        grown.extend(&settings::milkdrop_favorites());
+        if grown.presets().len() != before || grown.roots() != library.roots() {
+            visual.library = Some(grown.clone());
+            visual.rows = None;
+            engine.send(Command::SetLibrary {
+                library: grown,
+                rotation: rotation(config),
+            });
+        } else if config.favorites_only {
+            engine.send(Command::SetRotation(rotation(config)));
+        }
+    } else if had.favorites_only != want.favorites_only {
+        engine.send(Command::SetRotation(rotation(config)));
+    }
+    visual.applied = Some(want);
+}
+
+/// Take what the worker has to say since the last paint: which preset
+/// came up, and which one wouldn't load.
+///
+/// A switch wakes every window once so an open Appearance page updates
+/// its readout; that's one refresh every half minute while the visual
+/// runs, which nothing notices. While the lock is on the preset is also
+/// written to settings, so the restart lands back on it. The lock is what
+/// makes that cheap: a locked backdrop only changes preset when someone
+/// asks it to.
+fn drain(visual: &mut Visual, engine: &Engine, config: &BackdropVisualConfig, cx: &mut App) {
+    for event in engine.take_events() {
+        match event {
+            Event::PresetChanged(path) => {
+                if config.locked && config.preset.as_ref() != Some(&path) {
+                    let mut noted = config.clone();
+                    noted.preset = Some(path.clone());
+                    settings::note_backdrop_visual(noted.clone());
+                    cx.defer(move |_| Settings::update(move |s| s.backdrop_visual = noted));
+                }
+                visual.current = Some(path);
+                wake(cx);
+            }
+            Event::PresetFailed { path, message } => {
+                log::warn!(
+                    "milkdrop backdrop preset {} failed: {message}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_render_size_clamps_both_sides() {
+        assert_eq!(render_size(1920., 1080., 1.0, 0.5), (960, 540));
+        // A sliver of a window still gets a framebuffer worth allocating.
+        assert_eq!(render_size(4., 4., 1.0, 0.5), (MIN_SIDE, MIN_SIDE));
+        // And a wall of a window doesn't get a 30 MB readback.
+        assert_eq!(render_size(9000., 9000., 2.0, 1.0), (MAX_SIDE, MAX_SIDE));
+        // Nonsense in a hand-edited file lands on the floor, not a panic.
+        assert_eq!(render_size(f32::NAN, -5., 1.0, 0.5), (MIN_SIDE, MIN_SIDE));
+    }
+
+    /// The pass only ever compiles inside a window, so this compiles it
+    /// against the same template the window composes it into.
+    #[test]
+    fn the_frame_pass_compiles_with_the_grade_in_scope() {
+        surface::validate_frame_pass(&grade::wgsl(FRAME_WGSL), &["frame"])
+            .expect("the backdrop's pass validates");
+    }
+
+    #[test]
+    fn the_weight_is_the_strength_scaled_by_the_fade() {
+        assert_eq!(weight(0.0, 1.0), 0.0);
+        assert_eq!(weight(1.0, 1.0), 1.0);
+        assert_eq!(weight(0.5, 0.0), 0.0);
+        // The shaping only bends the middle, so a half-strength layer half
+        // way through its fade sits under a quarter.
+        assert!(weight(0.5, 0.5) < 0.25);
+        assert!(weight(f32::NAN, f32::NAN).is_finite());
+    }
+
+    fn lit_pane(size: (u32, u32), now: Instant) -> Pane {
+        Pane {
+            size,
+            at: now,
+            fade: Fade::settled(1.0),
+        }
+    }
+
+    #[test]
+    fn the_shared_size_is_the_per_axis_max_of_the_lit_windows() {
+        let now = Instant::now();
+        let mut visual = Visual::default();
+        visual.panes.insert(1, lit_pane((1920, 600), now));
+        visual.panes.insert(2, lit_pane((800, 1200), now));
+        // Cover-fit never upscales in either window, which is the whole
+        // point of taking the max on each axis rather than the larger area.
+        assert_eq!(visual.wanted_size(now), Some((1920, 1200)));
+        // A window that stopped painting stops counting.
+        visual.panes.get_mut(&1).expect("inserted").at = now - WINDOW_STALE * 2;
+        assert_eq!(visual.wanted_size(now), Some((800, 1200)));
+        // And a window that closed is forgotten outright, entry and all.
+        visual.forget_closed(&[2]);
+        assert!(!visual.panes.contains_key(&1));
+        assert!(visual.panes.contains_key(&2));
+    }
+
+    #[test]
+    fn a_dark_window_neither_sizes_the_render_nor_holds_the_worker_awake() {
+        let now = Instant::now();
+        let mut visual = Visual::default();
+        visual.panes.insert(1, lit_pane((1920, 1080), now));
+        visual.panes.insert(
+            2,
+            Pane {
+                size: (3840, 2160),
+                at: now,
+                fade: Fade::settled(0.0),
+            },
+        );
+        // The settings window sitting there faded out doesn't get to ask
+        // for a 4K framebuffer.
+        assert_eq!(visual.wanted_size(now), Some((1920, 1080)));
+        assert!(visual.any_lit(now));
+        visual.panes.get_mut(&1).expect("inserted").fade = Fade::settled(0.0);
+        assert!(!visual.any_lit(now));
+        assert_eq!(visual.wanted_size(now), None);
+    }
+}

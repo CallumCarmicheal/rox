@@ -14,19 +14,26 @@
 //!
 //! The tags use the same four names everywhere lofty looks
 //! (`REPLAYGAIN_TRACK_GAIN` and friends, as TXXX frames in ID3v2, Vorbis
-//! comments in FLAC, freeform atoms in MP4) so one generic read covers
-//! every format the scanner indexes.
+//! comments in FLAC, freeform atoms in MP4) so one generic read covers every
+//! format the scanner indexes but one.
 //!
-//! Two other levelling schemes exist and neither is handled here. Opus files
-//! use `R128_TRACK_GAIN`/`R128_ALBUM_GAIN` per RFC 7845: a Q7.8 fixed-point
-//! number of dB relative to -23 LUFS, so converting one to a ReplayGain figure
-//! means dividing by 256 and adding 5 dB for the reference difference against
-//! RG's -18. That conversion stays unwritten while `.opus` is off
-//! `scanner::EXTENSIONS`; when Opus arrives, this module grows it, or the claim
-//! above about covering every indexed format stops being true. iTunes' own
-//! `iTunNORM` atom is out of scope entirely, since nothing else writes it and
-//! its per-channel millwatt figures are not a dB gain.
+//! That one is Opus, which levels by RFC 7845's `R128_TRACK_GAIN` and
+//! `R128_ALBUM_GAIN` instead: a Q7.8 fixed-point number of dB relative to
+//! -23 LUFS, so a ReplayGain figure is that number over 256 plus 5 dB for the
+//! reference difference against RG's -18. [`read_r128`] does the conversion
+//! and the scanner calls it off its native Opus parse, because those keys are
+//! unmapped Vorbis comments the generic tag drops on the way to a `Tag`. The
+//! scheme has no peak fields, so an Opus file comes back with gains and no
+//! peaks and the engine's clamp falls back to its no-peak behaviour.
+//!
+//! Nothing rox measures goes back into an Opus file, either: the writer admits
+//! MP3 and FLAC only, so the R128 pass stores Opus results in the database and
+//! stops there, the same as every other format rox reads but doesn't write.
+//!
+//! iTunes' own `iTunNORM` atom is out of scope entirely, since nothing else
+//! writes it and its per-channel millwatt figures are not a dB gain.
 
+use lofty::ogg::VorbisComments;
 use lofty::tag::{ItemKey, Tag};
 
 /// One file's four ReplayGain numbers. None per field: a file can hold any
@@ -97,6 +104,32 @@ pub fn read(tag: &Tag) -> ReplayGain {
         album_db: gain(ItemKey::ReplayGainAlbumGain),
         album_peak: peak(ItemKey::ReplayGainAlbumPeak),
     }
+}
+
+/// The R128 pair off an Opus file's Vorbis comments, converted to ReplayGain.
+/// None when neither key is there, so a caller can tell "no levelling" from
+/// "levelled to exactly 0 dB". No peaks come back: the scheme has none.
+pub fn read_r128(comments: &VorbisComments) -> Option<ReplayGain> {
+    let rg = ReplayGain {
+        track_db: comments.get("R128_TRACK_GAIN").and_then(parse_r128),
+        track_peak: None,
+        album_db: comments.get("R128_ALBUM_GAIN").and_then(parse_r128),
+        album_peak: None,
+    };
+    rg.any().then_some(rg)
+}
+
+/// An R128 field: a whole number of Q7.8 dB against -23 LUFS. Divide by 256
+/// for the dB, add 5 for the distance to ReplayGain's -18 LUFS reference. So
+/// -1280 is -5 dB against R128, which is 0 dB of ReplayGain.
+///
+/// Strict about the parse on purpose, unlike [`parse_gain`]: this field is
+/// written by machines and always an integer, so anything else is a file lying
+/// about its format rather than a tagger being loose with a unit suffix.
+pub fn parse_r128(value: &str) -> Option<f32> {
+    let q78: i32 = value.trim().parse().ok()?;
+    let db = q78 as f32 / 256.0 + 5.0;
+    db.is_finite().then_some(db)
 }
 
 /// A gain field: a signed decibel figure, conventionally written with its

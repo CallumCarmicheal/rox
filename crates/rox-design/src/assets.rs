@@ -56,6 +56,8 @@ pub mod icons {
     pub const REPEAT_1: &str = "icons/repeat-1.svg";
     pub const STOP: &str = "icons/square.svg";
     pub const SHUFFLE: &str = "icons/shuffle.svg";
+    pub const FLIP_HORIZONTAL: &str = "icons/flip-horizontal.svg";
+    pub const FLIP_VERTICAL: &str = "icons/flip-vertical.svg";
     /// Continuation (ADR 17): a queue that doesn't end. The lemniscate reads
     /// as "this keeps going" without borrowing the radio, which already means
     /// ordering by sound rather than never stopping.

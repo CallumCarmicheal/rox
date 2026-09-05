@@ -26,6 +26,10 @@ pub mod axis;
 
 pub mod config;
 
+pub mod fade;
+
+pub mod grade;
+
 pub mod wall;
 
 mod font_picker;

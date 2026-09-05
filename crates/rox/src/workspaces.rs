@@ -792,8 +792,11 @@ pub fn apply_look(bundle: &WorkspaceBundle, cx: &mut App) {
     settings::set_rating_style(a.rating_style, cx);
     settings::set_rating_dots(a.rating_dots, cx);
     settings::set_hide_menubar(a.hide_menubar, cx);
+    settings::set_menubar_buttons(a.menubar_buttons, cx);
     settings::set_os_decorations(a.os_decorations);
     settings::set_resize_border(a.resize_border);
+    settings::set_backdrop_visual_look(&a.milkdrop);
+    crate::backdrop_visual::wake(cx);
     crate::workspace::apply_decorations(cx);
     crate::workspace::apply_resize_border(cx);
 }

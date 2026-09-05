@@ -84,6 +84,29 @@ impl AudioFeed {
         }
         n
     }
+
+    /// Copy the interleaved samples pushed since `cursor` (a `written()`
+    /// value), newest last, and return the new cursor. Samples older than the
+    /// ring still holds are skipped, so a slow reader gets a gap, never a
+    /// repeat. `out` is cleared first.
+    ///
+    /// This is the streaming counterpart to `latest_mono` and `latest_stereo`:
+    /// those hand back a fixed analysis window every time they're asked, this
+    /// hands back everything that arrived since the last ask. A consumer that
+    /// has to see every sample once, like the Milkdrop worker feeding
+    /// projectM's PCM buffer, wants this one.
+    pub fn since(&self, cursor: u64, out: &mut Vec<f32>) -> u64 {
+        out.clear();
+        let buf = self.buf.lock().unwrap();
+        let written = self.written.load(Ordering::Relaxed);
+        // Everything before this fell off the front of the ring already.
+        let oldest = written - buf.len() as u64;
+        let start = cursor.max(oldest).min(written);
+        let offset = (start - oldest) as usize;
+        out.reserve(buf.len() - offset);
+        out.extend(buf.iter().skip(offset).copied());
+        written
+    }
 }
 
 impl Default for AudioFeed {
@@ -191,6 +214,58 @@ mod tests {
         let mut out = vec![0.0f32; KEEP_SAMPLES];
         let n = feed.latest_mono(&mut out);
         assert_eq!(n, KEEP_SAMPLES / 2);
+    }
+
+    #[test]
+    fn since_zero_returns_everything_retained() {
+        let feed = AudioFeed::new();
+        feed.push(&[1.0, 2.0, 3.0, 4.0]);
+        let mut out = Vec::new();
+        let cursor = feed.since(0, &mut out);
+        assert_eq!(cursor, 4);
+        assert_eq!(out, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn since_the_current_cursor_returns_nothing() {
+        let feed = AudioFeed::new();
+        feed.push(&[1.0, 2.0, 3.0, 4.0]);
+        let mut out = vec![9.0f32; 3];
+        let cursor = feed.since(feed.written(), &mut out);
+        assert_eq!(cursor, 4);
+        // Cleared even when there's nothing new to put in it.
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn since_picks_up_only_what_arrived_after_the_cursor() {
+        let feed = AudioFeed::new();
+        feed.push(&[1.0, 2.0]);
+        let mut out = Vec::new();
+        let cursor = feed.since(0, &mut out);
+        feed.push(&[3.0, 4.0, 5.0, 6.0]);
+        let cursor = feed.since(cursor, &mut out);
+        assert_eq!(cursor, 6);
+        assert_eq!(out, vec![3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn since_skips_the_gap_when_the_reader_fell_behind() {
+        let feed = AudioFeed::new();
+        // Push more than the ring keeps, so a cursor of 0 is older than
+        // anything still retained. The reader gets a gap, and the first
+        // sample it sees is the oldest retained one rather than a repeat of
+        // what already fell off the front.
+        let total = KEEP_SAMPLES + 8;
+        let samples: Vec<f32> = (0..total).map(|i| i as f32).collect();
+        feed.push(&samples);
+
+        let mut out = Vec::new();
+        let cursor = feed.since(0, &mut out);
+        assert_eq!(cursor, total as u64);
+        assert_eq!(out.len(), KEEP_SAMPLES);
+        assert_eq!(out[0], (total - KEEP_SAMPLES) as f32);
+        assert_eq!(out[out.len() - 1], (total - 1) as f32);
     }
 
     #[test]

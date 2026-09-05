@@ -120,6 +120,11 @@
           "show_duration": true,
           "comfortable": false
         },
+        "milkdrop": {
+          "enabled": false,
+          "strength": 0.3499999940395355,
+          "color": "theme"
+        },
         "hide_menubar": false,
         "os_decorations": true,
         "resize_border": true
@@ -591,6 +596,15 @@
             "comfortable": false
           }
         },
+        "milkdrop": {
+          "description": "The Milkdrop backdrop as a look: whether it's on, how far it carries\nover the cover wash, and how it's coloured. Here rather than with\nthe machine's own Milkdrop state because a workspace can be built\naround it, the way Metro is built around song theming; what stays\nper machine (the preset, the lock, the render scale) is in\n[`BackdropVisualConfig`].",
+          "$ref": "#/$defs/MilkdropLook",
+          "default": {
+            "enabled": false,
+            "strength": 0.3499999940395355,
+            "color": "theme"
+          }
+        },
         "hide_menubar": {
           "description": "Whether the in-window menubar stays hidden, showing only while alt\nis held or a menu is open. Off by default: the bar is the way into\neverything.",
           "type": "boolean",
@@ -689,6 +703,53 @@
           "default": false
         }
       }
+    },
+    "MilkdropLook": {
+      "description": "The Milkdrop backdrop's share of a look. See\n[`AppearanceBundle::milkdrop`].",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether the visual runs at all. Off is exactly the cover backdrop.",
+          "type": "boolean",
+          "default": false
+        },
+        "strength": {
+          "description": "How far the frame carries over the blurred cover, 0 to 1. It goes\nout as the pass's alpha, so 0 is the art alone and 1 replaces it.",
+          "type": "number",
+          "format": "float",
+          "default": 0.3499999940395355
+        },
+        "color": {
+          "description": "How the frame's colours meet the theme.",
+          "$ref": "#/$defs/MilkdropColor",
+          "default": "theme"
+        }
+      }
+    },
+    "MilkdropColor": {
+      "description": "How a Milkdrop frame's colours are treated before they reach the screen.\n\nPresets are drawn on black by people who assumed black, and on the\nlight theme that makes a Milkdrop surface a dark hole in a pale window.\nThe two remaps here are the answer: one keeps the preset and flips its\nlightness so black becomes white, the other paints the preset's shape\nin the theme's own colours.",
+      "oneOf": [
+        {
+          "description": "The preset's own colours, whatever the theme.",
+          "type": "string",
+          "const": "preset"
+        },
+        {
+          "description": "The preset's own colours on the dark theme, and its lightness\ninverted on the light one, so the black it was drawn on reads as\nthe pale background it's sitting over.",
+          "type": "string",
+          "const": "theme"
+        },
+        {
+          "description": "The frame's lightness mapped onto a ramp from the theme's root\nbackground to its accent. Reads as the app's own colours on both\nthemes, and follows the cover when song theming is on.",
+          "type": "string",
+          "const": "palette"
+        },
+        {
+          "description": "The same ramp with the playing cover's dominant colour at the top\ninstead of the accent, whatever the song-theming switch says. The\naccent stands in while nothing plays or the cover has no colour.",
+          "type": "string",
+          "const": "cover"
+        }
+      ]
     }
   },
   "required": [

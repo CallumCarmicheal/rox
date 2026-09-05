@@ -42,6 +42,15 @@ serde_json = "1"
 # candle, so neither is a new dependency for the build.
 base64 = "0.22"
 half = "2"
+# XSPF import per ADR 16's interop surface: a read-only XML tree over the whole
+# document, which a playlist file is small enough for. Already in the lock
+# through gpui's font stack (cosmic-text -> fontdb -> fontconfig-parser), so
+# this adds a dependency edge, not a crate to compile.
+roxmltree = "0.20"
+# File URIs for XSPF locations in both directions, which is where the format
+# earns its keep over M3U: a path with a space or a non-ASCII letter survives
+# the round trip. Same crate the rox shell and rox-services already carry.
+url = "2"
 
 [dev-dependencies]
 # The scale benches under benches/. Criterion because the numbers it takes

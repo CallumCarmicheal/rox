@@ -20,6 +20,7 @@ use std::time::UNIX_EPOCH;
 use lofty::file::TaggedFile;
 use lofty::flac::FlacFile;
 use lofty::mpeg::MpegFile;
+use lofty::ogg::OpusFile;
 use lofty::prelude::*;
 use rayon::prelude::*;
 use rusqlite::Connection;
@@ -30,10 +31,13 @@ use crate::TrackRow;
 /// The audio extensions rox recognizes: what the scan indexes and what an
 /// external open accepts, one list so the two never drift. Tracks the codec
 /// set the engine is built with (ADR 2). Video containers (mp4, webm) stay
-/// off the list so a scan never vacuums up a film library, and Opus is out
-/// until symphonia ships a decoder for it.
+/// off the list so a scan never vacuums up a film library. Opus is on the
+/// list now that the engine has a decoder for it (`rox-playback`'s `opus`
+/// module), which also closes the hole where rox's own converter wrote
+/// `.opus` files the scan then refused to index.
 pub const EXTENSIONS: &[&str] = &[
-    "flac", "mp3", "wav", "ogg", "oga", "m4a", "m4b", "aac", "aif", "aiff", "aifc", "mka", "caf",
+    "flac", "mp3", "wav", "ogg", "oga", "opus", "m4a", "m4b", "aac", "aif", "aiff", "aifc", "mka",
+    "caf",
 ];
 
 /// Cue sheets are deliberately not in [`EXTENSIONS`]: a sheet is not audio,
@@ -765,7 +769,7 @@ fn cue_rows(
 /// probe; those have no rating rox reads anyway.
 fn read_tags(path: &Path) -> Option<TrackRow> {
     let source = crate::tag_source::open(path).ok()?;
-    let (file, rating) = catch_unwind(AssertUnwindSafe(move || {
+    let (file, rating, r128) = catch_unwind(AssertUnwindSafe(move || {
         let probe = lofty::probe::Probe::new(source)
             .guess_file_type()
             .ok()?
@@ -778,21 +782,34 @@ fn read_tags(path: &Path) -> Option<TrackRow> {
                 let mut reader = probe.into_inner();
                 let mpeg = MpegFile::read_from(&mut reader, opts).ok()?;
                 let rating = mpeg.id3v2().and_then(crate::rating::from_id3v2);
-                Some((TaggedFile::from(mpeg), rating))
+                Some((TaggedFile::from(mpeg), rating, None))
             }
             Some(lofty::file::FileType::Flac) => {
                 let mut reader = probe.into_inner();
                 let flac = FlacFile::read_from(&mut reader, opts).ok()?;
                 let rating = flac.vorbis_comments().and_then(crate::rating::from_vorbis);
-                Some((TaggedFile::from(flac), rating))
+                Some((TaggedFile::from(flac), rating, None))
+            }
+            // Opus is here for ReplayGain, not rating: RFC 7845 levels with
+            // R128_TRACK_GAIN/R128_ALBUM_GAIN, which are unmapped Vorbis keys
+            // the generic tag drops, so the only place to read them is the
+            // native parse. The rating comes off the same comments while
+            // they're open, same as FLAC.
+            Some(lofty::file::FileType::Opus) => {
+                let mut reader = probe.into_inner();
+                let opus = OpusFile::read_from(&mut reader, opts).ok()?;
+                let comments = opus.vorbis_comments();
+                let rating = crate::rating::from_vorbis(comments);
+                let r128 = crate::replaygain::read_r128(comments);
+                Some((TaggedFile::from(opus), rating, r128))
             }
             Some(lofty::file::FileType::Mp4) => {
                 let mut reader = probe.into_inner();
                 let mp4 = lofty::mp4::Mp4File::read_from(&mut reader, opts).ok()?;
                 let rating = mp4.ilst().and_then(crate::rating::from_ilst);
-                Some((TaggedFile::from(mp4), rating))
+                Some((TaggedFile::from(mp4), rating, None))
             }
-            _ => probe.read().ok().map(|f| (f, None)),
+            _ => probe.read().ok().map(|f| (f, None, None)),
         }
     }))
     .ok()??;
@@ -814,6 +831,7 @@ fn read_tags(path: &Path) -> Option<TrackRow> {
         lofty::file::FileType::Mpeg => Some("mp3"),
         lofty::file::FileType::Wav => Some("wav"),
         lofty::file::FileType::Vorbis => Some("vorbis"),
+        lofty::file::FileType::Opus => Some("opus"),
         lofty::file::FileType::Aiff => Some("aiff"),
         lofty::file::FileType::Aac => Some("aac"),
         // Mp4 (m4a/m4b) holds AAC or ALAC and lofty doesn't split them, so
@@ -889,6 +907,14 @@ fn read_tags(path: &Path) -> Option<TrackRow> {
     // values into an APEv2 tag next to an ID3v2 tag that has none, and lofty
     // calls ID3v2 the primary on MPEG, so a primary-only read misses them.
     row.replay_gain = replay_gain_across_tags(&file);
+    // Opus files carry no ReplayGain keys at all, so what the generic read
+    // found is nothing and the R128 pair off the native parse is the whole
+    // answer. Anything a tagger did write the standard way still wins.
+    if let Some(r128) = r128 {
+        if !row.replay_gain.any() {
+            row.replay_gain = r128;
+        }
+    }
     // The rating read off the same native parse above: FMPS is stored in TXXX
     // frames and unmapped Vorbis keys, which this generic tag never holds.
     row.rating = rating.unwrap_or(0);
@@ -1848,5 +1874,68 @@ FILE "disc.wav" WAVE
                 "Stray Sheep".to_string()
             )
         );
+    }
+
+    /// The checked-in Opus fixture, one second of a 440 Hz tone. Reading it at
+    /// all is the point: `.opus` used to be off `EXTENSIONS` and the codec arm
+    /// had no case for it. The codec comes off the parsed file type rather than
+    /// the extension, so a mislabelled file would still read as opus here.
+    fn opus_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../rox-playback/tests/fixtures/tone-440.opus")
+    }
+
+    #[test]
+    fn read_one_indexes_an_opus_file() {
+        let row = read_one(&opus_fixture()).expect("the fixture is readable");
+        assert_eq!(row.codec, "opus");
+        assert!(
+            row.duration_ms.abs_diff(1000) <= 10,
+            "one second within 10 ms, got {} ms",
+            row.duration_ms
+        );
+        // lofty reports what the encoder was fed, which is also 48 kHz here.
+        // Playback always runs at 48 kHz regardless; the row says what the
+        // tag says, the way every other player shows it.
+        assert_eq!(row.sample_rate_hz, 48_000);
+        assert!(
+            row.replay_gain.track_db.is_none(),
+            "the fixture is untagged"
+        );
+    }
+
+    /// Opus levels with R128_TRACK_GAIN, a Q7.8 number of dB against -23 LUFS,
+    /// and -1280 is -5 dB there, which is exactly 0 dB of ReplayGain. Those
+    /// keys are unmapped Vorbis comments the generic tag drops, so this is
+    /// really a test that the scanner reads them off the native parse.
+    #[test]
+    fn read_one_converts_an_opus_r128_gain_to_replaygain() {
+        use lofty::config::{ParseOptions, WriteOptions};
+        use lofty::file::AudioFile;
+
+        let dir =
+            std::env::temp_dir().join(format!("rox-scanner-opus-r128-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tone.opus");
+        std::fs::copy(opus_fixture(), &path).unwrap();
+
+        let mut file = std::fs::File::open(&path).unwrap();
+        let mut opus = OpusFile::read_from(&mut file, ParseOptions::new()).unwrap();
+        opus.vorbis_comments_mut()
+            .push("R128_TRACK_GAIN".to_string(), "-1280".to_string());
+        opus.save_to_path(&path, WriteOptions::default()).unwrap();
+
+        let row = read_one(&path).unwrap();
+        assert_eq!(row.replay_gain.track_db, Some(0.0));
+        assert_eq!(
+            row.replay_gain.album_db, None,
+            "only the track key was written"
+        );
+        assert_eq!(
+            row.replay_gain.track_peak, None,
+            "the R128 scheme has no peaks to read"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

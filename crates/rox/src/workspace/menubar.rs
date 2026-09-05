@@ -5,7 +5,8 @@
 
 use super::*;
 
-use gpui::MouseDownEvent;
+use gpui::{anchored, MouseDownEvent};
+use rox_core::settings::MenubarButtons;
 
 /// Where the keyboard cursor sits inside an open dropdown: the entry it's
 /// on, plus the row within it for the one entry kind that draws a run of
@@ -55,6 +56,17 @@ impl Workspace {
             }
             MenuAction::Stop => {
                 self.state.player.update(cx, |player, cx| player.stop(cx));
+            }
+            MenuAction::AbRepeat => {
+                self.state
+                    .player
+                    .update(cx, |player, cx| player.ab_mark(cx));
+            }
+            MenuAction::Sleep(pick) => {
+                let after = pick.minutes().map(|m| Duration::from_secs(m * 60));
+                self.state
+                    .player
+                    .update(cx, |player, cx| player.set_sleep(after, cx));
             }
             MenuAction::Next => {
                 self.state.player.update(cx, |player, cx| player.next(cx));
@@ -209,6 +221,11 @@ impl Workspace {
         self.menubar_keys = on;
         if on {
             self.menu_top = self.open_menu.unwrap_or(0);
+            // A collapsed bar has no buttons to walk, so arming it opens
+            // the root list and the cursor walks that instead.
+            if self.menubar_collapsed {
+                self.menu_root = true;
+            }
         } else {
             self.close_menus(cx);
         }
@@ -306,6 +323,10 @@ impl Workspace {
         } else if self.open_submenu.is_some() {
             self.open_flyout(None);
             cx.notify();
+        } else if self.open_menu.is_some() && self.menu_root {
+            // Back to the root list, cursor still on this menu's row.
+            self.show_top(None);
+            cx.notify();
         } else if self.open_menu.is_some() {
             self.close_menus(cx);
         } else {
@@ -318,6 +339,13 @@ impl Workspace {
     /// wrapping at both ends. With nothing dropped down they open the
     /// cursor's menu instead, down at its first row and up at its last.
     fn menu_step(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.open_menu.is_none() && self.menu_root {
+            // The root list runs top to bottom, so here up and down walk
+            // the menus the way left and right walk the unfolded bar.
+            self.menu_top = self.step_top(delta);
+            cx.notify();
+            return;
+        }
         if self.open_menu.is_none() {
             self.open_top(self.menu_top, cx);
             if delta < 0 {
@@ -347,6 +375,11 @@ impl Workspace {
             self.menu_group_slot = None;
         } else if self.open_submenu.is_some() {
             self.open_flyout(None);
+        } else if self.menu_root {
+            // The dropdown hangs off the root row, so left backs into the
+            // list rather than along to a neighbor; on the list itself
+            // there's nothing further left to go.
+            self.show_top(None);
         } else if self.open_menu.is_some() {
             self.open_top(self.step_top(-1), cx);
             return;
@@ -376,9 +409,15 @@ impl Workspace {
                 self.open_flyout(Some(entry));
                 self.menu_sub_slot = (!self.flyout_rows().is_empty()).then_some(0);
                 cx.notify();
-            } else {
+            } else if !self.menu_root {
                 self.open_top(self.step_top(1), cx);
             }
+            return;
+        }
+        if self.menu_root {
+            // Right on a root row flies its menu out, the same step in
+            // that a submenu row takes.
+            self.open_top(self.menu_top, cx);
             return;
         }
         self.menu_top = self.step_top(1);
@@ -409,10 +448,24 @@ impl Workspace {
     /// Drop the menu at `index` under the keyboard, cursor on its first row.
     fn open_top(&mut self, index: usize, cx: &mut Context<Self>) {
         self.close_menus(cx);
+        self.menu_root = self.menubar_collapsed;
         self.menu_top = index;
         self.open_menu = Some(index);
         self.menu_slot = self.menu_rows().first().map(|(slot, _)| *slot);
         cx.notify();
+    }
+
+    /// Fly the menu at `index` out of the collapsed bar's root list, or
+    /// with None retract whichever is out, leaving the list up either way.
+    /// The hover route between root rows, and the keyboard's way back to
+    /// the list; the deeper levels go with the dropdown they hung off.
+    fn show_top(&mut self, index: Option<usize>) {
+        self.open_flyout(None);
+        self.open_menu = index;
+        self.menu_slot = None;
+        if let Some(index) = index {
+            self.menu_top = index;
+        }
     }
 
     /// The menu one step along the bar from the cursor's, wrapping.
@@ -695,7 +748,121 @@ impl Workspace {
                 d.on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_menus(cx)))
             })
             .child(menu_label(menu.label, letter))
-            .when(open, |d| d.child(deferred(self.dropdown(menu, cx))))
+            .when(open, |d| {
+                d.child(deferred(
+                    self.dropdown(menu, cx)
+                        .absolute()
+                        .left_0()
+                        .top(px(MENU_BAR_H)),
+                ))
+            })
+    }
+
+    /// The one button a collapsed bar keeps: the menus behind a hamburger,
+    /// the menu panel's shape. Its dropdown is the root list of top menus,
+    /// each flying its real dropdown out to the side.
+    fn collapsed_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let open = self.menu_root;
+        div()
+            .relative()
+            .h_full()
+            .px(tokens::SPACE_MD)
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .when(open, |d| d.bg(palette::bg_control_active()))
+            .hover(|d| d.bg(palette::bg_menu_hover()))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    let reopen = !this.menu_root;
+                    this.close_menus(cx);
+                    this.menu_root = reopen;
+                }),
+            )
+            .when(open, |d| {
+                d.on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_menus(cx)))
+            })
+            .child(
+                svg()
+                    .path(icons::MENU)
+                    .size(px(14.))
+                    .text_color(palette::text_muted()),
+            )
+            .when(open, |d| d.child(deferred(self.root_menu(cx))))
+    }
+
+    /// The collapsed bar's root surface: one row per top menu, flying out
+    /// on hover the way submenu rows do, with the access letters underlined
+    /// while the bar is taking keys.
+    fn root_menu(&self, cx: &mut Context<Self>) -> Div {
+        let letters = self.menubar_keys.then(mnemonics).unwrap_or_default();
+        div()
+            .absolute()
+            .left_0()
+            .top(px(MENU_BAR_H))
+            .min_w(px(160.))
+            .flex()
+            .flex_col()
+            .py(tokens::SPACE_XS)
+            .bg(palette::bg_menu_opaque())
+            .border_1()
+            .border_color(palette::border_light())
+            .shadow_md()
+            .occlude()
+            .child(self.menu_surface_capture(0, cx))
+            .children(MENUS.iter().enumerate().map(|(i, menu)| {
+                let letter = letters.get(i).cloned().flatten().map(|(range, _)| range);
+                self.root_row(i, menu, letter, cx)
+            }))
+    }
+
+    /// A root row for a top menu. Lit while its dropdown is out or the
+    /// keyboard cursor is on it, the same cursor the unfolded bar's buttons
+    /// show.
+    fn root_row(
+        &self,
+        index: usize,
+        menu: &'static Menu,
+        letter: Option<std::ops::Range<usize>>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let open = self.open_menu == Some(index);
+        let cursor = self.menubar_keys && self.menu_top == index;
+        div()
+            .id(("menu-root", index))
+            .relative()
+            .px(tokens::SPACE_MD)
+            .py(tokens::SPACE_XS)
+            .cursor_pointer()
+            .when(open || cursor, nav_lit)
+            .hover(|d| d.bg(palette::bg_control_hover_opaque()))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered && this.open_menu != Some(index) {
+                    this.show_top(Some(index));
+                    cx.notify();
+                }
+            }))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(tokens::SPACE_SM)
+            .child(menu_label(menu.label, letter))
+            .child(
+                svg()
+                    .path(icons::CHEVRON_RIGHT)
+                    .size_3()
+                    .text_color(palette::text_muted()),
+            )
+            .when(open, |d| {
+                // The same offset the submenu flyouts back out, so the
+                // dropdown's first row lines up with this one.
+                d.child(
+                    flyout_side(self.dropdown(menu, cx).absolute(), self.flyout_left(0))
+                        .top(px(-5.)),
+                )
+            })
     }
     /// The menubar row: the mini toggle, the menus, and the status side.
     /// One builder so the docked row and the alt-revealed overlay stay
@@ -706,6 +873,7 @@ impl Workspace {
         // handle, and the library status.
         let native_menus = cfg!(target_os = "macos");
         div()
+            .relative()
             .flex()
             .flex_row()
             .w_full()
@@ -714,9 +882,13 @@ impl Workspace {
             .bg(palette::bg_menubar())
             .border_b_1()
             .border_color(palette::border())
+            .when(!native_menus, |d| d.child(self.menubar_capture(cx)))
             .children(self.traffic_lights(window, cx))
             .children(self.mini_button(cx))
-            .when(!native_menus, |d| {
+            .when(!native_menus && self.menubar_collapsed, |d| {
+                d.child(self.collapsed_button(cx))
+            })
+            .when(!native_menus && !self.menubar_collapsed, |d| {
                 // The letters are only worked out while they're on show, so
                 // the common frame doesn't pay for five locale lookups and a
                 // dedup pass.
@@ -736,7 +908,61 @@ impl Workspace {
                     .cursor_grab()
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move()),
             )
-            .child(self.library_status(cx))
+            .child(self.library_status(window, cx))
+    }
+
+    /// A paint-time capture of the bar's own bounds, the first thing the
+    /// bar paints so [`Self::menubar_fit_capture`] finds them set.
+    fn menubar_capture(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity();
+        canvas(
+            move |bounds, _, cx| {
+                view.update(cx, |this, _| this.menubar_bounds = Some(bounds));
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+    }
+
+    /// A zero-width marker after the status side's last control. Where it
+    /// lands is where the row's content ends, past the bar's edge when the
+    /// row overflows, which is what decides the fold.
+    fn menubar_fit_capture(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity();
+        canvas(
+            move |bounds, _, cx| {
+                view.update(cx, |this, cx| this.note_menubar_fit(bounds.origin.x, cx));
+            },
+            |_, _, _, _| {},
+        )
+        .w_0()
+        .h_full()
+        .flex_none()
+    }
+
+    /// Fold the menus behind one button when the row can't hold them, and
+    /// unfold once it can again. `end_x` is where the row's content ends;
+    /// the row wants that far from its left edge plus the trailing padding.
+    /// The unfolded width is remembered while collapsed, with a little
+    /// slack over it so a resize can't sit on the boundary flickering. A
+    /// status line that grew while the bar was collapsed takes one more
+    /// frame to settle: the bar unfolds, measures, and folds again.
+    fn note_menubar_fit(&mut self, end_x: Pixels, cx: &mut Context<Self>) {
+        let Some(bar) = self.menubar_bounds else {
+            return;
+        };
+        let collapse = if self.menubar_collapsed {
+            bar.size.width < self.menubar_need_w + px(8.)
+        } else {
+            self.menubar_need_w = end_x - bar.origin.x + tokens::SPACE_MD;
+            self.menubar_need_w > bar.size.width + px(0.5)
+        };
+        if collapse != self.menubar_collapsed {
+            self.menubar_collapsed = collapse;
+            // Whatever was open hung off a row the next frame won't draw.
+            self.close_menus(cx);
+        }
     }
 
     /// The macOS window buttons at the menubar's left edge, when this window
@@ -766,9 +992,10 @@ impl Workspace {
     }
 
     /// The menubar's right side: the catalog status line, a badge while a
-    /// scan or load runs, a rescan button once a folder is known, and an
-    /// abort button while a scan runs.
-    fn library_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// scan or load runs, the tasks and sleep timer buttons, a rescan
+    /// button once a folder is known, and an abort button while a scan
+    /// runs.
+    fn library_status(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (busy, status, can_rescan, scanning) = {
             let library = self.state.library.read(cx);
             (
@@ -779,6 +1006,7 @@ impl Workspace {
             )
         };
         let idle = busy.is_none();
+        let buttons = settings::menubar_buttons();
         // A standing selection rides along in parentheses after the
         // catalog count: what's picked and how long it runs, the status
         // strip's two stock readouts up in the bar. Only at idle, since a
@@ -796,14 +1024,26 @@ impl Workspace {
         };
         // Status text leftmost so its width changes grow into the empty
         // middle of the bar; the badge and buttons keep their spot at the
-        // right edge.
+        // right edge. The side gives way before the menus do: it shrinks
+        // once the bar is out of room, the text truncating down to a floor,
+        // and only past that does the bar fold the menus.
         div()
             .flex()
             .flex_row()
             .items_center()
-            .flex_none()
+            .flex_shrink()
+            .min_w_0()
             .gap(tokens::SPACE_SM)
             .px(tokens::SPACE_MD)
+            // A right-click anywhere on this side picks which of its
+            // buttons draw. The buttons only take the left button, so the
+            // press reaches here from on top of them too.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.open_buttons_menu(event.position, window, cx);
+                }),
+            )
             .when_some(crate::startup::updates::available(), |d, version| {
                 d.child(self.update_chip(version, cx))
             })
@@ -813,6 +1053,8 @@ impl Workspace {
                 d.child(
                     div()
                         .id("library-status")
+                        .flex_shrink()
+                        .min_w(px(64.))
                         .max_w(px(480.))
                         .truncate()
                         .text_color(palette::text_muted())
@@ -852,12 +1094,12 @@ impl Workspace {
                     .font_features = Some(FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
                 d.child(badge.child(label))
             })
-            // Between the scan badge and the scan controls: it's the same
-            // kind of thing, work the library is doing that you didn't have
-            // to sit and watch. Always there, since the window behind it is
-            // also where those jobs are started from.
-            .child(crate::tasks_window::control(cx))
-            .when(can_rescan && idle, |d| {
+            // After the rescan: it's the same kind of thing, work the
+            // library is doing that you didn't have to sit and watch. The
+            // window behind it is also where those jobs are started from.
+            // The rescan button heads the button group, with the abort
+            // standing in its slot while a scan runs, so it never jumps.
+            .when(buttons.rescan && can_rescan && idle, |d| {
                 d.child(panel::icon_control_sized(
                     icons::REFRESH_CW,
                     px(12.),
@@ -885,6 +1127,169 @@ impl Workspace {
                     cx,
                 ))
             })
+            .when(buttons.tasks, |d| d.child(crate::tasks_window::control(cx)))
+            // The sleep timer beside it: the same kind of thing again,
+            // something set and left to run while you do something else.
+            .when(buttons.sleep, |d| d.child(self.sleep_control(cx)))
+            // The side's popup, over everything and pinned where the
+            // press landed. The occluding layer under it closes the menu
+            // on an outside click, the transport strip's arrangement.
+            .when_some(self.status_menu.as_ref(), |d, (at, menu, _)| {
+                d.child(
+                    deferred(
+                        anchored().child(
+                            div()
+                                .w(window.bounds().size.width)
+                                .h(window.bounds().size.height)
+                                .occlude()
+                                .child(
+                                    anchored()
+                                        .position(*at)
+                                        .snap_to_window_with_margin(px(8.))
+                                        .child(menu.clone()),
+                                ),
+                        ),
+                    )
+                    .with_priority(1),
+                )
+            })
+            .when(!cfg!(target_os = "macos"), |d| {
+                d.child(self.menubar_fit_capture(cx))
+            })
+    }
+
+    /// The sleep timer button: a moon, tinted the accent while a timer
+    /// runs, with the minutes left in its tip. A press drops the same
+    /// picks the Playback menu offers, so the bar is the short way to the
+    /// timer and the menu stays for the keyboard.
+    fn sleep_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let left = sleep_minutes_left(
+            self.state
+                .player
+                .read(cx)
+                .sleep_remaining()
+                .map(|left| left.as_secs()),
+        );
+        let (tip, color) = match left {
+            Some(minutes) => (
+                rox_i18n::t!("playback-sleep-tip-remaining", minutes = minutes),
+                palette::accent(),
+            ),
+            None => (rox_i18n::t!("playback-sleep-tip"), palette::text_muted()),
+        };
+        panel::Tip::keyed("sleep-timer", tip).apply(
+            div()
+                .flex_none()
+                .p(tokens::ICON_PAD)
+                .rounded(tokens::RADIUS)
+                .hover(|d| d.bg(palette::bg_control()))
+                .cursor_pointer()
+                .child(
+                    svg()
+                        .path(icons::MOON)
+                        .size(px(12.))
+                        .flex_none()
+                        .text_color(color),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        this.open_sleep_menu(event.position, window, cx);
+                    }),
+                ),
+        )
+    }
+
+    /// The sleep dropdown, hung from where the press started: the four
+    /// durations and the cancel row with its countdown, each dispatched
+    /// through the menu action so the two entry points can't drift.
+    fn open_sleep_menu(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        const PICKS: [(&str, SleepPick); 4] = [
+            ("playback-sleep-15", SleepPick::Min15),
+            ("playback-sleep-30", SleepPick::Min30),
+            ("playback-sleep-60", SleepPick::Min60),
+            ("playback-sleep-90", SleepPick::Min90),
+        ];
+        let sleep = self
+            .state
+            .player
+            .read(cx)
+            .sleep_remaining()
+            .map(|left| left.as_secs());
+        let weak = cx.entity().downgrade();
+        let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
+            let row = |label: SharedString, icon: &'static str, pick: SleepPick| {
+                let weak = weak.clone();
+                gpui_component::menu::PopupMenuItem::new(label)
+                    .icon(Icon::default().path(icon))
+                    .on_click(move |_, window, cx| {
+                        weak.update(cx, |this, cx| this.run(MenuAction::Sleep(pick), window, cx))
+                            .ok();
+                    })
+            };
+            for (label, pick) in PICKS {
+                menu = menu.item(row(rox_i18n::t_static(label).into(), icons::MOON, pick));
+            }
+            menu.separator()
+                .item(row(sleep_off_label(sleep), icons::CLOCK, SleepPick::Off))
+        });
+        self.show_status_menu(at, menu, window, cx);
+    }
+
+    /// The right-click menu for the status side: a check per button it
+    /// can draw. A flip lands in the live set and the look at once, so the
+    /// bar repaints now and the choice comes back next launch.
+    fn open_buttons_menu(
+        &mut self,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = settings::menubar_buttons();
+        let rows: [(&str, fn(&mut MenubarButtons) -> &mut bool); 3] = [
+            ("menubar-button-tasks", |b| &mut b.tasks),
+            ("menubar-button-sleep", |b| &mut b.sleep),
+            ("menubar-button-rescan", |b| &mut b.rescan),
+        ];
+        let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
+            for (label, field) in rows {
+                let mut probe = current;
+                let checked = *field(&mut probe);
+                menu = menu.item(
+                    gpui_component::menu::PopupMenuItem::new(rox_i18n::t_static(label))
+                        .checked(checked)
+                        .on_click(move |_, _, cx| {
+                            let mut next = settings::menubar_buttons();
+                            let slot = field(&mut next);
+                            *slot = !*slot;
+                            settings::set_menubar_buttons(next, cx);
+                            Settings::update(move |s| {
+                                s.look.bundle.appearance.menubar_buttons = next
+                            });
+                        }),
+                );
+            }
+            menu
+        });
+        self.show_status_menu(at, menu, window, cx);
+    }
+
+    /// Hang a popup off the status side at `at`, replacing whatever was
+    /// there, and clear it again when it dismisses.
+    fn show_status_menu(
+        &mut self,
+        at: Point<Pixels>,
+        menu: Entity<PopupMenu>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        menu.focus_handle(cx).focus(window);
+        let subscription = cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
+            this.status_menu = None;
+            cx.notify();
+        });
+        self.status_menu = Some((at, menu, subscription));
+        cx.notify();
     }
 
     /// The "Update Available" chip beside the catalog status, shown while a
@@ -965,11 +1370,17 @@ impl Workspace {
         flyout_leftward(&self.menu_surfaces, level, self.menu_viewport_w)
     }
 
-    fn dropdown(&self, menu: &'static Menu, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A dropdown's surface level in [`Workspace::menu_surfaces`]: the
+    /// dropdown counts from 0 on the unfolded bar, and from 1 on a collapsed
+    /// one, where the root list of top menus sits underneath it.
+    fn level(&self, level: usize) -> usize {
+        level + usize::from(self.menubar_collapsed)
+    }
+
+    /// A top menu's dropdown, unplaced: the unfolded bar hangs it under
+    /// its button, the collapsed bar flies it out of a root row.
+    fn dropdown(&self, menu: &'static Menu, cx: &mut Context<Self>) -> Div {
         div()
-            .absolute()
-            .left_0()
-            .top(px(MENU_BAR_H))
             .min_w(px(180.))
             .flex()
             .flex_col()
@@ -979,7 +1390,7 @@ impl Workspace {
             .border_color(palette::border_light())
             .shadow_md()
             .occlude()
-            .child(self.menu_surface_capture(0, cx))
+            .child(self.menu_surface_capture(self.level(0), cx))
             .children(menu.entries.iter().enumerate().map(|(i, entry)| {
                 match entry {
                     MenuEntry::Item(item) => self
@@ -1068,8 +1479,10 @@ impl Workspace {
             MenuAction::TogglePostShader => crate::workspace::post_shader_on(),
             _ => false,
         };
-        let is_playing = self.state.player.read(cx).is_playing();
-        let (label, icon) = menu_item_display(item, is_playing);
+        let player = self.state.player.read(cx);
+        let (is_playing, ab) = (player.is_playing(), player.ab_state());
+        let sleep = player.sleep_remaining().map(|left| left.as_secs());
+        let (label, icon) = menu_item_display(item, is_playing, ab, sleep);
         div()
             .px(tokens::SPACE_MD)
             .py(tokens::SPACE_XS)
@@ -1179,7 +1592,7 @@ impl Workspace {
                     // Top offset backs out the parent's padding and the
                     // dropdown border so the first item lines up with the
                     // parent row.
-                    flyout_side(div().absolute(), self.flyout_left(0))
+                    flyout_side(div().absolute(), self.flyout_left(self.level(0)))
                         .top(px(-5.))
                         .min_w(px(160.))
                         .flex()
@@ -1256,7 +1669,7 @@ impl Workspace {
                 // Read the presets only once the flyout opens, not on every
                 // parent-menu paint.
                 let presets = rox_core::settings::layouts::all(&Settings::load());
-                let mut flyout = flyout_side(div().absolute(), self.flyout_left(0))
+                let mut flyout = flyout_side(div().absolute(), self.flyout_left(self.level(0)))
                     .top(px(-5.))
                     .min_w(px(180.))
                     .flex()
@@ -1368,7 +1781,7 @@ impl Workspace {
             // Read the presets only once the flyout opens, not on every
             // parent-menu paint.
             let presets = panel_presets::saved();
-            let flyout = flyout_box(self.flyout_left(0));
+            let flyout = flyout_box(self.flyout_left(self.level(0)));
             d.child(if presets.is_empty() {
                 flyout.child(flyout_note(rox_i18n::t!("menu-no-presets")))
             } else {
@@ -1398,8 +1811,8 @@ impl Workspace {
             let presets = panel_presets::saved();
             // This flyout hosts the group flyouts, so it captures its own
             // bounds for their side decision.
-            let mut flyout =
-                flyout_box(self.flyout_left(0)).child(self.menu_surface_capture(1, cx));
+            let mut flyout = flyout_box(self.flyout_left(self.level(0)))
+                .child(self.menu_surface_capture(self.level(1), cx));
             // Group 0 is the presets when there are any, so the catalog's
             // groups start one along and the two levels never share an index.
             if !presets.is_empty() {
@@ -1495,7 +1908,7 @@ impl Workspace {
                     .text_color(palette::text_muted()),
             )
             .when(open, |d| {
-                d.child(flyout_box(self.flyout_left(1)).children(rows))
+                d.child(flyout_box(self.flyout_left(self.level(1))).children(rows))
             })
     }
 
@@ -1542,6 +1955,7 @@ impl Workspace {
     /// Close whatever the menubar has open, down to the nested flyouts. What
     /// every row that runs something does first.
     fn close_menus(&mut self, cx: &mut Context<Self>) {
+        self.menu_root = false;
         self.open_menu = None;
         self.menu_slot = None;
         self.open_submenu = None;
@@ -1627,7 +2041,7 @@ impl Workspace {
                 if target == WorkspaceTarget::Overwrite {
                     entries.retain(|entry| !entry.builtin);
                 }
-                let mut flyout = flyout_side(div().absolute(), self.flyout_left(0))
+                let mut flyout = flyout_side(div().absolute(), self.flyout_left(self.level(0)))
                     .top(px(-5.))
                     .min_w(px(180.))
                     .flex()

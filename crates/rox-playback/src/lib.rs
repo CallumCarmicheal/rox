@@ -8,11 +8,13 @@
 pub mod analysis;
 pub mod broadcast;
 pub mod chain;
+pub mod codecs;
 pub mod continuation;
 pub mod engine;
 pub mod eq;
 pub mod gain;
 pub mod latency;
+pub mod opus;
 pub mod output;
 pub mod resample;
 pub mod shared;

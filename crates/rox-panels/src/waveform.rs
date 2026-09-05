@@ -282,7 +282,7 @@ impl WaveformPanel {
         cx.notify();
     }
 
-    fn strip(&self, marker: Option<f32>) -> impl IntoElement {
+    fn strip(&self, marker: Option<f32>, ab: Option<(f32, Option<f32>)>) -> impl IntoElement {
         let scrub = self.scrub.clone();
         let player = self.state.player.clone();
         let from = self.from.clone();
@@ -296,7 +296,7 @@ impl WaveformPanel {
                 move |bounds, _, _| scrub.set_bounds(bounds)
             },
             move |bounds, _, window, _| {
-                paint_morph(&from, &to, u, t, marker, &config, bounds, window);
+                paint_morph(&from, &to, u, t, marker, ab, &config, bounds, window);
                 panel::scrub_on_paint(&scrub, window, {
                     let player = player.clone();
                     move |fraction, cx| panel::seek_fraction(&player, fraction, cx)
@@ -415,7 +415,8 @@ fn sample(
 /// instead of popping. Split shapes repeat the same blend per row, the
 /// lane layout following the incoming shape. Each shape that has a
 /// playhead draws it, the retiring one fading out as the incoming one
-/// fades in; the scrobble marker, when it's on, uses the same fade.
+/// fades in; the scrobble marker, when it's on, and the A-B section use
+/// the same fade.
 #[allow(clippy::too_many_arguments)]
 fn paint_morph(
     from: &Shape,
@@ -423,6 +424,7 @@ fn paint_morph(
     u: f32,
     t: f32,
     marker: Option<f32>,
+    ab: Option<(f32, Option<f32>)>,
     config: &WaveformConfig,
     bounds: Bounds<Pixels>,
     window: &mut Window,
@@ -530,6 +532,7 @@ fn paint_morph(
                 ));
             }
         }
+        panel::paint_ab(ab, weight, bounds, window);
         let alpha = (0xd9 as f32 * weight) as u8;
         if alpha == 0 {
             continue;
@@ -795,6 +798,7 @@ impl WaveformPanel {
         // instead of staying there fully lit.
         let now = player.now_playing().filter(|_| !player.queue_ended());
         let playing = player.is_playing();
+        let ab_state = player.ab_state();
         // The engine's position clock blinks off for a moment between
         // tracks and while a fresh queue opens, with the session very much
         // alive (the backdrop holds through the same blink). Snapping blank
@@ -813,10 +817,14 @@ impl WaveformPanel {
         }
 
         // The marker only shows where a scrobble could actually happen: the
-        // toggle on and the scrobbler armed.
+        // toggle on and some destination armed.
         let marker = (self.config.scrobble_marker)
-            .then(|| self.state.scrobbler.read(cx).marker())
+            .then(|| self.state.scrobble_marker(cx))
             .flatten();
+        // The A-B section, or the lone A while the cycle waits for B.
+        let ab = now
+            .as_ref()
+            .and_then(|now| panel::ab_fractions(ab_state, now.duration_secs));
 
         // The seek preview only shows on real peaks: the placeholder and
         // the unavailable message have no track shape to point along.
@@ -825,7 +833,7 @@ impl WaveformPanel {
             // Hold the strip through the blink: whatever it shows stays up,
             // and the next track's shape morphs from it instead of popping
             // in from blank.
-            (None, _) if between_tracks => self.strip(marker).into_any_element(),
+            (None, _) if between_tracks => self.strip(marker, ab).into_any_element(),
             (None, _) | (Some(_), Peaks::None) => {
                 // Nothing on screen to morph from later; snap the strip
                 // empty so the next track fades in from blank.
@@ -845,7 +853,7 @@ impl WaveformPanel {
             }
             (Some(_), Peaks::Decoding) => {
                 self.retarget(Shape::Placeholder);
-                self.strip(marker).into_any_element()
+                self.strip(marker, ab).into_any_element()
             }
             (Some(now), Peaks::Ready(peaks)) => {
                 let progress = now
@@ -859,7 +867,7 @@ impl WaveformPanel {
                     self.config.split_channels,
                     progress,
                 ));
-                self.strip(marker).into_any_element()
+                self.strip(marker, ab).into_any_element()
             }
         };
 

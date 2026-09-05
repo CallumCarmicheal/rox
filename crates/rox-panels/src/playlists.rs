@@ -28,10 +28,10 @@ use gpui::{
     PathPromptOptions, Pixels, ScrollStrategy, ScrollWheelEvent, SharedString, Stateful,
     Subscription, UniformListScrollHandle, WeakEntity, Window,
 };
-use gpui_component::button::Button;
-use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::menu::{ContextMenuExt, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::scroll::Scrollbar;
-use gpui_component::Icon;
+use gpui_component::{Icon, Sizable};
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +52,7 @@ use crate::track_ui::track_columns::{
     HEAD_HEIGHT_MAX, HEAD_TEXT_MAX, HEAD_TEXT_MIN, HEAD_TEXT_STOCK, ROW_HEIGHT_MAX, ROW_HEIGHT_MIN,
     ROW_HEIGHT_STOCK, ROW_SPACING_MAX,
 };
+use rox_library::playlist_file::Format;
 use rox_library::playlists::{PlaylistKind, PlaylistTrack};
 use rox_library::projection::{parse_query, FilterSet, Filterable, Term};
 use rox_panel_kit::config::default_true;
@@ -1230,10 +1231,13 @@ impl PlaylistsPanel {
         });
     }
 
-    /// Write a playlist to an M3U8 file the user picks, named after it by
-    /// default. Only playable members go in it; a deleted track has no file
-    /// to point at.
-    fn export(&self, playlist_id: i64, name: String, cx: &mut Context<Self>) {
+    /// Write a playlist to a file the user picks, named after it with the
+    /// picked format's extension. GPUI's path prompt has no filter list, so
+    /// a different playlist extension typed over the suggestion wins over
+    /// the pick: a file named `.pls` should hold PLS whatever the menu said.
+    /// Only playable members go in it; a deleted track has no file to point
+    /// at.
+    fn export(&self, playlist_id: i64, name: String, format: Format, cx: &mut Context<Self>) {
         let rows = self
             .state
             .library
@@ -1242,21 +1246,23 @@ impl PlaylistsPanel {
         if rows.is_empty() {
             return;
         }
-        let text = rox_library::m3u::to_m3u8(&rows);
         let home = dirs::home_dir().unwrap_or_default();
-        let file = format!("{name}.m3u8");
+        let file = format!("{name}.{}", format.extension());
         let rx = cx.prompt_for_new_path(&home, Some(file.as_str()));
         cx.spawn(async move |_, _| {
             if let Ok(Ok(Some(path))) = rx.await {
+                let format = Format::from_path(&path).unwrap_or(format);
+                let text = rox_library::playlist_file::write(format, &rows);
                 std::fs::write(path, text).ok();
             }
         })
         .detach();
     }
 
-    /// Pick an M3U file and load it as a new playlist named after the file.
-    /// Entries resolve to catalog tracks, relative paths against the file's
-    /// folder; paths the library never scanned are skipped.
+    /// Pick a playlist file (M3U, PLS, or XSPF) and load it as a new playlist
+    /// named after the file. The format comes off the content, not the
+    /// extension. Entries resolve to catalog tracks, relative paths against
+    /// the file's folder; paths the library never scanned are skipped.
     fn import(&self, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -1274,7 +1280,7 @@ impl PlaylistsPanel {
             let Ok(text) = std::fs::read_to_string(&path) else {
                 return;
             };
-            let entries = rox_library::m3u::parse(&text);
+            let entries = rox_library::playlist_file::parse(&text);
             if entries.is_empty() {
                 return;
             }
@@ -1648,33 +1654,44 @@ impl PlaylistsPanel {
                         count as i64,
                     ))),
             )
-            // Export this playlist to an M3U8 file. Its own mouse-down stops
-            // the press from reaching the row, so a click here never toggles
-            // the header open.
+            // Export this playlist: the button drops a menu of the formats
+            // and the pick opens the save dialog. The popover's trigger lets
+            // the press bubble, so the wrapper swallows it, or the header
+            // would toggle open under the menu.
             .child(
                 div()
-                    .id(("playlist-export", ix))
                     .flex_none()
-                    .p(px(3.))
-                    .rounded(tokens::RADIUS)
-                    .cursor_pointer()
-                    .hover(|d| d.bg(palette::bg_control()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            if let Some(Row::Head { id, name, .. }) = this.rows.get(ix) {
-                                let (id, name) = (*id, name.clone());
-                                this.export(id, name, cx);
-                            }
-                        }),
-                    )
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
-                        svg()
-                            .path(icons::UPLOAD)
-                            .size(px(14.))
-                            .flex_none()
-                            .text_color(palette::text_muted()),
+                        Button::new(("playlist-export", ix))
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::default().path(icons::UPLOAD))
+                            .tooltip(rox_i18n::t!("playlists-export-tooltip"))
+                            .dropdown_menu({
+                                let weak = cx.entity().downgrade();
+                                move |mut menu, _, _| {
+                                    for format in Format::ALL {
+                                        let weak = weak.clone();
+                                        menu =
+                                            menu.item(PopupMenuItem::new(format.label()).on_click(
+                                                move |_, _, cx| {
+                                                    let Some(this) = weak.upgrade() else { return };
+                                                    this.update(cx, |this, cx| {
+                                                        if let Some(Row::Head {
+                                                            id, name, ..
+                                                        }) = this.rows.get(ix)
+                                                        {
+                                                            let (id, name) = (*id, name.clone());
+                                                            this.export(id, name, format, cx);
+                                                        }
+                                                    });
+                                                },
+                                            ));
+                                    }
+                                    menu
+                                }
+                            }),
                     ),
             )
     }

@@ -1,6 +1,7 @@
 //! The headless service layer the app's shared state is made of: the
 //! catalog over the library database, the playback service, the scrobbler
-//! and the history recorder behind it, the cover and portrait caches, the
+//! with the history recorder and the other two scrobble destinations
+//! behind it, the cover and portrait caches, the
 //! shared selection, the baked backdrop, and the Discord presence. Every
 //! one of these is a gpui entity that owns some state and emits when it
 //! moves; none of them render anything or refer to panels at all.
@@ -17,6 +18,8 @@ pub mod catalog;
 pub mod discord_presence;
 pub mod history;
 pub mod lastfm;
+pub mod librefm;
+pub mod listenbrainz;
 pub mod lyrics;
 pub mod peaks;
 pub mod player;

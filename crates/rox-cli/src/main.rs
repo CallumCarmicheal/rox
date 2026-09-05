@@ -31,6 +31,8 @@ commands:
   next | prev | stop
   seek <secs|+secs|-secs>    absolute, or relative when signed
   volume <0..2>
+  ab [mark|clear|<a> <b>]    A-B repeat: step the cycle (default), clear
+                             it, or set a section in seconds outright
   queue                      the play order with entry ids
   add [--next|--now] <paths> queue files (default: end of the queue)
   remove <id...>             drop queued entries by id
@@ -166,6 +168,22 @@ fn run(
             let volume: f64 = arg.parse().map_err(|_| format!("not a level: {arg}"))?;
             ("transport.set_volume".into(), json!({ "volume": volume }))
         }
+        "ab" => match args {
+            [] => ("transport.ab".into(), json!({ "action": "mark" })),
+            [word] if word == "mark" || word == "clear" => {
+                ("transport.ab".into(), json!({ "action": word }))
+            }
+            [a, b] => {
+                let secs = |arg: &String| -> Result<f64, String> {
+                    arg.parse().map_err(|_| format!("not seconds: {arg}"))
+                };
+                (
+                    "transport.ab".into(),
+                    json!({ "a": secs(a)?, "b": secs(b)? }),
+                )
+            }
+            _ => return Err("ab takes mark, clear, or two positions in seconds".into()),
+        },
         "queue" => ("queue.list".into(), json!({})),
         "add" => {
             let mut mode = "end";
@@ -464,6 +482,16 @@ fn print_status(status: &Value) {
                 clock(status["duration_secs"].as_f64()),
                 status["volume"].as_f64().unwrap_or_default(),
             );
+            // The A-B section only when there's one to speak of: a line
+            // that says "off" on every status would be noise.
+            let ab = &status["ab"];
+            match (ab["a"].as_f64(), ab["b"].as_f64()) {
+                (Some(a), Some(b)) => {
+                    println!("        A-B {} to {}", clock(Some(a)), clock(Some(b)))
+                }
+                (Some(a), None) => println!("        A-B {} (waiting for B)", clock(Some(a))),
+                _ => {}
+            }
         }
         false => println!("{state}"),
     }

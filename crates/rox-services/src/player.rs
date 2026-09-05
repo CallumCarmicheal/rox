@@ -615,6 +615,85 @@ impl FadeView {
     }
 }
 
+/// Where the A-B command stands. The three-step cycle reads off this: no
+/// marks, the first one down, or the section repeating. Both seconds are
+/// track-relative, the same clock the seek strip draws.
+///
+/// The looping case comes from the engine's published snapshot (ADR 16);
+/// only the half-marked step lives on the player, because at that point
+/// there's no loop for the engine to own yet.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum AbState {
+    #[default]
+    Off,
+    ASet(f64),
+    Looping(f64, f64),
+}
+
+/// What one press of the A-B command does from where the cycle stands.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum AbStep {
+    /// Hold A on the player and wait for B; there's no loop to send yet.
+    Pending(f64),
+    /// Hand the engine a section, or None to end the one it's playing.
+    Send(Option<(f64, f64)>),
+    /// A double-tap: B landed on top of A. Drop the half-marked step
+    /// rather than sending a section the engine would refuse anyway.
+    Nothing,
+}
+
+/// The three-press cycle as arithmetic, away from the session and the
+/// notify around it: mark A, mark B and play the section, clear.
+fn ab_step(state: AbState, pos: f64) -> AbStep {
+    match state {
+        AbState::Looping(..) => AbStep::Send(None),
+        AbState::ASet(a) if pos - a >= engine::AB_MIN_SECS => AbStep::Send(Some((a, pos))),
+        AbState::ASet(_) => AbStep::Nothing,
+        AbState::Off => AbStep::Pending(pos),
+    }
+}
+
+/// A section named outright, both ends at once, as the socket sets it:
+/// the ends put in order so a caller that wrote them backwards still gets
+/// the section it meant, and anything shorter than the engine's floor
+/// refused here rather than sent to die quietly. Negative or non-finite
+/// seconds are refused too, since there's no position they could mean.
+fn ab_section(a: f64, b: f64) -> Option<(f64, f64)> {
+    if !a.is_finite() || !b.is_finite() || a < 0.0 || b < 0.0 {
+        return None;
+    }
+    let (a, b) = if a <= b { (a, b) } else { (b, a) };
+    (b - a >= engine::AB_MIN_SECS).then_some((a, b))
+}
+
+/// What a pump tick owes the sleep timer.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SleepStep {
+    /// No timer set, or the moment it named hasn't come.
+    Nothing,
+    /// Fire it and arm stop-after on the way through.
+    Arm,
+    /// Fire it, but leave stop-after where it is: it's already armed, and
+    /// the only way to arm it is a toggle, which would turn it off.
+    Clear,
+}
+
+/// Whether a tick fires the sleep timer, and what it owes stop-after when
+/// it does. Pulled out of the pump so the decision can be tested without a
+/// session or a context behind it, the same way [`ab_step`] is.
+fn sleep_step(now: Instant, sleep: Option<Instant>, stop_after: bool) -> SleepStep {
+    match sleep {
+        Some(ends_at) if now >= ends_at => {
+            if stop_after {
+                SleepStep::Clear
+            } else {
+                SleepStep::Arm
+            }
+        }
+        _ => SleepStep::Nothing,
+    }
+}
+
 /// The player's discrete state: everything the controls and info panels
 /// draw that changes on a user action or a track change, never on the bare
 /// position tick. The position clock is deliberately left out, so a panel
@@ -645,6 +724,17 @@ pub struct PlayerView {
     /// from it, and the Audio page's scrub can move it under the panel.
     pub crossfade_secs: f32,
     pub stop_after: bool,
+    /// Where the A-B command has got to: nothing marked, A down and
+    /// waiting for B, or a section repeating. Here rather than read off
+    /// the shared state by whoever draws it, so the transport's gated
+    /// observer wakes on each press.
+    pub ab: AbState,
+    /// How long the sleep timer has left, in whole seconds, None when no
+    /// timer is set. Here rather than read off the player by whoever draws
+    /// it so the menu's gated observer wakes when the timer is set or
+    /// cancelled; the countdown itself doesn't need a repaint, since the
+    /// only thing that reads it is a menu being opened.
+    pub sleep_remaining_secs: Option<u64>,
     pub muted: bool,
     pub volume: f32,
     pub error: Option<SharedString>,
@@ -793,6 +883,16 @@ pub struct Player {
     /// Deliberately not persisted: an armed stop that persisted across a restart
     /// would read as a broken player days later.
     stop_after: bool,
+    /// The A-B command's half-marked step: A is down, B isn't, so there's
+    /// no loop yet for the engine to hold. Pinned to the track it was
+    /// marked on, so a skip away and back doesn't hand the next press a
+    /// mark from a different song. Everything past this step lives on the
+    /// engine and is read back, never mirrored.
+    ab_pending_a: Option<(TrackKey, f64)>,
+    /// When the sleep timer arms stop-after, None when it's off. Session
+    /// state on purpose, like the stop it arms: a timer that survived a
+    /// restart would end a listening session nobody asked it to.
+    sleep: Option<Instant>,
     /// Skips in a row under the similarity mode, and when the last one
     /// happened. Together they widen the band the radio draws from: skip
     /// repeatedly and it goes further from the seed each time, so a few
@@ -876,6 +976,8 @@ impl Player {
             persist_gen: 0,
             meta_conn: None,
             stop_after: false,
+            ab_pending_a: None,
+            sleep: None,
             similar_skips: 0,
             last_skip: None,
             reseeded_at: None,
@@ -1428,6 +1530,12 @@ impl Player {
         self.session = None;
         self.pump = None;
         self.error = None;
+        // The loop went with the session; a half-marked A pointing at a
+        // track nothing is playing would come back on the next Play.
+        self.ab_pending_a = None;
+        // Ending playback by hand answers the timer's question. Leaving it
+        // running would arm a stop over whatever gets played next.
+        self.sleep = None;
         cx.notify();
     }
 
@@ -1473,6 +1581,9 @@ impl Player {
                     return false;
                 }
                 this.drain_tap();
+                // The sleep timer rides the same clock: one compare against
+                // an Instant, on a tick that already runs for every session.
+                this.tick_sleep(cx);
                 // The continuation trigger runs on this same clock (ADR 17).
                 // It reads the queue snapshot the check below already needs
                 // and does nothing at all on the overwhelming majority of
@@ -2984,6 +3095,110 @@ impl Player {
         cx.notify();
     }
 
+    /// Where the A-B command stands, resolved the way everything else here
+    /// is: the engine's published loop first, and the half-marked step off
+    /// the player only when there's no loop and the mark still belongs to
+    /// the track playing.
+    pub fn ab_state(&self) -> AbState {
+        if let Some((a, b)) = self.session.as_ref().and_then(|s| s.shared.ab()) {
+            return AbState::Looping(a, b);
+        }
+        let Some((key, a)) = self.ab_pending_a.as_ref() else {
+            return AbState::Off;
+        };
+        match self.now_playing() {
+            Some(now) if now.key == *key => AbState::ASet(*a),
+            _ => AbState::Off,
+        }
+    }
+
+    /// The A-B command's three-step cycle: the first press marks A at the
+    /// audible position, the second marks B and starts the section
+    /// repeating, the third clears it.
+    ///
+    /// A second press too close to the first drops the mark and starts the
+    /// cycle over: the engine refuses a section that short, and leaving A
+    /// half-set after a double-tap would put the next press on B without
+    /// the listener knowing where A went.
+    pub fn ab_mark(&mut self, cx: &mut Context<Self>) {
+        let Some(now) = self.now_playing() else {
+            return;
+        };
+        match ab_step(self.ab_state(), now.position_secs) {
+            AbStep::Pending(a) => self.ab_pending_a = Some((now.key, a)),
+            AbStep::Send(marks) => {
+                self.ab_pending_a = None;
+                self.send(Cmd::SetAbLoop(marks));
+            }
+            AbStep::Nothing => self.ab_pending_a = None,
+        }
+        cx.notify();
+    }
+
+    /// Drop the section and the half-marked step with it, wherever the
+    /// cycle had got to. The direct way out, for a caller that shouldn't
+    /// have to step the cycle to its end to get there.
+    pub fn ab_clear(&mut self, cx: &mut Context<Self>) {
+        self.ab_pending_a = None;
+        self.send(Cmd::SetAbLoop(None));
+        cx.notify();
+    }
+
+    /// Set a section outright, both ends in track seconds, the way the
+    /// control socket does it: no cycle to step, no half-marked state to
+    /// leave behind. Refused with a reason when there's nothing playing or
+    /// the section isn't one the engine would take, so the caller hears
+    /// why instead of watching nothing happen.
+    pub fn ab_set(&mut self, a: f64, b: f64, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.now_playing().is_none() {
+            return Err("nothing is playing".into());
+        }
+        let Some(marks) = ab_section(a, b) else {
+            return Err(format!(
+                "a section needs two positions in seconds at least {} apart",
+                engine::AB_MIN_SECS
+            ));
+        };
+        self.ab_pending_a = None;
+        self.send(Cmd::SetAbLoop(Some(marks)));
+        cx.notify();
+        Ok(())
+    }
+
+    /// Arm stop-after once `after` has passed, or clear a timer that's
+    /// already running. The track playing when it fires plays out and the
+    /// next one cues paused, which is stop-after's behavior and the reason
+    /// this arms that rather than inventing a second way to end playback.
+    ///
+    /// Deliberately unaffected by pause: a paused player with a timer set
+    /// still stops later, because that's what was asked for.
+    pub fn set_sleep(&mut self, after: Option<Duration>, cx: &mut Context<Self>) {
+        self.sleep = after.map(|after| Instant::now() + after);
+        cx.notify();
+    }
+
+    /// How long the timer has left, None when none is set. Saturating, so
+    /// a timer the pump hasn't got to yet reads zero rather than wrapping.
+    pub fn sleep_remaining(&self) -> Option<Duration> {
+        let now = Instant::now();
+        self.sleep
+            .map(|ends_at| ends_at.saturating_duration_since(now))
+    }
+
+    /// One pump tick's worth of sleep timer. Arms stop-after if it isn't
+    /// armed already, through the toggle, so the engine and the transport
+    /// button both learn; the guard is what keeps a timer landing on a
+    /// stop the listener armed by hand from turning it back off.
+    fn tick_sleep(&mut self, cx: &mut Context<Self>) {
+        match sleep_step(Instant::now(), self.sleep, self.stop_after) {
+            SleepStep::Nothing => return,
+            SleepStep::Arm => self.toggle_stop_after(cx),
+            SleepStep::Clear => {}
+        }
+        self.sleep = None;
+        cx.notify();
+    }
+
     /// Step off -> all -> one -> off and persist the pick.
     pub fn cycle_loop(&mut self) {
         let mode = match self.settings.session.loop_mode() {
@@ -3017,6 +3232,8 @@ impl Player {
             continuation: self.continuation_mode(),
             crossfade_secs: self.crossfade_secs(),
             stop_after: self.stop_after(),
+            ab: self.ab_state(),
+            sleep_remaining_secs: self.sleep_remaining().map(|left| left.as_secs()),
             muted: self.muted(),
             volume: self.volume(),
             error: self.error(),
@@ -3237,6 +3454,80 @@ mod tests {
             ids.push(conn.last_insert_rowid());
         }
         (conn, ids)
+    }
+
+    /// The whole point of the A-B command is that one key does three
+    /// things, so the cycle is what gets tested: mark, mark, clear, and
+    /// round again from a clean slate.
+    #[test]
+    fn the_ab_cycle_marks_then_loops_then_clears() {
+        assert_eq!(ab_step(AbState::Off, 12.0), AbStep::Pending(12.0));
+        assert_eq!(
+            ab_step(AbState::ASet(12.0), 18.5),
+            AbStep::Send(Some((12.0, 18.5)))
+        );
+        assert_eq!(
+            ab_step(AbState::Looping(12.0, 18.5), 14.0),
+            AbStep::Send(None)
+        );
+        assert_eq!(ab_step(AbState::Off, 3.0), AbStep::Pending(3.0));
+    }
+
+    /// A section set outright gets its ends put in order and the same
+    /// floor the cycle applies, so the socket can't hand the engine a
+    /// section the button couldn't have made.
+    #[test]
+    fn a_section_set_outright_is_ordered_and_floored() {
+        assert_eq!(ab_section(12.0, 18.5), Some((12.0, 18.5)));
+        assert_eq!(ab_section(18.5, 12.0), Some((12.0, 18.5)));
+        assert_eq!(ab_section(12.0, 12.1), None);
+        assert_eq!(ab_section(12.0, 12.0), None);
+        assert_eq!(ab_section(-1.0, 5.0), None);
+        assert_eq!(ab_section(f64::NAN, 5.0), None);
+    }
+
+    /// The timer fires at the moment it named and not a tick before, and
+    /// an unset one never fires at all. The boundary is the whole test:
+    /// a strictly-greater compare would leave a timer that landed exactly
+    /// on a tick waiting a further 16 ms, and a set-but-unfired timer that
+    /// read as due would arm the stop the instant it was picked.
+    #[test]
+    fn the_sleep_timer_fires_at_its_moment_and_not_before() {
+        let now = Instant::now();
+        let ends_at = now + Duration::from_secs(60);
+        assert_eq!(sleep_step(now, Some(ends_at), false), SleepStep::Nothing);
+        assert_eq!(
+            sleep_step(ends_at - Duration::from_millis(1), Some(ends_at), false),
+            SleepStep::Nothing
+        );
+        assert_eq!(sleep_step(ends_at, Some(ends_at), false), SleepStep::Arm);
+        assert_eq!(
+            sleep_step(ends_at + Duration::from_secs(5), Some(ends_at), false),
+            SleepStep::Arm
+        );
+        assert_eq!(sleep_step(now, None, false), SleepStep::Nothing);
+        assert_eq!(sleep_step(now, None, true), SleepStep::Nothing);
+    }
+
+    /// Arming is a toggle, so a timer landing on a stop the listener
+    /// already armed by hand has to leave it alone. Firing it anyway would
+    /// turn stop-after off at exactly the minute it was supposed to come
+    /// on, and the track after this one would keep playing all night.
+    #[test]
+    fn a_fired_sleep_timer_never_disarms_a_stop_already_set() {
+        let now = Instant::now();
+        assert_eq!(sleep_step(now, Some(now), false), SleepStep::Arm);
+        assert_eq!(sleep_step(now, Some(now), true), SleepStep::Clear);
+    }
+
+    /// B on top of A, which is what a double-tap looks like. The section
+    /// would be too short to play, so the press drops the mark instead of
+    /// sending the engine something it refuses.
+    #[test]
+    fn a_second_mark_too_close_to_the_first_drops_it() {
+        assert_eq!(ab_step(AbState::ASet(12.0), 12.05), AbStep::Nothing);
+        // And B behind A, from a seek backwards between the two presses.
+        assert_eq!(ab_step(AbState::ASet(12.0), 4.0), AbStep::Nothing);
     }
 
     /// The Barracuda case for Play Similar: the ranking is the seed's own

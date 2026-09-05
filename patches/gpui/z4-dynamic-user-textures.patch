@@ -1,0 +1,981 @@
+Dynamic user textures: a chain asset the caller overwrites every frame.
+
+`register_user_texture` is content-keyed and uploads once, which is the
+right shape for an image loaded off disk and the wrong one for a source
+that produces a new frame sixty times a second. This adds three calls
+beside it. `register_dynamic_texture` mints an id off the same counter
+but records it separately, so it never collides with a hashed one and
+the two can't be confused; `update_user_texture` replaces the pixels,
+checking the byte count against the size the texture was made with;
+`release_user_texture` frees it. A hashed id is refused by both of the
+last two, because those textures are shared by content and nobody owns
+them.
+
+On blade a dynamic texture is the same texture and view a registered one
+gets, plus an `initialised` flag: `init_texture` is the undefined-to-
+general layout transition and wants running once, not once per copy, so
+the flush loop does it on the first upload only. A second update between
+two frames drops the first rather than uploading both. Release moves the
+handles onto a retirement list drained at the end of the next `draw`,
+after the wait that says the frame which might have been reading them is
+done. On DirectX the usage becomes `DEFAULT` instead of `IMMUTABLE` and
+the update is one `UpdateSubresource` on the device context; the entry
+now keeps the `ID3D11Texture2D` beside its view for that, and release
+just drops the entry, since D3D11 holds a resource alive until the
+commands naming it retire.
+
+Either way a chain that still binds a released id samples transparent
+black instead of losing its draw: blade gets a 1x1 stand-in the way
+`mask` already has one, DirectX leaves the slot unbound, which reads as
+zeros in HLSL. A panel outliving its texture by a frame should go
+blank, not flicker out.
+
+`update_user_texture` takes the bytes as an `Arc<Vec<u8>>` rather than a
+slice. A source publishing a frame at a time was paying two full-size
+copies to get one frame on screen: one to hand the frame out of its own
+slot, one for the queue in here to keep it until the flush. At a
+megabyte a frame the copies were the smaller half of that; the fresh
+allocation each one made was faulted in a page at a time on first
+touch, which measured 40x the memcpy. Now the caller hands over a
+handle, the flush drops it, and the source gets its buffer back.
+DirectX moves by signature only: it still keeps its own copy for the
+device-lost rebuild, and none of that half has ever been compiled here.
+
+diff -ruN -x .rox-stamp -x target a/src/platform/blade/blade_renderer.rs b/src/platform/blade/blade_renderer.rs
+--- a/src/platform/blade/blade_renderer.rs
++++ b/src/platform/blade/blade_renderer.rs
+@@ -335,6 +335,16 @@
+             .collect()
+     }
+ 
++    // Whether any pass binds a declared asset, which is what decides if the
++    // 1x1 stand-in is worth allocating for a frame.
++    fn uses_assets(&self) -> bool {
++        self.passes.iter().any(|pass| {
++            pass.bindings
++                .iter()
++                .any(|binding| matches!(binding, ChainBinding::Asset { .. }))
++        })
++    }
++
+     // Whether any pass reads the mask capture, which is what decides if a
+     // region's span is worth replaying at all.
+     fn uses_mask(&self) -> bool {
+@@ -408,17 +418,35 @@
+ // carry its bytes to the GPU. Registration can land between frames, when
+ // there's no encoder open, so uploads queue the way the atlas queues its own.
+ struct PendingTextureUpload {
++    // Which texture the bytes land in. The id rides along so a second upload
++    // for the same texture can drop the first, and so the flush knows whose
++    // `initialised` flag to set.
++    id: u32,
+     texture: gpu::Texture,
+     width: u32,
+     height: u32,
+-    rgba8: Vec<u8>,
++    // Shared rather than owned, so a source producing a frame at a time hands
++    // the same buffer to the queue it published and pays nothing for the wait.
++    // The handle is dropped by the flush, which is what lets that source take
++    // its buffer back.
++    rgba8: Arc<Vec<u8>>,
+ }
+ 
+-// A registered image. Lives until the window closes; v1 never evicts.
++// A registered image. A content-keyed one lives until the window closes; a
++// dynamic one until the caller releases it.
+ #[derive(Clone, Copy)]
+ struct UserTexture {
+     texture: gpu::Texture,
+     view: gpu::TextureView,
++    // The size it was made at, so an update knows the copy extent without the
++    // caller repeating it.
++    width: u32,
++    height: u32,
++    // Whether an encoder has taken this texture out of the undefined layout
++    // yet. `init_texture` is the UNDEFINED to GENERAL transition, needed once
++    // and only once; a dynamic texture uploaded every frame does it on its
++    // first flush and never again.
++    initialised: bool,
+ }
+ 
+ #[derive(Clone, Debug, Eq, PartialEq)]
+@@ -682,6 +710,14 @@
+     empty_mask: Option<(gpu::Texture, gpu::TextureView)>,
+     user_textures: HashMap<u32, UserTexture>,
+     pending_texture_uploads: Vec<PendingTextureUpload>,
++    // A 1x1 transparent stand-in bound where a chain names an asset whose
++    // texture is gone, which happens when the caller released a dynamic id
++    // while a chain still binds it. Same idea as `empty_mask`: the program
++    // keeps running and samples nothing.
++    empty_texture: Option<(gpu::Texture, gpu::TextureView)>,
++    // Released dynamic textures, held until the frame that might still be
++    // reading them has landed. Drained at the end of the next `draw`.
++    retired_textures: Vec<UserTexture>,
+     texture_belt: BufferBelt,
+     rendering_parameters: RenderingParameters,
+ }
+@@ -785,6 +821,8 @@
+             empty_mask: None,
+             user_textures: HashMap::default(),
+             pending_texture_uploads: Vec::new(),
++            empty_texture: None,
++            retired_textures: Vec::new(),
+             texture_belt: BufferBelt::new(BufferBeltDescriptor {
+                 memory: gpu::Memory::Upload,
+                 min_chunk_size: 0x10000,
+@@ -1026,15 +1064,116 @@
+                 subresources: &Default::default(),
+             },
+         );
+-        self.user_textures.insert(id, UserTexture { texture, view });
++        self.user_textures.insert(
++            id,
++            UserTexture {
++                texture,
++                view,
++                width,
++                height,
++                initialised: false,
++            },
++        );
++        self.pending_texture_uploads.push(PendingTextureUpload {
++            id,
++            texture,
++            width,
++            height,
++            rgba8: Arc::new(rgba8.to_vec()),
++        });
++    }
++
++    /// Allocates a texture the caller means to overwrite. Same texture and
++    /// view as a registered image, minus the bytes: the caller hands those
++    /// over through `update_user_texture` instead. Sampling an uninitialised
++    /// texture is undefined, so a zero-filled upload is queued right here and
++    /// the texture starts as transparent black rather than as garbage.
++    /// Registering an id twice is a no-op.
++    pub fn register_dynamic_texture(&mut self, id: u32, width: u32, height: u32) {
++        if self.user_textures.contains_key(&id) {
++            return;
++        }
++        let format = gpu::TextureFormat::Rgba8UnormSrgb;
++        let texture = self.gpu.create_texture(gpu::TextureDesc {
++            name: "dynamic user texture",
++            format,
++            size: gpu::Extent {
++                width,
++                height,
++                depth: 1,
++            },
++            array_layer_count: 1,
++            mip_level_count: 1,
++            sample_count: 1,
++            dimension: gpu::TextureDimension::D2,
++            usage: gpu::TextureUsage::COPY | gpu::TextureUsage::RESOURCE,
++            external: None,
++        });
++        let view = self.gpu.create_texture_view(
++            texture,
++            gpu::TextureViewDesc {
++                name: "dynamic user texture view",
++                format,
++                dimension: gpu::ViewDimension::D2,
++                subresources: &Default::default(),
++            },
++        );
++        self.user_textures.insert(
++            id,
++            UserTexture {
++                texture,
++                view,
++                width,
++                height,
++                initialised: false,
++            },
++        );
+         self.pending_texture_uploads.push(PendingTextureUpload {
++            id,
+             texture,
+             width,
+             height,
+-            rgba8: rgba8.to_vec(),
++            rgba8: Arc::new(vec![0; width as usize * height as usize * 4]),
+         });
+     }
+ 
++    /// Replaces a dynamic texture's pixels. The bytes ride the next frame's
++    /// encoder like every other upload, so two updates between two frames
++    /// collapse to the last one: the first is dropped rather than uploaded and
++    /// immediately overwritten. `Window` has already checked the byte count
++    /// against the size the texture was made with.
++    ///
++    /// The handle is taken, not the bytes: at a megabyte a frame the copy in
++    /// here cost more than the memcpy, because a fresh allocation that size
++    /// faults in a page at a time on first touch.
++    pub fn update_user_texture(&mut self, id: u32, rgba8: Arc<Vec<u8>>) {
++        let Some(texture) = self.user_textures.get(&id).copied() else {
++            return;
++        };
++        self.pending_texture_uploads
++            .retain(|upload| upload.id != id);
++        self.pending_texture_uploads.push(PendingTextureUpload {
++            id,
++            texture: texture.texture,
++            width: texture.width,
++            height: texture.height,
++            rgba8,
++        });
++    }
++
++    /// Frees a dynamic texture. The GPU may still be reading it through the
++    /// frame that just went out, so the handles go on the retirement list and
++    /// die at the end of the next `draw`, after the wait that says the
++    /// previous frame finished. Any chain still binding the id falls back to
++    /// the 1x1 stand-in at draw time.
++    pub fn release_user_texture(&mut self, id: u32) {
++        self.pending_texture_uploads
++            .retain(|upload| upload.id != id);
++        if let Some(texture) = self.user_textures.remove(&id) {
++            self.retired_textures.push(texture);
++        }
++    }
++
+     /// Installs or clears the whole-window post-process program. The sources
+     /// are full composed WGSL modules; callers are expected to have validated
+     /// them already, since blade panics on bad input.
+@@ -1340,6 +1479,14 @@
+             self.gpu.destroy_texture(texture.texture);
+             self.gpu.destroy_texture_view(texture.view);
+         }
++        for texture in std::mem::take(&mut self.retired_textures) {
++            self.gpu.destroy_texture(texture.texture);
++            self.gpu.destroy_texture_view(texture.view);
++        }
++        if let Some((texture, view)) = self.empty_texture.take() {
++            self.gpu.destroy_texture(texture);
++            self.gpu.destroy_texture_view(view);
++        }
+         self.texture_belt.destroy(&self.gpu);
+         self.destroy_post_prev();
+         self.destroy_post_targets();
+@@ -1493,6 +1640,12 @@
+             None
+         };
+ 
++        let empty_asset = self
++            .region_shaders
++            .get(&region.shader_id)
++            .is_some_and(|chain| chain.uses_assets())
++            .then(|| self.ensure_empty_texture());
++
+         let chain = &self.region_shaders[&region.shader_id];
+         let Some(last) = chain.passes.len().checked_sub(1) else {
+             return;
+@@ -1529,6 +1682,7 @@
+                 index,
+                 mask_view,
+                 &self.user_textures,
++                empty_asset,
+             ) else {
+                 return;
+             };
+@@ -1721,6 +1875,11 @@
+             .as_ref()
+             .is_some_and(|post| post.chain.uses_mask())
+             .then(|| self.ensure_empty_mask());
++        let empty_asset = self
++            .post_shader
++            .as_ref()
++            .is_some_and(|post| post.chain.uses_assets())
++            .then(|| self.ensure_empty_texture());
+         let feedback = uses_prev.then_some(()).and(self.post_prev);
+         let (final_view, prev_view) = match feedback {
+             Some(pair) => (pair[self.post_prev_index].1, pair[1 - self.post_prev_index].1),
+@@ -1774,6 +1933,7 @@
+                 final_prev,
+                 post_mask,
+                 &self.user_textures,
++                empty_asset,
+             ) else {
+                 return;
+             };
+@@ -1931,6 +2091,27 @@
+         self.empty_mask.unwrap().1
+     }
+ 
++    /// The 1x1 transparent texture an `asset` binding reads when its id has
++    /// no texture: the caller released a dynamic one while a chain still
++    /// names it. Without this the bind fill comes back empty and the whole
++    /// program skips the frame, which reads as the panel flickering out.
++    /// Cleared once at creation and never drawn to again.
++    fn ensure_empty_texture(&mut self) -> gpu::TextureView {
++        if self.empty_texture.is_none() {
++            let pair = create_region_texture(
++                &self.gpu,
++                gpu::TextureFormat::Rgba8UnormSrgb,
++                1,
++                1,
++                "shader empty asset",
++            );
++            self.command_encoder.init_texture(pair.0);
++            self.clear_texture(pair.1);
++            self.empty_texture = Some(pair);
++        }
++        self.empty_texture.unwrap().1
++    }
++
+     /// Replays one mask span's paint operations into the capture layer, over
+     /// a transparent clear: the span's content isolated with real alpha,
+     /// which is what a `mask` binding samples. The main pass's own pipelines
+@@ -2152,7 +2333,19 @@
+     /// against the frame's encoder.
+     fn flush_texture_uploads(&mut self) {
+         for upload in std::mem::take(&mut self.pending_texture_uploads) {
+-            self.command_encoder.init_texture(upload.texture);
++            // `init_texture` is the undefined-to-general layout transition,
++            // wanted once per texture rather than once per copy. A dynamic
++            // texture uploads every frame and only transitions on the first.
++            let uninitialised = self
++                .user_textures
++                .get(&upload.id)
++                .is_none_or(|texture| !texture.initialised);
++            if uninitialised {
++                self.command_encoder.init_texture(upload.texture);
++                if let Some(texture) = self.user_textures.get_mut(&upload.id) {
++                    texture.initialised = true;
++                }
++            }
+             let staging = self.texture_belt.alloc_bytes(&upload.rgba8, &self.gpu);
+             let mut transfers = self.command_encoder.transfer("user texture upload");
+             transfers.copy_buffer_to_texture(
+@@ -2565,6 +2758,14 @@
+ 
+         self.wait_for_gpu();
+         self.last_sync_point = Some(sync_point);
++
++        // Everything on this list was dropped from `user_textures` before this
++        // frame started, so nothing recorded above could bind it, and the wait
++        // just above says the frame that might have is done.
++        for texture in std::mem::take(&mut self.retired_textures) {
++            self.gpu.destroy_texture(texture.texture);
++            self.gpu.destroy_texture_view(texture.view);
++        }
+     }
+ }
+ 
+@@ -2591,6 +2792,7 @@
+     prev_override: Option<gpu::TextureView>,
+     mask: Option<gpu::TextureView>,
+     textures: &HashMap<u32, UserTexture>,
++    empty_asset: Option<gpu::TextureView>,
+ ) -> Option<Vec<ChainBindValue>> {
+     let mut values = Vec::with_capacity(pass.bindings.len());
+     for binding in &pass.bindings {
+@@ -2606,7 +2808,15 @@
+             ChainBinding::Pass { index: earlier, .. } => {
+                 ChainBindValue::Texture(targets.get(*earlier)?.target?.1)
+             }
+-            ChainBinding::Asset { id, .. } => ChainBindValue::Texture(textures.get(id)?.view),
++            // A released dynamic id reads the stand-in rather than dropping
++            // the draw, so a chain outliving its texture goes transparent
++            // instead of disappearing.
++            ChainBinding::Asset { id, .. } => ChainBindValue::Texture(
++                textures
++                    .get(id)
++                    .map(|texture| texture.view)
++                    .or(empty_asset)?,
++            ),
+         });
+     }
+     Some(values)
+@@ -2622,9 +2832,19 @@
+     index: usize,
+     mask: Option<gpu::TextureView>,
+     textures: &HashMap<u32, UserTexture>,
++    empty_asset: Option<gpu::TextureView>,
+ ) -> Option<Vec<ChainBindValue>> {
+     bind_chain_pass_with_prev(
+-        pass, params, screen, sampler, targets, index, None, mask, textures,
++        pass,
++        params,
++        screen,
++        sampler,
++        targets,
++        index,
++        None,
++        mask,
++        textures,
++        empty_asset,
+     )
+ }
+ 
+diff -ruN -x .rox-stamp -x target a/src/platform/linux/wayland/window.rs b/src/platform/linux/wayland/window.rs
+--- a/src/platform/linux/wayland/window.rs
++++ b/src/platform/linux/wayland/window.rs
+@@ -1153,6 +1153,20 @@
+             .register_user_texture(id, width, height, rgba8);
+     }
+ 
++    fn register_dynamic_texture(&self, id: u32, width: u32, height: u32) {
++        self.borrow_mut()
++            .renderer
++            .register_dynamic_texture(id, width, height);
++    }
++
++    fn update_user_texture(&self, id: u32, rgba8: std::sync::Arc<Vec<u8>>) {
++        self.borrow_mut().renderer.update_user_texture(id, rgba8);
++    }
++
++    fn release_user_texture(&self, id: u32) {
++        self.borrow_mut().renderer.release_user_texture(id);
++    }
++
+     fn set_post_shader(&self, chain: Option<&[ChainPassDesc]>) {
+         self.borrow_mut().renderer.set_post_shader(chain);
+     }
+diff -ruN -x .rox-stamp -x target a/src/platform/linux/x11/window.rs b/src/platform/linux/x11/window.rs
+--- a/src/platform/linux/x11/window.rs
++++ b/src/platform/linux/x11/window.rs
+@@ -1694,6 +1694,26 @@
+             .register_user_texture(id, width, height, rgba8);
+     }
+ 
++    fn register_dynamic_texture(&self, id: u32, width: u32, height: u32) {
++        self.0
++            .state
++            .borrow_mut()
++            .renderer
++            .register_dynamic_texture(id, width, height);
++    }
++
++    fn update_user_texture(&self, id: u32, rgba8: std::sync::Arc<Vec<u8>>) {
++        self.0
++            .state
++            .borrow_mut()
++            .renderer
++            .update_user_texture(id, rgba8);
++    }
++
++    fn release_user_texture(&self, id: u32) {
++        self.0.state.borrow_mut().renderer.release_user_texture(id);
++    }
++
+     fn set_post_shader(&self, chain: Option<&[ChainPassDesc]>) {
+         self.0
+             .state
+diff -ruN -x .rox-stamp -x target a/src/platform/mac/window.rs b/src/platform/mac/window.rs
+--- a/src/platform/mac/window.rs
++++ b/src/platform/mac/window.rs
+@@ -1610,6 +1610,24 @@
+     }
+ 
+     #[cfg(feature = "macos-blade")]
++    fn register_dynamic_texture(&self, id: u32, width: u32, height: u32) {
++        self.0
++            .lock()
++            .renderer
++            .register_dynamic_texture(id, width, height);
++    }
++
++    #[cfg(feature = "macos-blade")]
++    fn update_user_texture(&self, id: u32, rgba8: std::sync::Arc<Vec<u8>>) {
++        self.0.lock().renderer.update_user_texture(id, rgba8);
++    }
++
++    #[cfg(feature = "macos-blade")]
++    fn release_user_texture(&self, id: u32) {
++        self.0.lock().renderer.release_user_texture(id);
++    }
++
++    #[cfg(feature = "macos-blade")]
+     fn set_post_shader(&self, chain: Option<&[ChainPassDesc]>) {
+         self.0.lock().renderer.set_post_shader(chain);
+     }
+diff -ruN -x .rox-stamp -x target a/src/platform/windows/directx_renderer.rs b/src/platform/windows/directx_renderer.rs
+--- a/src/platform/windows/directx_renderer.rs
++++ b/src/platform/windows/directx_renderer.rs
+@@ -1747,13 +1747,16 @@
+     clock: ShaderClock,
+ }
+ 
+-/// A caller-registered image. Lives until the window closes; v1 never evicts.
+-/// The pixels stay around so a lost device can re-upload without the caller
+-/// registering again.
++/// A caller-registered image. A content-keyed one lives until the window
++/// closes; a dynamic one until the caller releases it. The pixels stay around
++/// so a lost device can re-upload without the caller registering again, and
++/// for a dynamic texture they're the last frame handed over.
+ struct UserTexture {
++    texture: ID3D11Texture2D,
+     srv: [Option<ID3D11ShaderResourceView>; 1],
+     width: u32,
+     height: u32,
++    dynamic: bool,
+     pixels: Vec<u8>,
+ }
+ 
+@@ -1925,9 +1928,13 @@
+             }
+         }
+         for (id, texture) in self.textures.drain() {
+-            if let Some(rebuilt) =
+-                create_user_texture(device, texture.width, texture.height, &texture.pixels)
+-            {
++            if let Some(rebuilt) = create_user_texture(
++                device,
++                texture.width,
++                texture.height,
++                &texture.pixels,
++                texture.dynamic,
++            ) {
+                 fresh.textures.insert(id, rebuilt);
+             }
+         }
+@@ -1963,11 +1970,17 @@
+     Some(ShaderChain { passes })
+ }
+ 
++/// `dynamic` picks the usage: a texture the caller will overwrite has to be
++/// `DEFAULT` so `UpdateSubresource` can write it, while an asset uploaded once
++/// stays `IMMUTABLE`. Either way the initial bytes go in at creation, so a
++/// dynamic texture starts as whatever zero-fill the caller passed rather than
++/// as garbage.
+ fn create_user_texture(
+     device: &ID3D11Device,
+     width: u32,
+     height: u32,
+     rgba8: &[u8],
++    dynamic: bool,
+ ) -> Option<UserTexture> {
+     let data = D3D11_SUBRESOURCE_DATA {
+         pSysMem: rgba8.as_ptr() as *const _,
+@@ -1986,7 +1999,11 @@
+             Count: 1,
+             Quality: 0,
+         },
+-        Usage: D3D11_USAGE_IMMUTABLE,
++        Usage: if dynamic {
++            D3D11_USAGE_DEFAULT
++        } else {
++            D3D11_USAGE_IMMUTABLE
++        },
+         BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+         CPUAccessFlags: 0,
+         MiscFlags: 0,
+@@ -2006,9 +2023,11 @@
+         [view]
+     };
+     Some(UserTexture {
++        texture,
+         srv,
+         width,
+         height,
++        dynamic,
+         pixels: rgba8.to_vec(),
+     })
+ }
+@@ -2139,7 +2158,12 @@
+             // zeros in HLSL, which reads exactly like the empty mask: the
+             // shader runs, the mask is transparent, nothing breaks.
+             ChainBinding::Mask => views.push(None),
+-            ChainBinding::Asset { id, .. } => views.push(Some(textures.get(id)?.srv[0].clone()?)),
++            // A released dynamic id reads as an unbound SRV for the same
++            // reason the mask does: zeros in HLSL, so the program runs and
++            // samples transparent black instead of skipping the frame.
++            ChainBinding::Asset { id, .. } => {
++                views.push(textures.get(id).and_then(|texture| texture.srv[0].clone()))
++            }
+         }
+     }
+     Some(views)
+@@ -2200,11 +2224,74 @@
+         if !self.shaders.supported || self.shaders.textures.contains_key(&id) {
+             return;
+         }
+-        if let Some(texture) = create_user_texture(&self.devices.device, width, height, rgba8) {
++        if let Some(texture) =
++            create_user_texture(&self.devices.device, width, height, rgba8, false)
++        {
++            self.shaders.textures.insert(id, texture);
++        }
++    }
++
++    /// Allocates a texture the caller means to overwrite. `DEFAULT` usage so
++    /// `update_user_texture` can write it, and zeros at creation so it starts
++    /// as transparent black. Registering an id twice is a no-op.
++    pub(crate) fn register_dynamic_texture(&mut self, id: u32, width: u32, height: u32) {
++        if !self.shaders.supported || self.shaders.textures.contains_key(&id) {
++            return;
++        }
++        let zeros = vec![0u8; width as usize * height as usize * 4];
++        if let Some(texture) =
++            create_user_texture(&self.devices.device, width, height, &zeros, true)
++        {
+             self.shaders.textures.insert(id, texture);
+         }
+     }
+ 
++    /// Replaces a dynamic texture's pixels. `UpdateSubresource` copies through
++    /// the device context there and then, so unlike the blade path there's no
++    /// queue: two updates between two frames both run and the second wins.
++    /// The bytes are kept for the same reason an asset's are, so a lost device
++    /// comes back holding the last frame instead of a blank texture.
++    /// `Window` has already checked the byte count against the size.
++    pub(crate) fn update_user_texture(&mut self, id: u32, rgba8: std::sync::Arc<Vec<u8>>) {
++        if !self.shaders.supported {
++            return;
++        }
++        let Some(texture) = self.shaders.textures.get_mut(&id) else {
++            return;
++        };
++        if !texture.dynamic || rgba8.len() != texture.width as usize * texture.height as usize * 4 {
++            return;
++        }
++        unsafe {
++            self.devices.device_context.UpdateSubresource(
++                &texture.texture,
++                0,
++                None,
++                rgba8.as_ptr() as *const _,
++                texture.width * 4,
++                0,
++            );
++        }
++        texture.pixels.clear();
++        texture.pixels.extend_from_slice(&rgba8);
++    }
++
++    /// Frees a dynamic texture. Dropping the entry drops the last references
++    /// to the texture and its view, and D3D11 keeps a resource alive until the
++    /// commands referencing it have retired, so there's no fence to wait on
++    /// the way blade needs one. A chain still binding the id reads an unbound
++    /// SRV, which samples transparent black.
++    pub(crate) fn release_user_texture(&mut self, id: u32) {
++        if self
++            .shaders
++            .textures
++            .get(&id)
++            .is_some_and(|texture| texture.dynamic)
++        {
++            self.shaders.textures.remove(&id);
++        }
++    }
++
+     /// Installs or clears the whole-window post-process program.
+     pub(crate) fn set_post_shader(&mut self, chain: Option<&[ChainPassDesc]>) {
+         self.shaders.post_targets.clear();
+diff -ruN -x .rox-stamp -x target a/src/platform/windows/window.rs b/src/platform/windows/window.rs
+--- a/src/platform/windows/window.rs
++++ b/src/platform/windows/window.rs
+@@ -1012,6 +1012,26 @@
+             .register_user_texture(id, width, height, rgba8);
+     }
+ 
++    fn register_dynamic_texture(&self, id: u32, width: u32, height: u32) {
++        self.0
++            .state
++            .borrow_mut()
++            .renderer
++            .register_dynamic_texture(id, width, height);
++    }
++
++    fn update_user_texture(&self, id: u32, rgba8: std::sync::Arc<Vec<u8>>) {
++        self.0
++            .state
++            .borrow_mut()
++            .renderer
++            .update_user_texture(id, rgba8);
++    }
++
++    fn release_user_texture(&self, id: u32) {
++        self.0.state.borrow_mut().renderer.release_user_texture(id);
++    }
++
+     fn set_post_shader(&self, chain: Option<&[ChainPassDesc]>) {
+         self.0.state.borrow_mut().renderer.set_post_shader(chain);
+     }
+diff -ruN -x .rox-stamp -x target a/src/platform.rs b/src/platform.rs
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -594,6 +594,9 @@
+     fn register_user_shader(&self, _id: u32, _source: &str, _decorated: &str) {}
+     fn register_screen_shader(&self, _id: u32, _chain: &[ChainPassDesc]) {}
+     fn register_user_texture(&self, _id: u32, _width: u32, _height: u32, _rgba8: &[u8]) {}
++    fn register_dynamic_texture(&self, _id: u32, _width: u32, _height: u32) {}
++    fn update_user_texture(&self, _id: u32, _rgba8: std::sync::Arc<Vec<u8>>) {}
++    fn release_user_texture(&self, _id: u32) {}
+     fn set_post_shader(&self, _chain: Option<&[ChainPassDesc]>) {}
+     fn set_post_signals(&self, _signals: [f32; 16], _meta: [f32; 8], _mouse: [f32; 4]) {}
+     fn set_post_mouse(&self, _mouse: [f32; 4]) {}
+diff -ruN -x .rox-stamp -x target a/src/window.rs b/src/window.rs
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -3540,6 +3540,127 @@
+         }
+     }
+ 
++    /// Allocates a texture the caller intends to overwrite, handing back the
++    /// id a chain's asset list carries.
++    ///
++    /// Unlike [`Window::register_user_texture`] this is not content-keyed:
++    /// every call makes a new texture, and it starts as transparent black.
++    /// Feed it with [`Window::update_user_texture`] and free it with
++    /// [`Window::release_user_texture`]; a texture nobody releases lives until
++    /// the window closes, the way a registered image does. Backends without a
++    /// shader pipeline return `Err("unsupported")`.
++    ///
++    /// rox patch: the dynamic half of the shader chains, for a source that
++    /// produces a new frame faster than an upload-once texture can carry it.
++    pub fn register_dynamic_texture(
++        &mut self,
++        width: u32,
++        height: u32,
++    ) -> std::result::Result<UserTextureId, String> {
++        #[cfg(any(
++            target_os = "linux",
++            target_os = "freebsd",
++            all(target_os = "macos", feature = "macos-blade"),
++            target_os = "windows"
++        ))]
++        {
++            if !self.platform_window.user_shaders_supported() {
++                return Err("unsupported".to_string());
++            }
++            let id = self.user_textures.register_dynamic(width, height)?;
++            self.platform_window
++                .register_dynamic_texture(id.0, width, height);
++            Ok(id)
++        }
++        #[cfg(not(any(
++            target_os = "linux",
++            target_os = "freebsd",
++            all(target_os = "macos", feature = "macos-blade"),
++            target_os = "windows"
++        )))]
++        {
++            let _ = (width, height);
++            Err("unsupported".to_string())
++        }
++    }
++
++    /// Replaces a dynamic texture's pixels.
++    ///
++    /// `rgba8` is `width * height * 4` bytes for the size the texture was made
++    /// with, straight alpha, treated as sRGB; anything else is an `Err` and no
++    /// upload. The bytes ride the next frame's encoder, the same lane the
++    /// initial upload of a registered image uses, so calling twice between two
++    /// frames keeps the last call's bytes and drops the first's. An id from
++    /// [`Window::register_user_texture`] is rejected: those are shared by
++    /// content and belong to whoever else registered the same image.
++    ///
++    /// The bytes come in as a handle rather than a slice. A source that
++    /// produces a frame at a time can then hand over the buffer it published
++    /// instead of paying for a copy of it, and take it back once the upload
++    /// has ridden its encoder out.
++    ///
++    /// rox patch: part of the shader chains.
++    pub fn update_user_texture(
++        &mut self,
++        id: UserTextureId,
++        rgba8: Arc<Vec<u8>>,
++    ) -> std::result::Result<(), String> {
++        #[cfg(any(
++            target_os = "linux",
++            target_os = "freebsd",
++            all(target_os = "macos", feature = "macos-blade"),
++            target_os = "windows"
++        ))]
++        {
++            if !self.platform_window.user_shaders_supported() {
++                return Err("unsupported".to_string());
++            }
++            self.user_textures.check_update(id, rgba8.len())?;
++            self.platform_window.update_user_texture(id.0, rgba8);
++            Ok(())
++        }
++        #[cfg(not(any(
++            target_os = "linux",
++            target_os = "freebsd",
++            all(target_os = "macos", feature = "macos-blade"),
++            target_os = "windows"
++        )))]
++        {
++            let _ = (id, rgba8);
++            Err("unsupported".to_string())
++        }
++    }
++
++    /// Frees a dynamic texture. A chain that still binds the id samples
++    /// transparent black rather than dropping its draw, so releasing while a
++    /// chain is live is untidy but not fatal. Ids from
++    /// [`Window::register_user_texture`] are ignored: they're shared by hash,
++    /// so no single caller gets to free them.
++    ///
++    /// rox patch: part of the shader chains.
++    pub fn release_user_texture(&mut self, id: UserTextureId) {
++        #[cfg(any(
++            target_os = "linux",
++            target_os = "freebsd",
++            all(target_os = "macos", feature = "macos-blade"),
++            target_os = "windows"
++        ))]
++        {
++            if self.user_textures.release(id) {
++                self.platform_window.release_user_texture(id.0);
++            }
++        }
++        #[cfg(not(any(
++            target_os = "linux",
++            target_os = "freebsd",
++            all(target_os = "macos", feature = "macos-blade"),
++            target_os = "windows"
++        )))]
++        {
++            let _ = id;
++        }
++    }
++
+     /// What registration decided about a shader's source: whether it samples
+     /// the screen under it, and whether it reads its own previous output.
+     /// `None` for an id this window never handed out, and on backends without
+@@ -6461,6 +6582,11 @@
+ #[derive(Default)]
+ pub(crate) struct UserTextureRegistry {
+     by_hash: std::collections::HashMap<u64, UserTextureId>,
++    // rox patch: the ids `register_dynamic_texture` handed out, with the size
++    // each was made at. Deliberately not content-keyed, so this map is what
++    // lets `update` check the byte count, and what lets both `update` and
++    // `release` refuse a hashed id, which is shared and has no single owner.
++    dynamic: std::collections::HashMap<UserTextureId, (u32, u32)>,
+     count: u32,
+ }
+ 
+@@ -6509,6 +6635,72 @@
+         self.by_hash.insert(hash, id);
+         Ok((id, true))
+     }
++
++    /// rox patch: mints an id for a texture the caller means to overwrite.
++    /// Shares the counter with `register`, so a dynamic id never collides
++    /// with a hashed one, and records the size `update` checks against.
++    #[cfg_attr(
++        not(any(
++            target_os = "linux",
++            target_os = "freebsd",
++            all(target_os = "macos", feature = "macos-blade"),
++            target_os = "windows"
++        )),
++        allow(dead_code)
++    )]
++    fn register_dynamic(
++        &mut self,
++        width: u32,
++        height: u32,
++    ) -> std::result::Result<UserTextureId, String> {
++        if width == 0 || height == 0 {
++            return Err("a user texture needs a non-zero width and height".to_string());
++        }
++        let id = UserTextureId(self.count);
++        self.count += 1;
++        self.dynamic.insert(id, (width, height));
++        Ok(id)
++    }
++
++    /// rox patch: whether `id` is a dynamic texture this window handed out and
++    /// `len` is exactly one frame of it. A hashed id fails here, which is what
++    /// keeps a shared upload from being overwritten under another chain.
++    #[cfg_attr(
++        not(any(
++            target_os = "linux",
++            target_os = "freebsd",
++            all(target_os = "macos", feature = "macos-blade"),
++            target_os = "windows"
++        )),
++        allow(dead_code)
++    )]
++    fn check_update(&self, id: UserTextureId, len: usize) -> std::result::Result<(), String> {
++        let Some((width, height)) = self.dynamic.get(&id).copied() else {
++            return Err(format!("user texture {} is not a dynamic texture", id.0));
++        };
++        let expected = width as usize * height as usize * 4;
++        if len != expected {
++            return Err(format!(
++                "a {width}x{height} rgba8 image is {expected} bytes, got {len}"
++            ));
++        }
++        Ok(())
++    }
++
++    /// rox patch: forgets a dynamic id, reporting whether it was one. Hashed
++    /// ids stay: they're shared by content, so nobody owns them.
++    #[cfg_attr(
++        not(any(
++            target_os = "linux",
++            target_os = "freebsd",
++            all(target_os = "macos", feature = "macos-blade"),
++            target_os = "windows"
++        )),
++        allow(dead_code)
++    )]
++    fn release(&mut self, id: UserTextureId) -> bool {
++        self.dynamic.remove(&id).is_some()
++    }
+ }
+ 
+ #[cfg(all(
+@@ -7117,6 +7309,56 @@
+         assert!(registry.register(0, 2, &[]).is_err());
+     }
+ 
++    #[test]
++    fn dynamic_textures_get_ids_of_their_own() {
++        let mut registry = UserTextureRegistry::default();
++        let pixels = vec![0u8; 2 * 2 * 4];
++        let (hashed, _) = registry.register(2, 2, &pixels).unwrap();
++        let first = registry.register_dynamic(2, 2).unwrap();
++        let second = registry.register_dynamic(2, 2).unwrap();
++
++        // Same counter as the hashed ids, so the three never collide, and
++        // registering the same size twice is two textures rather than one
++        // shared one.
++        assert_eq!(hashed, UserTextureId(0));
++        assert_eq!(first, UserTextureId(1));
++        assert_eq!(second, UserTextureId(2));
++
++        // The hashed id still comes back from a content lookup afterwards.
++        let (again, is_new) = registry.register(2, 2, &pixels).unwrap();
++        assert_eq!(again, hashed);
++        assert!(!is_new);
++
++        assert!(registry.register_dynamic(0, 2).is_err());
++        assert!(registry.register_dynamic(2, 0).is_err());
++    }
++
++    #[test]
++    fn updates_take_a_dynamic_id_and_an_exact_frame() {
++        let mut registry = UserTextureRegistry::default();
++        let (hashed, _) = registry.register(2, 2, &vec![0u8; 2 * 2 * 4]).unwrap();
++        let dynamic = registry.register_dynamic(2, 2).unwrap();
++
++        assert!(registry.check_update(dynamic, 2 * 2 * 4).is_ok());
++        assert!(registry.check_update(dynamic, 2 * 2 * 4 - 1).is_err());
++        assert!(registry.check_update(dynamic, 0).is_err());
++        assert!(registry.check_update(hashed, 2 * 2 * 4).is_err());
++        assert!(registry.check_update(UserTextureId(99), 2 * 2 * 4).is_err());
++    }
++
++    #[test]
++    fn releasing_only_frees_dynamic_ids() {
++        let mut registry = UserTextureRegistry::default();
++        let (hashed, _) = registry.register(2, 2, &vec![0u8; 2 * 2 * 4]).unwrap();
++        let dynamic = registry.register_dynamic(2, 2).unwrap();
++
++        assert!(!registry.release(hashed));
++        assert!(registry.release(dynamic));
++        // Releasing twice is a no-op, and the id is dead for updates after.
++        assert!(!registry.release(dynamic));
++        assert!(registry.check_update(dynamic, 2 * 2 * 4).is_err());
++    }
++
+     // A chain pass that reaches for everything a pass can have: the composed
+     // frame, its own last output, the pass ahead of it and a declared image.
+     const EVERYTHING: &str = "fn fs_user(uv: vec2<f32>) -> vec4<f32> {

@@ -62,7 +62,7 @@ use rox_panel_kit::ui::{
     self as settings_ui, chord, dialog_button, grid_columns, icon_button, kbd, kbd_line, sidebar,
     small_button, PageBody, Query, Rows, Section, Seg, SidesScrub, SECTION_GAP,
 };
-use rox_panel_kit::ScrubState;
+use rox_panel_kit::{search_picker, ScrubState};
 use rox_playback::continuation;
 use rox_playback::engine;
 use rox_playback::output;
@@ -70,6 +70,8 @@ use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 use rox_services::catalog::{Library, LibraryEvent};
 use rox_services::discord_presence::DiscordPresence;
 use rox_services::lastfm::Scrobbler;
+use rox_services::librefm::LibreFm;
+use rox_services::listenbrainz::{ListenBrainz, Status as ListenBrainzStatus};
 use rox_services::player::Player;
 use rox_services::thumbs::Thumbs;
 use rox_viz::signal::Route;
@@ -411,6 +413,13 @@ struct SettingsWindow {
     /// The Transparency section's All Windows switch, copied from settings
     /// like the scalars beside it.
     backdrop_all_windows: bool,
+    /// The Milkdrop backdrop's working copy: the Shader page's Visual
+    /// section edits this and pushes it to the live cache the backdrop
+    /// layers read, with the file write debounced behind it.
+    backdrop_visual_strength_scrub: ScrubState,
+    backdrop_visual_scale_scrub: ScrubState,
+    backdrop_visual_duration_scrub: ScrubState,
+    backdrop_visual_persist_gen: u64,
     /// The app font size's working copy: what the Typography slider shows
     /// and writes through [`palette::set_app_font_size`].
     font_size: f32,
@@ -519,6 +528,12 @@ struct SettingsWindow {
     /// credential edits, the connect flow, and the knobs all go through
     /// it, and it persists them.
     scrobbler: Entity<Scrobbler>,
+    /// The workspace's ListenBrainz publisher, the second half of the
+    /// Integration page's scrobbling: the token and the status readout
+    /// go through it.
+    listenbrainz: Entity<ListenBrainz>,
+    /// The Libre.fm publisher, the third: its connect flow.
+    librefm: Entity<LibreFm>,
     discord: Entity<DiscordPresence>,
     discord_enabled: bool,
     discord_show_lastfm_button: bool,
@@ -527,6 +542,10 @@ struct SettingsWindow {
     /// keystroke, the pickers' cadence.
     lastfm_key: Entity<InputState>,
     lastfm_secret: Entity<InputState>,
+    /// The ListenBrainz token input. Unlike the Last.fm pair this doesn't
+    /// write through per keystroke: storing a token starts a check
+    /// against the service, so it waits for Connect.
+    listenbrainz_token: Entity<InputState>,
     /// The Icecast section's connection fields, seeded from the file and
     /// written through per keystroke. The sink itself re-applies on blur or
     /// enter, never per keystroke, so typing a host doesn't dial half names.
@@ -798,6 +817,10 @@ struct SettingsWindow {
     /// The connect flow's phases arrive through here, so the page's status
     /// line updates with them.
     _scrobbler_changed: Subscription,
+    /// The token check's result arrives through here, so the status line
+    /// follows it.
+    _listenbrainz_changed: Subscription,
+    _librefm_changed: Subscription,
     _library_changed: Subscription,
     /// Scan progress ticks notify the library without emitting Updated;
     /// the Library page's busy line needs those repaints too.
@@ -825,6 +848,68 @@ struct SettingsWindow {
     /// `recording`, rather than subscribed per record: dropping a
     /// subscription from inside its own callback is not a thing to do.
     _record_keys: Subscription,
+}
+
+/// The verbs a connection that authorizes in the browser answers to.
+/// Last.fm and Libre.fm both connect this way, so one strip serves them
+/// and only where the presses land differs.
+struct BrowserAuth {
+    phase: AuthPhase,
+    connected: bool,
+    username: String,
+    /// A session under another build's api key, which only Last.fm files
+    /// sessions by: the fix is a connect here, and saying so beats a bare
+    /// "not connected" for someone who knows they already did this.
+    elsewhere: bool,
+    /// Whether Connect can go at all: a Last.fm build without its own api
+    /// identity waits for the user's pair.
+    ready: bool,
+    begin: fn(&mut SettingsWindow, &mut Context<SettingsWindow>),
+    finish: fn(&mut SettingsWindow, &mut Context<SettingsWindow>),
+    disconnect: fn(&mut SettingsWindow, &mut Context<SettingsWindow>),
+}
+
+/// One scrobble destination as the Integrations page draws it. The three
+/// services connect differently (Last.fm and Libre.fm through the
+/// browser, ListenBrainz with a pasted token) and Last.fm alone carries
+/// hearts, but the section around that is the same for all of them:
+/// whatever the flow needs typed, then the connect row with the status,
+/// the intro under it and the actions that move it along. This is what
+/// each service hands [`SettingsWindow::destination_section`].
+struct Destination {
+    /// The service's name: the section label, and the `$service` every
+    /// shared line takes.
+    name: SharedString,
+    icon: &'static str,
+    /// Search terms beyond the name: what else someone might call it.
+    keywords: &'static [&'static str],
+    intro: SharedString,
+    /// Rows above the connect strip: credentials the flow needs typed.
+    fields: Vec<AnyElement>,
+    status: SharedString,
+    /// The buttons on the strip's right, disconnect first where two show.
+    actions: Vec<AnyElement>,
+    /// What the section header carries on its right, if anything.
+    trailing: Option<AnyElement>,
+}
+
+/// The connect strip's status line for a browser flow that isn't
+/// connected, one wording per phase. Only the refusal names the service.
+fn connect_phase_line(phase: &AuthPhase, service: &SharedString) -> SharedString {
+    match phase {
+        AuthPhase::Idle => rox_i18n::t!("settings-integrations-scrobble-status-not-connected"),
+        AuthPhase::Requesting => rox_i18n::t!("settings-integrations-scrobble-status-requesting"),
+        AuthPhase::Waiting(_) => rox_i18n::t!("settings-integrations-scrobble-status-waiting"),
+        AuthPhase::Confirming => rox_i18n::t!("settings-integrations-scrobble-status-confirming"),
+        AuthPhase::Rejected => rox_i18n::t!(
+            "settings-integrations-scrobble-status-rejected",
+            service = service.to_string()
+        ),
+        AuthPhase::Failed(e) => rox_i18n::t!(
+            "settings-integrations-scrobble-status-failed",
+            error = e.clone()
+        ),
+    }
 }
 
 impl SettingsWindow {
@@ -936,6 +1021,16 @@ impl SettingsWindow {
             cx.observe(&dock, |_, _, cx| cx.notify()),
         ];
         let _scrobbler_changed = cx.observe(&state.scrobbler, |_, _, cx| cx.notify());
+        let _listenbrainz_changed = cx.observe(&state.listenbrainz, |_, _, cx| cx.notify());
+        let _librefm_changed = cx.observe(&state.librefm, |_, _, cx| cx.notify());
+        let listenbrainz_token = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rox_i18n::t!(
+                    "settings-integrations-listenbrainz-token-placeholder"
+                ))
+                .masked(true)
+                .default_value(settings.accounts.listenbrainz.token.clone())
+        });
         // The credential inputs seed from the file and write through the
         // scrobbler per keystroke, so a paste is connected-ready with no
         // save step.
@@ -1111,6 +1206,10 @@ impl SettingsWindow {
             surface_opacity: settings.look.bundle.appearance.surface_opacity,
             backdrop_strength: settings.look.bundle.appearance.backdrop_strength,
             backdrop_all_windows: settings.look.bundle.appearance.backdrop_all_windows,
+            backdrop_visual_strength_scrub: ScrubState::default(),
+            backdrop_visual_scale_scrub: ScrubState::default(),
+            backdrop_visual_duration_scrub: ScrubState::default(),
+            backdrop_visual_persist_gen: 0,
             font_size: settings.app_font_size,
             frame: appearance_frame,
             restore_last_track: settings.restore_last_track,
@@ -1153,12 +1252,15 @@ impl SettingsWindow {
             playback,
             thumbs: state.thumbs,
             scrobbler,
+            listenbrainz: state.listenbrainz.clone(),
+            librefm: state.librefm.clone(),
             discord: state.discord.clone(),
             discord_enabled: settings.accounts.discord.enabled,
             discord_show_lastfm_button: settings.accounts.discord.show_lastfm_button,
             discord_show_youtube_button: settings.accounts.discord.show_youtube_button,
             lastfm_key,
             lastfm_secret,
+            listenbrainz_token,
             broadcast_host,
             broadcast_port,
             broadcast_mount,
@@ -1266,6 +1368,8 @@ impl SettingsWindow {
             _broadcast_changes,
             _ffmpeg_changed,
             _scrobbler_changed,
+            _listenbrainz_changed,
+            _librefm_changed,
             _library_changed,
             _library_repaint,
             _backdrop_changed,
@@ -1662,6 +1766,127 @@ impl SettingsWindow {
         self.backdrop_all_windows = on;
         palette::set_backdrop_all_windows(on, cx);
         Settings::update(move |s| s.look.bundle.appearance.backdrop_all_windows = on);
+        cx.notify();
+    }
+
+    /// The Milkdrop backdrop's switch. A toggle is one write, so it goes
+    /// straight to the file, and every window is woken because a layer that
+    /// parked itself renders nothing that would ask for the next frame.
+    fn set_backdrop_visual_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
+        let mut config = settings::backdrop_visual();
+        config.enabled = on;
+        self.backdrop_visual_switched(config, cx);
+    }
+
+    fn set_backdrop_visual_favorites(&mut self, on: bool, cx: &mut Context<Self>) {
+        let mut config = settings::backdrop_visual();
+        config.favorites_only = on;
+        self.backdrop_visual_switched(config, cx);
+    }
+
+    /// The lock. Turning it on notes the preset that's up, so a restart
+    /// lands back on it; turning it off forgets it, since an unlocked
+    /// backdrop starting on last time's preset would read as stuck.
+    fn set_backdrop_visual_locked(&mut self, on: bool, cx: &mut Context<Self>) {
+        let mut config = settings::backdrop_visual();
+        config.locked = on;
+        config.preset = if on {
+            crate::backdrop_visual::current_preset()
+        } else {
+            None
+        };
+        self.backdrop_visual_switched(config, cx);
+    }
+
+    fn set_backdrop_visual_color(
+        &mut self,
+        color: settings::MilkdropColor,
+        cx: &mut Context<Self>,
+    ) {
+        let mut config = settings::backdrop_visual();
+        config.color = color;
+        self.backdrop_visual_switched(config, cx);
+    }
+
+    /// Seconds, off the strip's own span.
+    fn set_backdrop_visual_duration(&mut self, seconds: f32, cx: &mut Context<Self>) {
+        let mut config = settings::backdrop_visual();
+        config.duration_secs = f64::from(seconds.round());
+        self.backdrop_visual_edited(config, cx);
+    }
+
+    /// Star or unstar the preset the backdrop is showing. The list is
+    /// app-wide, so this is the same write a panel's star makes; the
+    /// backdrop's own paint picks the change up through the generation.
+    fn toggle_backdrop_visual_favorite(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = crate::backdrop_visual::current_preset() {
+            let on = !settings::is_milkdrop_favorite(&path);
+            settings::set_milkdrop_favorite(&path, on);
+            cx.notify();
+        }
+    }
+
+    /// A one-shot change: straight to the files, cache and layers woken.
+    /// The live cache is the working copy, so a workspace apply that
+    /// swapped the look underneath this window is what the next edit
+    /// starts from.
+    fn backdrop_visual_switched(
+        &mut self,
+        config: settings::BackdropVisualConfig,
+        cx: &mut Context<Self>,
+    ) {
+        settings::note_backdrop_visual(config.clone());
+        Settings::update(move |s| Self::persist_backdrop_visual(s, config));
+        crate::backdrop_visual::wake(cx);
+        cx.notify();
+    }
+
+    /// The config's two halves to their two files: the look's fields into
+    /// the bundle, beside Backdrop Strength, and the machine's into
+    /// settings.json. The update writes whichever shard actually moved.
+    fn persist_backdrop_visual(s: &mut Settings, config: settings::BackdropVisualConfig) {
+        s.look.bundle.appearance.milkdrop = config.look();
+        s.backdrop_visual = config;
+    }
+
+    fn set_backdrop_visual_strength(&mut self, value: f32, cx: &mut Context<Self>) {
+        let mut config = settings::backdrop_visual();
+        config.strength = value;
+        self.backdrop_visual_edited(config, cx);
+    }
+
+    /// The render scale, taken as a percentage of the window because that's
+    /// what the strip reads.
+    fn set_backdrop_visual_scale(&mut self, percent: f32, cx: &mut Context<Self>) {
+        let mut config = settings::backdrop_visual();
+        config.scale = percent / 100.0;
+        self.backdrop_visual_edited(config, cx);
+    }
+
+    /// Live into the cache the layers read, file write debounced behind it,
+    /// the same deal the appearance scalars make: a slider drag would
+    /// otherwise rewrite the whole settings file once per tick.
+    fn backdrop_visual_edited(
+        &mut self,
+        config: settings::BackdropVisualConfig,
+        cx: &mut Context<Self>,
+    ) {
+        settings::note_backdrop_visual(config.clone());
+        crate::backdrop_visual::wake(cx);
+        self.backdrop_visual_persist_gen += 1;
+        let generation = self.backdrop_visual_persist_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+            let latest = this
+                .update(cx, |this, _| this.backdrop_visual_persist_gen)
+                .unwrap_or(generation);
+            if latest == generation {
+                Settings::update(move |s| Self::persist_backdrop_visual(s, config));
+            }
+        })
+        .detach();
         cx.notify();
     }
 
@@ -2084,6 +2309,7 @@ impl SettingsWindow {
                     )
                 },
             ))
+            .section(self.backdrop_visual_section(q, cx))
             .section(Section::new(
                 q,
                 icons::SQUARE_DASHED,
@@ -2161,6 +2387,216 @@ impl SettingsWindow {
         PageBody::new()
             .section(self.screen_shader_section(q, window, cx))
             .section(self.backdrop_shader_section(q, window, cx))
+    }
+
+    /// The Milkdrop Backdrop section: the frame behind the whole app, drawn
+    /// over the blurred cover and under everything else.
+    ///
+    /// Under Appearance, right after the Transparency section whose
+    /// backdrop strength it composites with, because that's where someone
+    /// deciding what the app looks like behind its panels is already
+    /// looking. It started life at the bottom of the Shader page on the
+    /// argument that it's a renderer with a cost, and nobody found it there.
+    fn backdrop_visual_section(&self, q: &Query, cx: &mut Context<Self>) -> Section {
+        let config = settings::backdrop_visual();
+        let error = crate::backdrop_visual::error();
+        let current = crate::backdrop_visual::current_preset();
+        let has_current = current.is_some();
+        let starred = current
+            .as_deref()
+            .is_some_and(settings::is_milkdrop_favorite);
+        let showing: SharedString = current
+            .as_deref()
+            .and_then(|path| path.file_stem())
+            .map(|stem| stem.to_string_lossy().into_owned().into())
+            .unwrap_or_else(|| rox_i18n::t!("milkdrop-no-preset"));
+        let favorites = settings::milkdrop_favorites().len();
+        Section::new(
+            q,
+            icons::AUDIO_LINES,
+            rox_i18n::t!("settings-appearance-section-milkdrop"),
+            None,
+            move |mut rows| {
+                rows = rows
+                    .keyed(
+                        "settings-appearance-milkdrop-enabled",
+                        &["milkdrop", "visual", "visualizer", "background"],
+                        panel::toggle(config.enabled, Self::set_backdrop_visual_enabled, cx),
+                    )
+                    .keyed(
+                        "settings-appearance-milkdrop-strength",
+                        &["milkdrop", "visual", "opacity", "blend", "intensity"],
+                        settings_ui::slider_edit(
+                            &self.backdrop_visual_strength_scrub,
+                            &self.value_edit,
+                            config.strength,
+                            Self::set_backdrop_visual_strength,
+                            cx,
+                        ),
+                    )
+                    .keyed(
+                        "settings-appearance-milkdrop-scale",
+                        &["milkdrop", "visual", "resolution", "performance", "cost"],
+                        settings_ui::scalar(
+                            &self.backdrop_visual_scale_scrub,
+                            &self.value_edit,
+                            config.scale * 100.0,
+                            settings_ui::span(10.0, 100.0, "%").hard(),
+                            Self::set_backdrop_visual_scale,
+                            cx,
+                        ),
+                    )
+                    .keyed(
+                        "settings-appearance-milkdrop-color",
+                        &["milkdrop", "light", "dark", "theme", "palette", "invert"],
+                        panel::choices_shared(
+                            &[
+                                (
+                                    rox_i18n::t!("milkdrop-color-preset"),
+                                    settings::MilkdropColor::Preset,
+                                ),
+                                (
+                                    rox_i18n::t!("milkdrop-color-theme"),
+                                    settings::MilkdropColor::Theme,
+                                ),
+                                (
+                                    rox_i18n::t!("milkdrop-color-palette"),
+                                    settings::MilkdropColor::Palette,
+                                ),
+                                (
+                                    rox_i18n::t!("milkdrop-color-cover"),
+                                    settings::MilkdropColor::Cover,
+                                ),
+                            ],
+                            config.color,
+                            Self::set_backdrop_visual_color,
+                            cx,
+                        ),
+                    )
+                    .keyed(
+                        "settings-appearance-milkdrop-favorites",
+                        &["milkdrop", "favorites", "starred", "shuffle"],
+                        panel::toggle(
+                            config.favorites_only,
+                            Self::set_backdrop_visual_favorites,
+                            cx,
+                        ),
+                    )
+                    // Favorites picked with nothing starred is the one pick
+                    // that does something other than what it says.
+                    .when(config.favorites_only && favorites == 0, |rows| {
+                        rows.custom(&["milkdrop", "favorites"], || {
+                            div()
+                                .text_xs()
+                                .text_color(palette::text_muted())
+                                .child(rox_i18n::t!("milkdrop-no-favorites"))
+                                .into_any_element()
+                        })
+                    })
+                    .keyed(
+                        "settings-appearance-milkdrop-duration",
+                        &["milkdrop", "preset", "seconds", "switch", "rotation"],
+                        settings_ui::scalar(
+                            &self.backdrop_visual_duration_scrub,
+                            &self.value_edit,
+                            config.duration_secs as f32,
+                            settings_ui::span(1.0, 120.0, " s").hard(),
+                            Self::set_backdrop_visual_duration,
+                            cx,
+                        ),
+                    )
+                    .keyed(
+                        "settings-appearance-milkdrop-locked",
+                        &["milkdrop", "preset", "lock", "hold", "stay"],
+                        panel::toggle(config.locked, Self::set_backdrop_visual_locked, cx),
+                    )
+                    // The picker works with nothing playing: the worker
+                    // takes a load while parked, and one that hasn't
+                    // started yet gets the pick at start. Random is
+                    // chosen here for the same reason.
+                    .keyed(
+                        "settings-appearance-milkdrop-preset",
+                        &["milkdrop", "preset", "now showing", "pick", "search"],
+                        search_picker(
+                            "milkdrop-backdrop-preset",
+                            crate::backdrop_visual::preset_rows(),
+                            showing,
+                            current
+                                .as_ref()
+                                .map(|path| path.to_string_lossy().into_owned().into()),
+                            rox_i18n::t!("milkdrop-filter-presets"),
+                            rox_i18n::t!("picker-no-matches"),
+                            |_, value, cx| {
+                                if let Some(path) = value {
+                                    crate::backdrop_visual::pick_preset(PathBuf::from(path), cx);
+                                }
+                            },
+                            cx,
+                        ),
+                    )
+                    .custom(
+                        &["milkdrop", "preset", "random", "favorite", "reveal"],
+                        || {
+                            div()
+                                .flex()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap(tokens::SPACE_XS)
+                                .child(small_button(
+                                    rox_i18n::t!("milkdrop-random"),
+                                    icons::SHUFFLE,
+                                    false,
+                                    |_, _, cx| crate::backdrop_visual::random_preset(cx),
+                                ))
+                                .child(small_button(
+                                    rox_i18n::t!(if starred {
+                                        "milkdrop-favorited"
+                                    } else {
+                                        "milkdrop-favorite-short"
+                                    }),
+                                    if starred {
+                                        icons::STAR_FILLED
+                                    } else {
+                                        icons::STAR
+                                    },
+                                    !has_current,
+                                    cx.listener(|this, _, _, cx| {
+                                        this.toggle_backdrop_visual_favorite(cx)
+                                    }),
+                                ))
+                                .child(small_button(
+                                    rox_i18n::t!("milkdrop-reveal-short"),
+                                    icons::EXTERNAL_LINK,
+                                    !has_current,
+                                    move |_, _, cx| {
+                                        if let Some(path) = current.as_deref() {
+                                            cx.reveal_path(path);
+                                        }
+                                    },
+                                ))
+                                .into_any_element()
+                        },
+                    );
+                match error {
+                    Some(error) => rows.custom(&["milkdrop", "visual", "error"], || {
+                        match panel::shader::unsupported(&error) {
+                            true => panel::banner(
+                                panel::Tone::Bad,
+                                panel::shader::NO_PIPELINE_TITLE,
+                                vec![panel::shader::NO_PIPELINE_NOTE.into()],
+                            ),
+                            false => panel::banner(
+                                panel::Tone::Bad,
+                                rox_i18n::t!("settings-appearance-milkdrop-error-title"),
+                                vec![error.into()],
+                            ),
+                        }
+                        .into_any_element()
+                    }),
+                    None => rows,
+                }
+            },
+        )
     }
 
     /// The Screen Shader section: a WGSL post-process over the whole
@@ -4516,183 +4952,16 @@ impl SettingsWindow {
     }
 
     /// The Integrations page: everything rox talks to that isn't the
-    /// library or the audio device. Last.fm account & scrobbling, Discord
-    /// Rich Presence, the icecast sink, and the ffmpeg binary Convert runs.
+    /// library or the audio device. The switch and threshold every
+    /// scrobble destination shares, then the destinations one section
+    /// each in the same shape, Discord Rich Presence, the icecast sink,
+    /// and the ffmpeg binary Convert runs.
     fn integrations_page(&self, q: &Query, cx: &mut Context<Self>) -> PageBody {
-        let scrobbler = self.scrobbler.read(cx);
-        let config = scrobbler.config().clone();
-        let phase = scrobbler.phase().clone();
-        let (loves_pending, love_error) = (scrobbler.loves_pending(), scrobbler.love_error());
-        let connected = scrobbler.connected();
-        let username = scrobbler.username().to_string();
-        // A session under a different api key: this machine connected from
-        // an install that signs with its own identity (the nix package,
-        // a release build, a local one). Sessions don't cross, so the fix
-        // is a connect here, and saying so beats a bare "not connected"
-        // for someone who knows they already did this.
-        let elsewhere = scrobbler.connected_elsewhere();
-        // A build with its own api identity connects in one click; only
-        // one without needs the user's pair.
-        let builtin = has_builtin_keys();
-        let keys_ready = builtin || (!config.api_key.is_empty() && !config.api_secret.is_empty());
-
-        // The connect strip: the connection state, and the one action
-        // that moves it along.
-        let status: SharedString = if connected {
-            rox_i18n::t!(
-                "settings-integrations-lastfm-status-connected",
-                username = username
-            )
-        } else {
-            match &phase {
-                AuthPhase::Idle if elsewhere => {
-                    rox_i18n::t!("settings-integrations-lastfm-status-elsewhere")
-                }
-                AuthPhase::Idle => {
-                    rox_i18n::t!("settings-integrations-lastfm-status-not-connected")
-                }
-                AuthPhase::Requesting => {
-                    rox_i18n::t!("settings-integrations-lastfm-status-requesting")
-                }
-                AuthPhase::Waiting(_) => {
-                    rox_i18n::t!("settings-integrations-lastfm-status-waiting")
-                }
-                AuthPhase::Confirming => {
-                    rox_i18n::t!("settings-integrations-lastfm-status-confirming")
-                }
-                AuthPhase::Rejected => {
-                    rox_i18n::t!("settings-integrations-lastfm-status-rejected")
-                }
-                AuthPhase::Failed(e) => {
-                    rox_i18n::t!(
-                        "settings-integrations-lastfm-status-failed",
-                        error = e.clone()
-                    )
-                }
-            }
+        let (scrobbling, threshold) = {
+            let s = self.scrobbler.read(cx);
+            (s.scrobbling(), s.threshold())
         };
-        let action = if connected {
-            small_button(
-                rox_i18n::t!("settings-integrations-lastfm-disconnect"),
-                icons::CLOSE,
-                false,
-                cx.listener(|this, _, _, cx| {
-                    this.scrobbler.update(cx, |s, cx| s.disconnect(cx));
-                }),
-            )
-        } else {
-            match phase {
-                AuthPhase::Requesting | AuthPhase::Confirming => small_button(
-                    rox_i18n::t!("settings-integrations-lastfm-working"),
-                    icons::REFRESH_CW,
-                    true,
-                    |_, _, _| {},
-                ),
-                AuthPhase::Waiting(_) => small_button(
-                    rox_i18n::t!("settings-integrations-lastfm-finish-connecting"),
-                    icons::REFRESH_CW,
-                    false,
-                    cx.listener(|this, _, _, cx| {
-                        this.scrobbler.update(cx, |s, cx| s.finish_auth(cx));
-                    }),
-                ),
-                // Reconnect where a session was lost rather than never
-                // held: the button reads as picking something back up.
-                phase => small_button(
-                    if matches!(phase, AuthPhase::Rejected) || elsewhere {
-                        rox_i18n::t!("settings-integrations-lastfm-reconnect")
-                    } else {
-                        rox_i18n::t!("settings-integrations-lastfm-connect")
-                    },
-                    icons::EXTERNAL_LINK,
-                    !keys_ready,
-                    cx.listener(|this, _, _, cx| {
-                        this.scrobbler.update(cx, |s, cx| s.begin_auth(cx));
-                    }),
-                ),
-            }
-        };
-
-        // What the love sync has left to do, and why it stopped if it did.
-        // A love that failed into a log file is two sides out of sync with
-        // nothing on screen to say so, so this line is why the queue keeps
-        // its reason.
-        let hearts = |n: usize| {
-            rox_i18n::t!("settings-integrations-lastfm-hearts", n = n as u64).to_string()
-        };
-        let love_status: Option<SharedString> = match (loves_pending, love_error) {
-            (0, None) => None,
-            (0, Some(error)) => Some(rox_i18n::t!(
-                "settings-integrations-lastfm-love-failed",
-                error = error.to_string()
-            )),
-            (pending, None) => Some(rox_i18n::t!(
-                "settings-integrations-lastfm-love-pending",
-                hearts = hearts(pending)
-            )),
-            (pending, Some(error)) => Some(rox_i18n::t!(
-                "settings-integrations-lastfm-love-pending-failed",
-                hearts = hearts(pending),
-                error = error.to_string()
-            )),
-        };
-
-        let account = div()
-            .flex()
-            .flex_col()
-            .gap(tokens::SPACE_MD)
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(palette::text_muted())
-                    .child(if builtin {
-                        rox_i18n::t!("settings-integrations-lastfm-intro-builtin")
-                    } else {
-                        rox_i18n::t!("settings-integrations-lastfm-intro-custom")
-                    }),
-            )
-            .when(!builtin, |d| {
-                d.child(panel::setting_row(
-                    rox_i18n::t!("settings-integrations-lastfm-api-key-row"),
-                    None,
-                    Input::new(&self.lastfm_key).w(px(240.)),
-                ))
-                .child(panel::setting_row(
-                    rox_i18n::t!("settings-integrations-lastfm-secret-row"),
-                    None,
-                    Input::new(&self.lastfm_secret).w(px(240.)),
-                ))
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap(tokens::SPACE_MD)
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(palette::text_muted())
-                            .child(status),
-                    )
-                    .child(action),
-            );
-
         PageBody::new()
-            .section(Section::new(
-                q,
-                icons::RADIO,
-                rox_i18n::t!("settings-integrations-section-lastfm"),
-                None,
-                |rows| {
-                    rows.custom(
-                        &["account", "connect", "login", "api key", "scrobble"],
-                        || account.into_any_element(),
-                    )
-                },
-            ))
             .section(Section::new(
                 q,
                 icons::UPLOAD,
@@ -4701,9 +4970,9 @@ impl SettingsWindow {
                 |rows| {
                     rows.keyed(
                         "settings-integrations-scrobble-tracks",
-                        &["listens", "history"],
+                        &["Last.fm", "Libre.fm", "ListenBrainz", "listens", "history"],
                         panel::toggle(
-                            config.scrobbling,
+                            scrobbling,
                             |this: &mut Self, on, cx| {
                                 this.scrobbler.update(cx, |s, cx| s.set_scrobbling(on, cx));
                                 cx.notify();
@@ -4713,11 +4982,11 @@ impl SettingsWindow {
                     )
                     .keyed(
                         "settings-integrations-scrobble-threshold",
-                        &["Last.fm", "percent"],
+                        &["Last.fm", "Libre.fm", "ListenBrainz", "percent"],
                         settings_ui::slider_edit(
                             &self.threshold_scrub,
                             &self.value_edit,
-                            config.threshold,
+                            threshold,
                             |this: &mut Self, fraction, cx| {
                                 this.scrobbler
                                     .update(cx, |s, cx| s.set_threshold(fraction, cx));
@@ -4728,36 +4997,9 @@ impl SettingsWindow {
                     )
                 },
             ))
-            .section(Section::new(
-                q,
-                icons::HEART,
-                rox_i18n::t!("settings-integrations-section-favourites"),
-                Some(self.import_control(cx)),
-                |rows| {
-                    rows.keyed(
-                        "settings-integrations-love-favourites",
-                        &["Last.fm", "love", "loved", "heart", "mirror"],
-                        panel::toggle(
-                            config.love_favourites,
-                            |this: &mut Self, on, cx| {
-                                this.scrobbler
-                                    .update(cx, |s, cx| s.set_love_favourites(on, cx));
-                                cx.notify();
-                            },
-                            cx,
-                        ),
-                    )
-                    .when_some(love_status, |rows, status| {
-                        rows.custom(&["love", "queue", "failed"], || {
-                            div()
-                                .text_xs()
-                                .text_color(palette::text_muted())
-                                .child(status)
-                                .into_any_element()
-                        })
-                    })
-                },
-            ))
+            .section(self.lastfm_section(q, cx))
+            .section(self.listenbrainz_section(q, cx))
+            .section(self.librefm_section(q, cx))
             .section(Section::new(
                 q,
                 icons::GLOBE,
@@ -4857,6 +5099,387 @@ impl SettingsWindow {
                     )
                 },
             ))
+    }
+
+    /// One scrobble destination's section, the shape all three share: the
+    /// fields the flow needs, the connect row, and whatever rows the
+    /// service adds below that.
+    fn destination_section(
+        &self,
+        q: &Query,
+        destination: Destination,
+        extra: impl FnOnce(Rows) -> Rows,
+    ) -> Section {
+        let Destination {
+            name,
+            icon,
+            keywords,
+            intro,
+            fields,
+            status,
+            actions,
+            trailing,
+        } = destination;
+        // The connect row reads like the rows under it: the status stands
+        // as its label, the intro sits beneath as its description, and the
+        // actions take the control's place. Fields come first, so a token
+        // or an api pair is above the line that says what pasting it does.
+        let account = div()
+            .flex()
+            .flex_col()
+            .gap(tokens::SPACE_MD)
+            .children(fields)
+            .child(panel::setting_row(
+                status,
+                Some(intro),
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .items_center()
+                    .gap(tokens::SPACE_SM)
+                    .children(actions),
+            ));
+        let mut terms: Vec<&str> = vec![name.as_ref(), "account", "connect", "login", "scrobble"];
+        terms.extend_from_slice(keywords);
+        Section::new(q, icon, name.clone(), trailing, |rows| {
+            extra(rows.custom(&terms, || account.into_any_element()))
+        })
+    }
+
+    /// The connect strip for a service that authorizes in the browser: the
+    /// status follows the phase, and the one button offers the step that
+    /// moves it along.
+    fn browser_auth_strip(
+        &self,
+        service: &SharedString,
+        auth: BrowserAuth,
+        cx: &mut Context<Self>,
+    ) -> (SharedString, Vec<AnyElement>) {
+        let status: SharedString = if auth.connected {
+            rox_i18n::t!(
+                "settings-integrations-scrobble-status-connected",
+                username = auth.username
+            )
+        } else if auth.elsewhere && matches!(auth.phase, AuthPhase::Idle) {
+            rox_i18n::t!("settings-integrations-lastfm-status-elsewhere")
+        } else {
+            connect_phase_line(&auth.phase, service)
+        };
+        let action = if auth.connected {
+            let disconnect = auth.disconnect;
+            small_button(
+                rox_i18n::t!("settings-integrations-scrobble-disconnect"),
+                icons::CLOSE,
+                false,
+                cx.listener(move |this, _, _, cx| disconnect(this, cx)),
+            )
+        } else {
+            match auth.phase {
+                AuthPhase::Requesting | AuthPhase::Confirming => small_button(
+                    rox_i18n::t!("settings-integrations-scrobble-working"),
+                    icons::REFRESH_CW,
+                    true,
+                    |_, _, _| {},
+                ),
+                AuthPhase::Waiting(_) => {
+                    let finish = auth.finish;
+                    small_button(
+                        rox_i18n::t!("settings-integrations-scrobble-finish-connecting"),
+                        icons::REFRESH_CW,
+                        false,
+                        cx.listener(move |this, _, _, cx| finish(this, cx)),
+                    )
+                }
+                // Reconnect where a session was lost rather than never
+                // held: the button reads as picking something back up.
+                phase => {
+                    let begin = auth.begin;
+                    small_button(
+                        if matches!(phase, AuthPhase::Rejected) || auth.elsewhere {
+                            rox_i18n::t!("settings-integrations-scrobble-reconnect")
+                        } else {
+                            rox_i18n::t!("settings-integrations-scrobble-connect")
+                        },
+                        icons::EXTERNAL_LINK,
+                        !auth.ready,
+                        cx.listener(move |this, _, _, cx| begin(this, cx)),
+                    )
+                }
+            }
+        };
+        (status, vec![action.into_any_element()])
+    }
+
+    /// Last.fm: the browser flow, the api pair on a build that ships none,
+    /// and the hearts mirror no other destination has.
+    fn lastfm_section(&self, q: &Query, cx: &mut Context<Self>) -> Section {
+        let name: SharedString = rox_i18n::t!("settings-integrations-section-lastfm");
+        let (config, phase, connected, username, elsewhere, loves_pending, love_error) = {
+            let s = self.scrobbler.read(cx);
+            (
+                s.config().clone(),
+                s.phase().clone(),
+                s.connected(),
+                s.username().to_string(),
+                s.connected_elsewhere(),
+                s.loves_pending(),
+                s.love_error(),
+            )
+        };
+        // A build with its own api identity connects in one click; only
+        // one without needs the user's pair.
+        let builtin = has_builtin_keys();
+        let (status, actions) = self.browser_auth_strip(
+            &name,
+            BrowserAuth {
+                phase,
+                connected,
+                username,
+                elsewhere,
+                ready: builtin || (!config.api_key.is_empty() && !config.api_secret.is_empty()),
+                begin: |this, cx| this.scrobbler.update(cx, |s, cx| s.begin_auth(cx)),
+                finish: |this, cx| this.scrobbler.update(cx, |s, cx| s.finish_auth(cx)),
+                disconnect: |this, cx| this.scrobbler.update(cx, |s, cx| s.disconnect(cx)),
+            },
+            cx,
+        );
+        let fields = if builtin {
+            Vec::new()
+        } else {
+            vec![
+                panel::setting_row(
+                    rox_i18n::t!("settings-integrations-lastfm-api-key-row"),
+                    None,
+                    Input::new(&self.lastfm_key).w(px(240.)),
+                )
+                .into_any_element(),
+                panel::setting_row(
+                    rox_i18n::t!("settings-integrations-lastfm-secret-row"),
+                    None,
+                    Input::new(&self.lastfm_secret).w(px(240.)),
+                )
+                .into_any_element(),
+            ]
+        };
+
+        // What the love sync has left to do, and why it stopped if it did.
+        // A love that failed into a log file is two sides out of sync with
+        // nothing on screen to say so, so this line is why the queue keeps
+        // its reason.
+        let hearts = |n: usize| {
+            rox_i18n::t!("settings-integrations-lastfm-hearts", n = n as u64).to_string()
+        };
+        let love_status: Option<SharedString> = match (loves_pending, love_error) {
+            (0, None) => None,
+            (0, Some(error)) => Some(rox_i18n::t!(
+                "settings-integrations-lastfm-love-failed",
+                error = error.to_string()
+            )),
+            (pending, None) => Some(rox_i18n::t!(
+                "settings-integrations-lastfm-love-pending",
+                hearts = hearts(pending)
+            )),
+            (pending, Some(error)) => Some(rox_i18n::t!(
+                "settings-integrations-lastfm-love-pending-failed",
+                hearts = hearts(pending),
+                error = error.to_string()
+            )),
+        };
+        let love_toggle = panel::toggle(
+            config.love_favourites,
+            |this: &mut Self, on, cx| {
+                this.scrobbler
+                    .update(cx, |s, cx| s.set_love_favourites(on, cx));
+                cx.notify();
+            },
+            cx,
+        );
+        let trailing = Some(self.import_control(cx));
+
+        self.destination_section(
+            q,
+            Destination {
+                name,
+                icon: icons::RADIO,
+                keywords: &["lastfm", "api key", "love", "loved", "heart"],
+                intro: if builtin {
+                    rox_i18n::t!("settings-integrations-lastfm-intro-builtin")
+                } else {
+                    rox_i18n::t!("settings-integrations-lastfm-intro-custom")
+                },
+                fields,
+                status,
+                actions,
+                trailing,
+            },
+            |rows| {
+                rows.keyed(
+                    "settings-integrations-love-favourites",
+                    &["Last.fm", "love", "loved", "heart", "mirror"],
+                    love_toggle,
+                )
+                .when_some(love_status, |rows, status| {
+                    rows.custom(&["love", "queue", "failed"], || {
+                        div()
+                            .text_xs()
+                            .text_color(palette::text_muted())
+                            .child(status)
+                            .into_any_element()
+                    })
+                })
+            },
+        )
+    }
+
+    /// ListenBrainz: a token pasted from the site is the whole connection,
+    /// so Connect checks the token rather than opening a browser, and the
+    /// status line names the account it belongs to.
+    fn listenbrainz_section(&self, q: &Query, cx: &mut Context<Self>) -> Section {
+        let name: SharedString = rox_i18n::t!("settings-integrations-section-listenbrainz");
+        let lb_status = self.listenbrainz.read(cx).status().clone();
+        let connected = matches!(lb_status, ListenBrainzStatus::Connected(_));
+        let status: SharedString = match lb_status {
+            ListenBrainzStatus::Off => {
+                rox_i18n::t!("settings-integrations-scrobble-status-not-connected")
+            }
+            ListenBrainzStatus::Unverified => {
+                rox_i18n::t!("settings-integrations-scrobble-status-checking")
+            }
+            ListenBrainzStatus::Connected(user) => rox_i18n::t!(
+                "settings-integrations-scrobble-status-connected",
+                username = user
+            ),
+            ListenBrainzStatus::Invalid => rox_i18n::t!(
+                "settings-integrations-scrobble-status-invalid",
+                service = name.to_string()
+            ),
+            ListenBrainzStatus::Failed(reason) => rox_i18n::t!(
+                "settings-integrations-scrobble-status-failed",
+                error = reason
+            ),
+        };
+        // Connect with an empty field would only ever say "not connected"
+        // back, so it's inert until there's something to check.
+        let token_empty = self.listenbrainz_token.read(cx).value().trim().is_empty();
+        let mut actions = Vec::with_capacity(2);
+        if connected {
+            actions.push(
+                small_button(
+                    rox_i18n::t!("settings-integrations-scrobble-disconnect"),
+                    icons::CLOSE,
+                    false,
+                    cx.listener(|this, _, window, cx| {
+                        this.listenbrainz.update(cx, |lb, cx| lb.disconnect(cx));
+                        this.listenbrainz_token
+                            .update(cx, |input, cx| input.set_value("", window, cx));
+                    }),
+                )
+                .into_any_element(),
+            );
+        }
+        actions.push(
+            small_button(
+                rox_i18n::t!("settings-integrations-scrobble-connect"),
+                icons::LINK,
+                token_empty,
+                cx.listener(|this, _, _, cx| {
+                    let token = this.listenbrainz_token.read(cx).value().trim().to_string();
+                    this.listenbrainz
+                        .update(cx, |lb, cx| lb.set_token(token, cx));
+                }),
+            )
+            .into_any_element(),
+        );
+        let token_field = panel::setting_row(
+            rox_i18n::t!("settings-integrations-listenbrainz-token-row"),
+            None,
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(tokens::SPACE_MD)
+                // The token only exists on the ListenBrainz settings page,
+                // and fetching it comes before pasting it, so the link
+                // sits ahead of the field in reading order.
+                .child(
+                    div()
+                        .id("listenbrainz-get-token")
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(tokens::SPACE_XS)
+                        .text_xs()
+                        .text_color(palette::text_muted())
+                        .hover(|d| d.text_color(palette::text_bright()))
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            cx.open_url("https://listenbrainz.org/settings/")
+                        })
+                        .child(svg().path(icons::EXTERNAL_LINK).size(px(12.)))
+                        .child(rox_i18n::t!("settings-integrations-listenbrainz-get-token")),
+                )
+                .child(Input::new(&self.listenbrainz_token).w(px(240.))),
+        )
+        .into_any_element();
+
+        self.destination_section(
+            q,
+            Destination {
+                name,
+                icon: icons::AUDIO_WAVEFORM,
+                keywords: &["listenbrainz", "musicbrainz", "token", "listens"],
+                intro: rox_i18n::t!("settings-integrations-listenbrainz-intro"),
+                fields: vec![token_field],
+                status,
+                actions,
+                trailing: None,
+            },
+            |rows| rows,
+        )
+    }
+
+    /// Libre.fm: Last.fm's browser dance against its own entity, with no
+    /// api pair to ask for since the service takes the one rox ships.
+    fn librefm_section(&self, q: &Query, cx: &mut Context<Self>) -> Section {
+        let name: SharedString = rox_i18n::t!("settings-integrations-section-librefm");
+        let (phase, connected, username) = {
+            let lf = self.librefm.read(cx);
+            (
+                lf.phase().clone(),
+                lf.connected(),
+                lf.username().to_string(),
+            )
+        };
+        let (status, actions) = self.browser_auth_strip(
+            &name,
+            BrowserAuth {
+                phase,
+                connected,
+                username,
+                elsewhere: false,
+                ready: true,
+                begin: |this, cx| this.librefm.update(cx, |lf, cx| lf.begin_auth(cx)),
+                finish: |this, cx| this.librefm.update(cx, |lf, cx| lf.finish_auth(cx)),
+                disconnect: |this, cx| this.librefm.update(cx, |lf, cx| lf.disconnect(cx)),
+            },
+            cx,
+        );
+
+        self.destination_section(
+            q,
+            Destination {
+                name,
+                icon: icons::DISC,
+                keywords: &["librefm", "libre.fm", "gnu fm"],
+                intro: rox_i18n::t!("settings-integrations-librefm-intro"),
+                fields: Vec::new(),
+                status,
+                actions,
+                trailing: None,
+            },
+            |rows| rows,
+        )
     }
 
     /// The Icecast section (ADR 22): the source client, which is the audio

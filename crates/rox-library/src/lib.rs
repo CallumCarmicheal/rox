@@ -26,7 +26,9 @@ pub mod migrate;
 pub mod mp4;
 pub mod open_files;
 pub mod peaks;
+pub mod playlist_file;
 pub mod playlists;
+pub mod pls;
 pub mod projection;
 pub mod rating;
 pub mod replaygain;
@@ -41,6 +43,7 @@ pub mod track_meta;
 pub mod view;
 pub mod watch;
 pub mod writer;
+pub mod xspf;
 
 // Embedders hold a Connection for store queries, so its type needs to be
 // nameable without taking on the dep directly.

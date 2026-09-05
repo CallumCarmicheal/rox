@@ -15,7 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Decode per ADR 2: every symphonia codec and container is pure Rust, so we
 # take the whole audio matrix (all-codecs + all-formats) without pulling a C
-# dependency. No Opus decoder ships in 0.6, so Ogg Opus stays unsupported.
+# dependency.
 # The tag readers matter for probing, not just tags: without id3v2 the probe
 # cannot skip a leading ID3v2 tag, and a tag bigger than the 1 MB probe depth
 # (embedded cover art) makes the whole file unreadable.
@@ -24,8 +24,37 @@ symphonia = { version = "0.6", default-features = false, features = [
     "aiff", "caf", "isomp4", "mkv", "ogg", "wav",
     "id3v1", "id3v2", "ape",
 ] }
+# The one codec symphonia 0.6 has no decoder for. Its Ogg reader maps an Opus
+# stream to a track and then finds nothing to decode it with, which is why
+# rox's own converter could write .opus files the app refused to play. This
+# crate has no dependencies and no build script, so ADR 2's
+# no-C-in-the-decode-path line still holds. Its `unsafe` is about 130 blocks of
+# AVX2 and NEON intrinsics behind runtime feature detection, which is SIMD, not
+# C. Single-stream only here, so multichannel Opus (mapping family 1 past
+# stereo) is refused, not decoded; see crates/rox-playback/src/opus.rs.
+#
+# This replaced opus-decoder 0.1.1, which panics on ordinary music. Its CELT
+# anti-collapse mask is a u8 while the block count reaches 16, so `1 << i`
+# overflows for i >= 8: a panic in debug, a silently wrong mask in release. It
+# hit all fourteen tracks of a real-music corpus, most within a second. Even
+# with that fixed it decodes about 30 dB further from libopus than this crate
+# does, and it still ships its author's LLM debug scaffolding in the hot path.
+# tests/fixtures/dense-transients.opus is the regression that catches the
+# panic; tests/fixtures/README.md has the comparison.
+opus-pure = "0.2"
 # Wait-free SPSC ring for the RT boundary (ADR 3), both the sample ring and the PCM tap.
 rtrb = "0.3"
+# ADR 19's resampler: windowed sinc from rubato, replacing the linear
+# interpolator the spike shipped with. Sinc path only; the FFT feature and its
+# realfft dependency are off because the ratio never changes mid-track.
+# Measured here at 128 taps and 256x oversampling: resampling 44.1k to 48k
+# stereo costs 0.33% of one core in release, 1.8% in the debug profile, so the
+# decode thread barely feels it and there's no reason to drop to 64 taps.
+# Construction is the expensive half, 1.6 ms release and 3.0 ms debug, because
+# it computes the whole sinc table, so a seek reuses it through
+# `Resampler::reset` instead. Only a real mid-stream rate change builds a new
+# one.
+rubato = { version = "5", default-features = false }
 # The logging facade: decode and output errors go through log macros the host
 # app's backend (crate::logging in rox) captures. A library only declares the
 # facade, never installs a logger.

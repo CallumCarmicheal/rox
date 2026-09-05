@@ -571,6 +571,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "audio-codec-algorithms"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1254ebf6529f3763c491acfb5ab6e960809e3c75a38584cc664f8c5667fb7107"
+
+[[package]]
+name = "audioadapter"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1292ef9edf681b7426ed089004b021a42896492f58bd0c909ad44e5faec9ac4"
+
+[[package]]
+name = "audioadapter-buffers"
+version = "5.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46289a81a3bfa26d0f8b2415f8ca9decde9a66308a150568af5c102381b3c8ce"
+dependencies = [
+ "audioadapter",
+ "audioadapter-sample",
+ "num-traits",
+]
+
+[[package]]
+name = "audioadapter-sample"
+version = "5.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5258faecf4edbe35ec483bda9b1f7438e6b391891819269c6b5461aeaa0e8d7d"
+dependencies = [
+ "audio-codec-algorithms",
+ "num-traits",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1225,6 +1258,15 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
+
+[[package]]
+name = "cmake"
+version = "0.1.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "cocoa"
@@ -3220,6 +3262,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gl_generator"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a95dfc23a2b4a9a2f5ab41d194f8bfda3cabec42af4e39f08c339eb2a0c124d"
+dependencies = [
+ "khronos_api",
+ "log",
+ "xml-rs",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3271,6 +3324,60 @@ dependencies = [
  "slotmap",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "glutin"
+version = "0.32.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12124de845cacfebedff80e877bb37b5b75c34c5a4c89e47e1cdd67fb6041325"
+dependencies = [
+ "bitflags 2.13.0",
+ "cfg_aliases",
+ "cgl",
+ "dispatch2",
+ "glutin_egl_sys",
+ "glutin_glx_sys",
+ "glutin_wgl_sys",
+ "libloading",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-foundation",
+ "once_cell",
+ "raw-window-handle",
+ "wayland-sys",
+ "windows-sys 0.52.0",
+ "x11-dl",
+]
+
+[[package]]
+name = "glutin_egl_sys"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c4680ba6195f424febdc3ba46e7a42a0e58743f2edb115297b86d7f8ecc02d2"
+dependencies = [
+ "gl_generator",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "glutin_glx_sys"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7bb2938045a88b612499fbcba375a77198e01306f52272e692f8c1f3751185"
+dependencies = [
+ "gl_generator",
+ "x11-dl",
+]
+
+[[package]]
+name = "glutin_wgl_sys"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c4ee00b289aba7a9e5306d57c2d05499b2e5dc427f84ac708bd2c090212cf3e"
+dependencies = [
+ "gl_generator",
 ]
 
 [[package]]
@@ -4581,6 +4688,12 @@ dependencies = [
  "libc",
  "libloading",
 ]
+
+[[package]]
+name = "khronos_api"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kqueue"
@@ -5894,6 +6007,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "opus-pure"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de6a3cef053e1fdea38a5e50edb0789590a31184c5a59f6cd5e462fe844793e7"
+
+[[package]]
 name = "ordered-stream"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6909,7 +7028,7 @@ dependencies = [
 
 [[package]]
 name = "rox"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
@@ -6934,6 +7053,7 @@ dependencies = [
  "rox-i18n",
  "rox-ipc",
  "rox-library",
+ "rox-milkdrop",
  "rox-net",
  "rox-panel-api",
  "rox-panel-kit",
@@ -6961,7 +7081,7 @@ dependencies = [
 
 [[package]]
 name = "rox-acoustic"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -6977,7 +7097,7 @@ dependencies = [
 
 [[package]]
 name = "rox-cli"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "base64 0.22.1",
  "dirs 5.0.1",
@@ -6987,11 +7107,13 @@ dependencies = [
 
 [[package]]
 name = "rox-core"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
+ "async-task",
  "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
+ "futures",
  "gpui",
  "jsonschema",
  "log",
@@ -7007,7 +7129,7 @@ dependencies = [
 
 [[package]]
 name = "rox-design"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "gpui",
  "gpui-component",
@@ -7021,7 +7143,7 @@ dependencies = [
 
 [[package]]
 name = "rox-dock"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "anyhow",
  "gpui",
@@ -7036,7 +7158,7 @@ dependencies = [
 
 [[package]]
 name = "rox-i18n"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "fixed_decimal",
  "fluent-bundle",
@@ -7060,7 +7182,7 @@ dependencies = [
 
 [[package]]
 name = "rox-ipc"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "async-channel 2.5.0",
  "dirs 5.0.1",
@@ -7072,7 +7194,7 @@ dependencies = [
 
 [[package]]
 name = "rox-library"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "async-channel 2.5.0",
  "base64 0.22.1",
@@ -7086,14 +7208,16 @@ dependencies = [
  "memchr",
  "notify-debouncer-full",
  "rayon",
+ "roxmltree",
  "rusqlite",
  "serde",
  "serde_json",
+ "url",
 ]
 
 [[package]]
 name = "rox-mcp"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "dirs 5.0.1",
  "rox-ipc",
@@ -7101,8 +7225,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rox-milkdrop"
+version = "1.25.0"
+dependencies = [
+ "crossbeam-channel",
+ "glutin",
+ "log",
+ "raw-window-handle",
+ "rox-milkdrop-sys",
+ "rox-viz",
+ "tempfile",
+ "walkdir",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rox-milkdrop-sys"
+version = "1.25.0"
+dependencies = [
+ "cmake",
+]
+
+[[package]]
 name = "rox-net"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "dotenvy",
  "md5",
@@ -7114,7 +7260,7 @@ dependencies = [
 
 [[package]]
 name = "rox-panel-api"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "anyhow",
  "gpui",
@@ -7138,7 +7284,7 @@ dependencies = [
 
 [[package]]
 name = "rox-panel-kit"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "gpui",
  "gpui-component",
@@ -7149,7 +7295,7 @@ dependencies = [
 
 [[package]]
 name = "rox-panels"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "dirs 5.0.1",
  "gpui",
@@ -7162,6 +7308,7 @@ dependencies = [
  "rox-dock",
  "rox-i18n",
  "rox-library",
+ "rox-milkdrop",
  "rox-net",
  "rox-panel-api",
  "rox-panel-kit",
@@ -7175,7 +7322,7 @@ dependencies = [
 
 [[package]]
 name = "rox-playback"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "alsa",
  "base64 0.22.1",
@@ -7183,8 +7330,10 @@ dependencies = [
  "ebur128",
  "log",
  "mp3lame-encoder",
+ "opus-pure",
  "rox-library",
  "rtrb",
+ "rubato",
  "serde",
  "serde_json",
  "symphonia",
@@ -7193,7 +7342,7 @@ dependencies = [
 
 [[package]]
 name = "rox-romanize"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "lindera",
  "log",
@@ -7206,7 +7355,7 @@ dependencies = [
 
 [[package]]
 name = "rox-services"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "async-channel 2.5.0",
  "discord-rich-presence",
@@ -7228,7 +7377,7 @@ dependencies = [
 
 [[package]]
 name = "rox-viz"
-version = "1.24.0"
+version = "1.25.0"
 dependencies = [
  "schemars",
  "serde",
@@ -7246,6 +7395,20 @@ name = "rtrb"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ade083ccbb4bf536df69d1f6432cc23deb7acccff86b183f3923a6fd56a1153"
+
+[[package]]
+name = "rubato"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7cb1ffaf8738df50aab642a7f6465df81c6ba9e2818268053487165298114be"
+dependencies = [
+ "audioadapter",
+ "audioadapter-buffers",
+ "num-integer",
+ "num-traits",
+ "visibility",
+ "windowfunctions",
+]
 
 [[package]]
 name = "rusqlite"
@@ -9555,6 +9718,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "visibility"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d674d135b4a8c1d7e813e2f8d1c9a58308aee4a680323066025e53132218bd91"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "vsimd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9877,6 +10051,15 @@ name = "winapi-x86_64-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
+
+[[package]]
+name = "windowfunctions"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90628d739333b7c5d2ee0b70210b97b8cddc38440c682c96fd9e2c24c2db5f3a"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "windows"
@@ -10543,6 +10726,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "x11-dl"
+version = "2.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38735924fedd5314a6e548792904ed8c6de6636285cb9fec04d5b1db85c1516f"
+dependencies = [
+ "libc",
+ "once_cell",
+ "pkg-config",
+]
+
+[[package]]
 name = "x11rb"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10644,6 +10838,12 @@ name = "xkeysym"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
+
+[[package]]
+name = "xml-rs"
+version = "0.8.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xml5ever"

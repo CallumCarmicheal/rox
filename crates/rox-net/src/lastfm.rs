@@ -4,6 +4,10 @@
 //! from the build's own identity ([`keys`]), with the settings file's
 //! pair as the override for builds that ship none. The scrobbler built
 //! on top of this, the part that tracks player state, is in rox.
+//!
+//! The protocol isn't Last.fm's alone: Libre.fm serves the same methods
+//! at its own host, so the call takes its root as an argument and
+//! [`crate::librefm`] points it there.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -73,10 +77,22 @@ impl ApiError {
     }
 }
 
-/// One signed API call, blocking: POST the parameters, parse the JSON,
-/// surface the API's own error message when it sends one. Runs on the
-/// background executor only.
+/// One signed Last.fm call, blocking: POST the parameters, parse the
+/// JSON, surface the API's own error message when it sends one. Runs on
+/// the background executor only.
 pub fn call(
+    method: &str,
+    secret: &str,
+    params: BTreeMap<String, String>,
+) -> Result<serde_json::Value, ApiError> {
+    call_at(API_ROOT, method, secret, params)
+}
+
+/// The same call against any host that speaks the protocol: Last.fm's
+/// own root above, Libre.fm's in its module. The signing and the error
+/// shape don't change with the host, only where the form goes.
+pub fn call_at(
+    root: &str,
     method: &str,
     secret: &str,
     mut params: BTreeMap<String, String>,
@@ -100,7 +116,7 @@ pub fn call(
     // failure parses like a success. Use the shared provider agent for its
     // User-Agent and timeout; a bare ureq::post has neither, so a hung endpoint
     // parks the connect flow in Confirming forever.
-    let text = match crate::providers::agent().post(API_ROOT).send_form(&pairs) {
+    let text = match crate::providers::agent().post(root).send_form(&pairs) {
         Ok(response) => response
             .into_string()
             .map_err(|e| transport(e.to_string()))?,

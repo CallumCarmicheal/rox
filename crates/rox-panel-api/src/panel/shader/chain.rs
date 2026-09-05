@@ -662,6 +662,30 @@ pub fn validate_program(source: &str, ctx: &ProgramCtx) -> Result<(), String> {
     Ok(())
 }
 
+/// Put a hand-built frame pass through naga: the one-pass chains the
+/// Milkdrop panel and backdrop register, which bind a dynamic texture
+/// under a name of their own rather than going through the chain text.
+/// `textures` are those names. The window composes the same template, so
+/// a pass that validates here registers there; this exists so the WGSL
+/// those surfaces carry as a string constant is checked by a unit test
+/// rather than by the first person to open the panel.
+pub fn validate_frame_pass(user_source: &str, textures: &[&str]) -> Result<(), String> {
+    let mut bindings = vec![
+        Binding {
+            name: "params".to_string(),
+            declaration: "var<uniform> ",
+            kind: "ShaderParams",
+        },
+        Binding {
+            name: "samp".to_string(),
+            declaration: "var ",
+            kind: "sampler",
+        },
+    ];
+    bindings.extend(textures.iter().map(|name| Binding::texture(*name)));
+    validate_wgsl(&compose_pass(user_source, &bindings)).map(|_| ())
+}
+
 /// naga's verdict on one composed module, with its message rendered
 /// against the source the way the window renders it.
 fn validate_wgsl(source: &str) -> Result<naga::Module, String> {

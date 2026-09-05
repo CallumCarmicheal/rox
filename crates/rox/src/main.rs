@@ -11,6 +11,7 @@
 // debug builds so stdout/stderr logging stays visible.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod backdrop_visual;
 mod bake;
 mod bake_dialog;
 mod composite;
@@ -60,10 +61,10 @@ use gpui_component::Root;
 use rox_core::settings::{
     layouts, note_first_run, note_os_appearance, os_decorations, resize_border, seed_os_appearance,
     set_acoustic_analysis, set_app_font, set_app_frame, set_design_mode, set_experimental,
-    set_fold_case, set_gain_mode, set_hide_menubar, set_language, set_os_decorations,
-    set_quit_to_tray, set_rating_dots, set_rating_style, set_resize_border, set_resize_lock,
-    set_seams, set_show_readings, set_tempo_analysis, set_theme, set_workspace_migrator,
-    window_decorations, Settings, MIN_WINDOW_SIZE,
+    set_fold_case, set_gain_mode, set_hide_menubar, set_language, set_menubar_buttons,
+    set_os_decorations, set_quit_to_tray, set_rating_dots, set_rating_style, set_resize_border,
+    set_resize_lock, set_seams, set_show_readings, set_tempo_analysis, set_theme,
+    set_workspace_migrator, window_decorations, Settings, MIN_WINDOW_SIZE,
 };
 use rox_core::{logging, APP_ID};
 use rox_design::assets::Assets;
@@ -448,6 +449,7 @@ fn main() {
         set_rating_style(settings.look.bundle.appearance.rating_style, cx);
         set_rating_dots(settings.look.bundle.appearance.rating_dots, cx);
         set_hide_menubar(settings.look.bundle.appearance.hide_menubar, cx);
+        set_menubar_buttons(settings.look.bundle.appearance.menubar_buttons, cx);
         set_os_decorations(settings.look.bundle.appearance.os_decorations);
         set_resize_border(settings.look.bundle.appearance.resize_border);
         set_fold_case(settings.fold_case);

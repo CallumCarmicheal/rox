@@ -115,12 +115,15 @@ response fields arrive without a bump, so ignore fields you don't know.
 Methods. Transport verbs return the full player status, so a caller sees
 what its command did without a second round trip:
 
-  transport.status       Playing, position, duration, volume, mute, queue
-                         revision, current track.
+  transport.status       Playing, position, duration, volume, mute, A-B
+                         section, queue revision, current track.
   transport.toggle       Also .play .pause .next .prev .stop; all return
                          status.
   transport.seek         {"to": secs} or {"by": secs}
   transport.set_volume   {"volume": 0..2}
+  transport.ab           {"action": "mark"/"clear"} steps or clears the
+                         A-B repeat; {"a": secs, "b": secs} sets a
+                         section outright.
   queue.list             Every entry with its stable id, path, explicit
                          flag, and current marker.
   queue.add              {"paths": [..], "mode": "end"/"next"/"now"}
@@ -233,6 +236,8 @@ The tools:
                    audio is playing.
   transport        action: toggle, play, pause, next, prev, or stop.
                    Returns the resulting player state.
+  ab_repeat        action: mark, clear, or set (with a and b in track
+                   seconds). Marks, clears, or sets the A-B section.
   search_library   query, optional limit (1..500). Matching tracks with
                    tags; pins like artist:name narrow one field.
   get_queue        The play order with each entry's stable id and the one

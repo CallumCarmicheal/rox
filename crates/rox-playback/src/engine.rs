@@ -8,7 +8,10 @@
 //! as packet trim metadata and the mp3 decoder applies it, so the samples we
 //! see are already the playable range. The spike verifies that claim against
 //! real files; if it falls short we trim from Track::delay/padding ourselves,
-//! which the ADR anticipated.
+//! which the ADR anticipated. Opus is the one format where that fallback
+//! already had to happen: the Ogg reader signals the end padding but never the
+//! pre-skip, so [`crate::opus`] reads it out of the OpusHead and drops it
+//! before the buffer ever reaches here.
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -56,6 +59,11 @@ pub enum Cmd {
     /// samples play out, then pauses with the next track cued at 0:00.
     /// Sticky until cleared, so every track end stops while armed.
     SetStopAfter(bool),
+    /// Loop a section of the audible track, or clear it with None. Both
+    /// seconds are track-relative. Setting one lands the clock on A right
+    /// away, which costs the one flush a seek costs; every wrap after that
+    /// is the gapless splice, so the section repeats without a hole.
+    SetAbLoop(Option<(f64, f64)>),
     /// Splice tracks into the queue right after entry `after` (its stable id),
     /// or at the end when `after` is None. `explicit` marks them as user-queued
     /// (Play Next, Add to Queue) rather than part of the playing context, so
@@ -160,6 +168,15 @@ pub enum LoopMode {
 struct Source {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn AudioDecoder>,
+    /// The file behind the reader, kept so a decoder that falls over names
+    /// the file it fell over on.
+    path: PathBuf,
+    /// Set when a read or a decode panicked. The reader and decoder are
+    /// unusable from that point: the panic unwound out of the middle of
+    /// their state, and calling back in could land on the same broken
+    /// arithmetic or on state it never finished updating. A poisoned source
+    /// reports end of stream and touches neither again.
+    poisoned: bool,
     track_id: u32,
     time_base: Option<TimeBase>,
     device_rate: u32,
@@ -230,6 +247,23 @@ struct OrderEntry {
     explicit: bool,
 }
 
+/// A section the source plays on repeat: both ends in the source's own
+/// device-rate frame clock, pinned to the pool index it was set on so a
+/// stale loop can never take hold of a different track.
+#[derive(Clone, Copy)]
+struct AbLoop {
+    track: usize,
+    a: u64,
+    b: u64,
+}
+
+/// The shortest section worth looping. Under this the wrap lands inside the
+/// packet it just decoded and the source spends the whole time seeking, so a
+/// set this tight is refused rather than played badly.
+/// Public so the player refuses the same set the engine would, and refuses
+/// it before the round trip rather than sending a command that dies quietly.
+pub const AB_MIN_SECS: f64 = 0.25;
+
 pub struct Engine {
     /// Append-only pool of file paths. Order entries index into it; nothing is
     /// ever removed so `Segment.track` indices stay valid.
@@ -270,6 +304,9 @@ pub struct Engine {
     /// An armed stop cut the gapless open at EOF; consumed once the ring
     /// drains, where the pause happens and the next track cues up.
     stop_pending: bool,
+    /// The section on repeat, or None when nothing loops. Session state:
+    /// a skip clears it, and it never outlives the engine.
+    ab: Option<AbLoop>,
     /// Frames pushed on the frames_consumed clock; resynced after each flush.
     pushed_playable: u64,
     /// Decoded, converted samples waiting for ring space.
@@ -406,6 +443,7 @@ impl Engine {
             loop_mode: LoopMode::default(),
             stop_after: false,
             stop_pending: false,
+            ab: None,
             pushed_playable: 0,
             pending: Vec::new(),
             pending_pos: 0,
@@ -513,6 +551,47 @@ impl Engine {
                     Cmd::SetShuffle(on) => reopen_runahead |= self.set_shuffle(on),
                     Cmd::OrderTail(ids) => reopen_runahead |= self.order_tail(&ids),
                     Cmd::SetStopAfter(on) => self.stop_after = on,
+                    Cmd::SetAbLoop(marks) => {
+                        // Setting one has to be audible now, and the ring
+                        // already holds up to half a second past B by the
+                        // time the press arrives. So the set pays for one
+                        // seek: `seek_to` reopens on the audible track,
+                        // flushes, and lands on A. After that flush every
+                        // wrap is a splice. Straight to `seek_to` rather
+                        // than through `FlushAction::Seek`, since the flush
+                        // arms are keyed on seconds this command doesn't
+                        // carry once the marks are stored.
+                        self.ab = None;
+                        match marks {
+                            Some((a, b)) if b - a >= AB_MIN_SECS => {
+                                source = self.seek_to(source.take(), a.max(0.0));
+                                // Where the seek actually landed, which is
+                                // A for anything with an index and a packet
+                                // early for a CBR MP3 without one. Read off
+                                // the source so the wrap goes back to the
+                                // frame the listener just heard.
+                                //
+                                // A seek that failed outright leaves the
+                                // decoder wherever it already was, which is
+                                // past B: no section is better than one
+                                // whose ends are the wrong way round.
+                                let rate = self.device_rate as f64;
+                                let b = (b * rate).round() as u64;
+                                let floor = (AB_MIN_SECS * rate) as u64;
+                                if let Some(src) = source.as_ref() {
+                                    if src.pos_frames + floor <= b {
+                                        self.ab = Some(AbLoop {
+                                            track: self.idx,
+                                            a: src.pos_frames,
+                                            b,
+                                        });
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        self.publish_ab();
+                    }
                     Cmd::Insert {
                         after,
                         paths,
@@ -586,6 +665,12 @@ impl Engine {
             if let Some(action) = flush_to {
                 match action {
                     FlushAction::Track { pos, back } => {
+                        // A loop belongs to the track it was marked on, so
+                        // any move through the queue ends it: Next, Prev,
+                        // Jump, a drop onto Play now. The natural advance
+                        // can't get here while looping, since the wrap
+                        // takes EOF before the boundary does.
+                        self.clear_ab();
                         source = self.skip_to(source.take(), pos, back);
                     }
                     FlushAction::Seek(secs) => {
@@ -664,7 +749,25 @@ impl Engine {
             match source.as_mut() {
                 Some(src) => {
                     let device_rate = self.device_rate;
-                    let more = src.next_chunk(device_rate, &mut self.pending);
+                    let mut more = src.next_chunk(device_rate, &mut self.pending);
+                    // The A-B wrap, before anything downstream sees the
+                    // chunk: the overshoot past B comes off and the reader
+                    // winds back to A, so the samples that go into the ring
+                    // run straight from B into A with nothing between them.
+                    // That's what makes it a loop rather than a seek every
+                    // few seconds. `!more` carries EOF in, for a B set on
+                    // the last second of the track.
+                    if let Some(ab) = self.ab.filter(|ab| ab.track == self.idx) {
+                        if let Some(landed) = src.wrap_ab(ab.a, ab.b, !more, &mut self.pending) {
+                            // The wrap is at the end of what survived the
+                            // cut, not the start of the chunk, so the
+                            // position readout flips back to A on the frame
+                            // the ear hears it.
+                            let at = (self.pending.len() / 2) as u64;
+                            self.register_segment_after(landed, at);
+                            more = true;
+                        }
+                    }
                     // A fade in flight mixes the outgoing track underneath
                     // before anything downstream sees the samples, so the
                     // chain shapes the mix and the ring gets one stream.
@@ -901,7 +1004,14 @@ impl Engine {
     fn window_open(&self, total: Option<u64>, remaining: Option<u64>) -> bool {
         // An armed stop-after ends the session at this boundary, so there's
         // nothing to fade into.
-        if self.fade_armed || self.fade.is_some() || self.stop_after {
+        // Same for an A-B loop on the playing track: it never reaches the
+        // boundary, so a section set in the last seconds would otherwise
+        // open a fade into the next track on every wrap.
+        if self.fade_armed
+            || self.fade.is_some()
+            || self.stop_after
+            || self.ab.is_some_and(|ab| ab.track == self.idx)
+        {
             return false;
         }
         let len = self.fade_window(total);
@@ -1035,6 +1145,17 @@ impl Engine {
         }
         if let Some(landed) = landed {
             self.register_segment(landed);
+            // Scrubbing out of the section is how you leave it: the seek
+            // said go somewhere the loop would never have taken you, so
+            // the loop is done. A seek that lands inside keeps it, which
+            // is how you replay the first half of a bar you're drilling.
+            let rate = self.device_rate as f64;
+            let outside = self.ab.is_some_and(|ab| {
+                ab.track != self.idx || landed < ab.a as f64 / rate || landed > ab.b as f64 / rate
+            });
+            if outside {
+                self.clear_ab();
+            }
         }
         source
     }
@@ -1571,14 +1692,49 @@ impl Engine {
     }
 
     fn register_segment(&self, track_secs: f64) {
+        self.register_segment_after(track_secs, 0);
+    }
+
+    /// [`register_segment`](Self::register_segment) with the spot reached
+    /// `after` frames later than the next sample pushed. Zero for a seek,
+    /// where the chunk that follows starts at the landing spot; the A-B
+    /// wrap uses it because the chunk in hand runs up to B before it goes
+    /// back to A, and claiming zero would flip the readout a chunk early.
+    fn register_segment_after(&self, track_secs: f64, after: u64) {
         let consumed = self.shared.frames_consumed.load(Ordering::Relaxed);
         let mut segments = self.shared.segments.lock().unwrap();
         segments.push(Segment {
-            at_frame: self.pushed_playable,
+            at_frame: self.pushed_playable + after,
             track: self.idx,
             track_frame: (track_secs * self.device_rate as f64).round() as u64,
         });
         prune_segments(&mut segments, consumed);
+    }
+
+    /// Drop the section, if there was one, and say so. Idempotent, so the
+    /// paths that clear defensively don't have to ask first.
+    fn clear_ab(&mut self) {
+        if self.ab.take().is_some() {
+            self.publish_ab();
+        }
+    }
+
+    /// Publish the loop for the player to read (ADR 16): frames back to
+    /// seconds, `u64::MAX` in A for off. Called from every place `ab`
+    /// changes, so the snapshot can't fall behind the engine's own copy.
+    fn publish_ab(&self) {
+        let rate = self.device_rate as f64;
+        match self.ab {
+            Some(ab) => {
+                self.shared
+                    .ab_b
+                    .store((ab.b as f64 / rate).to_bits(), Ordering::Relaxed);
+                self.shared
+                    .ab_a
+                    .store((ab.a as f64 / rate).to_bits(), Ordering::Release);
+            }
+            None => self.shared.ab_a.store(u64::MAX, Ordering::Release),
+        }
     }
 }
 
@@ -1727,6 +1883,51 @@ pub fn shuffle_head<T>(slice: &mut [T], width: usize) {
         hasher.write_usize(i);
         let j = (hasher.finish() % (i as u64 + 1)) as usize;
         slice.swap(i, j);
+    }
+}
+
+/// Run a call into symphonia or a codec crate so a panic inside it comes
+/// back as an error on the path the caller already has for a file it can't
+/// read.
+///
+/// Decoders parse whatever bytes a file holds, and a malformed one has
+/// already found an arithmetic overflow deep inside a third-party codec and
+/// taken the whole app down with it. The blast radius that belongs to
+/// someone else's bug in someone else's crate is the track, not the process.
+///
+/// `AssertUnwindSafe` is on the call site, and it holds because every one of
+/// them abandons the reader and decoder it panicked in: a half-finished
+/// decode can leave that state inconsistent, so nothing here decodes another
+/// packet through it. The functions that own a whole `Source` return an
+/// error and drop it; [`Source::decode_chunk`] sets `poisoned` and never
+/// touches the decoder again.
+pub(crate) fn guard_decode<T>(
+    what: &str,
+    path: &std::path::Path,
+    f: impl FnOnce() -> T,
+) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|payload| {
+        let msg = format!(
+            "{what} panicked on {}: {}",
+            path.display(),
+            panic_detail(&*payload)
+        );
+        log::error!("{msg}");
+        msg
+    })
+}
+
+/// The message out of a caught panic's payload, for the log line and the
+/// error the caller gets. Panics carry a `String` when the message was
+/// formatted and a `&'static str` when it wasn't; anything else is a payload
+/// from a `panic_any` we have no way to read.
+fn panic_detail(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else {
+        "no message".to_string()
     }
 }
 
@@ -1923,14 +2124,20 @@ impl Source {
             hint.with_extension(ext);
         }
 
-        let format = symphonia::default::get_probe()
-            .probe(
+        // The probe reads the container's headers, which is third-party
+        // parsing of file bytes like the decode below. A panic in there
+        // leaves nothing to be inconsistent: the reader it was building
+        // never got out of the call, and everything it borrowed is dropped
+        // on the way to the error.
+        let format = guard_decode("probe", path, || {
+            symphonia::default::get_probe().probe(
                 &hint,
                 mss,
                 FormatOptions::default(),
                 MetadataOptions::default(),
             )
-            .map_err(|e| format!("probe: {e}"))?;
+        })?
+        .map_err(|e| format!("probe: {e}"))?;
 
         let track = format
             .default_track(TrackType::Audio)
@@ -1967,9 +2174,14 @@ impl Source {
         let file_frames =
             stated_frames.or_else(|| file_secs.map(|s| (s * sample_rate as f64).round() as u64));
 
-        let decoder = symphonia::default::get_codecs()
-            .make_audio_decoder(params, &AudioDecoderOptions::default())
-            .map_err(|e| format!("decoder: {e}"))?;
+        // Building the decoder runs the codec's own setup over the header
+        // fields, so it panics on the same class of bad file the decode
+        // does. Nothing survives the failure either: the half-built decoder
+        // is dropped inside the call and the source is never constructed.
+        let decoder = guard_decode("decoder setup", path, || {
+            crate::codecs::registry().make_audio_decoder(params, &AudioDecoderOptions::default())
+        })?
+        .map_err(|e| format!("decoder: {e}"))?;
 
         // The span on the file's own frame clock, which is the only clock
         // its end can be honored on: everything downstream of the resampler
@@ -2030,6 +2242,8 @@ impl Source {
         let mut source = Source {
             format,
             decoder,
+            path: path.clone(),
+            poisoned: false,
             track_id,
             time_base,
             device_rate,
@@ -2110,8 +2324,27 @@ impl Source {
             self.resampler.flush(out);
             return false;
         }
+        // A source that already panicked is done. The flush happened on the
+        // way into the poison, so there is nothing left to hand out.
+        if self.poisoned {
+            return false;
+        }
         loop {
-            let packet = match self.format.next_packet() {
+            // The reader and the decoder are both third-party code over
+            // file bytes. A panic in either ends the track the way a fatal
+            // error does, and poisons the source so the loop never re-enters
+            // the state the unwind came out of. See [`guard_decode`] for why
+            // asserting unwind safety holds here.
+            let read = {
+                let (path, format) = (&self.path, &mut self.format);
+                guard_decode("packet read", path, || format.next_packet())
+            };
+            let Ok(read) = read else {
+                self.poisoned = true;
+                self.resampler.flush(out);
+                return false;
+            };
+            let packet = match read {
                 Ok(Some(p)) => p,
                 // End of stream: flush the resampler's carried final frame so
                 // the last source sample isn't dropped at the track boundary.
@@ -2129,19 +2362,36 @@ impl Source {
                 continue;
             }
 
-            let (frames, rate, ch) = match self.decoder.decode(&packet) {
-                Ok(decoded) => {
-                    let frames = decoded.frames();
-                    if frames == 0 {
-                        continue;
-                    }
-                    let spec = decoded.spec();
-                    let rate = spec.rate();
-                    let ch = spec.channels().count();
-                    self.scratch.resize(decoded.samples_interleaved(), 0.0);
-                    decoded.copy_to_slice_interleaved(&mut self.scratch);
-                    (frames, rate, ch)
-                }
+            // The copy out of the decoder's buffer happens inside the guard
+            // too: the borrow of the decoded audio lives as long as the
+            // decoder call it came from, and reading it is as much the
+            // codec's code as producing it was.
+            let decoded = {
+                let (path, decoder, scratch) = (&self.path, &mut self.decoder, &mut self.scratch);
+                guard_decode("decode", path, || {
+                    decoder.decode(&packet).map(|decoded| {
+                        let frames = decoded.frames();
+                        if frames == 0 {
+                            return None;
+                        }
+                        let spec = decoded.spec();
+                        let (rate, ch) = (spec.rate(), spec.channels().count());
+                        scratch.resize(decoded.samples_interleaved(), 0.0);
+                        decoded.copy_to_slice_interleaved(scratch);
+                        Some((frames, rate, ch))
+                    })
+                })
+            };
+            let Ok(decoded) = decoded else {
+                self.poisoned = true;
+                self.resampler.flush(out);
+                return false;
+            };
+            let (frames, rate, ch) = match decoded {
+                Ok(Some(got)) => got,
+                // A packet that decoded to nothing: nothing to hand on, so
+                // take the next one.
+                Ok(None) => continue,
                 // Corrupt or truncated packet: skip it, keep the track going.
                 Err(Error::DecodeError(e)) => {
                     log::warn!("decode error, skipping packet: {e}");
@@ -2235,6 +2485,28 @@ impl Source {
         }
     }
 
+    /// Past B, or at EOF with a section marked: trim the overshoot off the
+    /// chunk just decoded and wind the reader back to A. Returns where it
+    /// landed, track-relative seconds, when it wrapped; None when there was
+    /// nothing to do.
+    ///
+    /// The cut and the seek are one call so the wrap is testable without a
+    /// ring behind it. `out` holds only the chunk this pass decoded, which
+    /// the engine guarantees by clearing it before every refill, so the
+    /// truncate takes off exactly the frames that ran past B.
+    ///
+    /// A failed seek comes back as None and the caller carries on into
+    /// normal playback. That's the right failure: a loop that can't wrap
+    /// keeps playing the track rather than stalling on it.
+    fn wrap_ab(&mut self, a: u64, b: u64, eof: bool, out: &mut Vec<f32>) -> Option<f64> {
+        if self.pos_frames < b && !eof {
+            return None;
+        }
+        let over = self.pos_frames.saturating_sub(b) as usize * 2;
+        out.truncate(out.len().saturating_sub(over));
+        self.seek(a as f64 / self.device_rate as f64)
+    }
+
     /// Accurate seek. Returns the track position actually landed on, in
     /// seconds, which can differ from the request. None when the seek failed,
     /// so the caller doesn't register a segment that jumps the position
@@ -2294,16 +2566,39 @@ impl Source {
     /// only the caller knows which clock the seconds are on.
     fn seek_file(&mut self, secs: f64) -> Option<f64> {
         let time = Time::try_from_secs_f64(secs).unwrap_or(Time::ZERO);
-        match self.format.seek(
-            SeekMode::Accurate,
-            SeekTo::Time {
-                time,
-                track_id: Some(self.track_id),
-            },
-        ) {
+        // An accurate seek is a read and, on some containers, a decode up to
+        // the target, so it lands on the same third-party code a chunk does.
+        // A panic there poisons the source and reads as a seek that failed,
+        // which every caller already handles.
+        let seeked = {
+            let (path, format, track_id) = (&self.path, &mut self.format, self.track_id);
+            guard_decode("seek", path, || {
+                format.seek(
+                    SeekMode::Accurate,
+                    SeekTo::Time {
+                        time,
+                        track_id: Some(track_id),
+                    },
+                )
+            })
+        };
+        let Ok(seeked) = seeked else {
+            self.poisoned = true;
+            return None;
+        };
+        match seeked {
             Ok(seeked) => {
-                self.decoder.reset();
-                self.resampler = Resampler::new(self.resampler.src_rate(), self.device_rate);
+                let (path, decoder) = (&self.path, &mut self.decoder);
+                if guard_decode("decoder reset", path, || decoder.reset()).is_err() {
+                    self.poisoned = true;
+                    return None;
+                }
+                // Re-arm rather than rebuild: the rates either side of a
+                // seek are the same ones, and the sinc table costs a
+                // millisecond and a half to recompute. Clearing the filter
+                // history is the whole of what the jump needs, and an A-B
+                // wrap pays this on every pass around the section.
+                self.resampler.reset();
                 let landed = self
                     .time_base
                     .and_then(|tb| tb.calc_time(seeked.actual_ts))
@@ -2601,6 +2896,209 @@ mod tests {
             "entry 1 is audible in the mix and stays, the rest reorders"
         );
         assert_eq!(e.pos, 1);
+    }
+
+    /// The wrap itself, over a real decoder and no ring: a 0.5 s section of
+    /// a 2 s file, drained past where the file would have ended. Three
+    /// claims in one drive, because they're the same drive: the source
+    /// keeps going, the cut lands on B and not a packet past it, and what
+    /// plays after the wrap is what plays at A.
+    #[test]
+    fn an_ab_loop_wraps_on_b_and_comes_back_to_a() {
+        let fx = Fixtures::new("ab-wrap");
+        let path = fx.wav("t.wav", 2.0);
+        let rate = 48_000u32;
+        let a_secs = 0.5;
+        let a = (a_secs * rate as f64) as u64;
+        let b = rate as u64;
+
+        // What A sounds like, off a source that only seeks there. The
+        // fixture is a sine, so a window this size is a real comparison
+        // rather than two runs of silence matching.
+        let (mut probe, _) = Source::open(&path, rate, None).expect("the fixture opens");
+        probe.seek(a_secs).expect("the probe lands on A");
+        let mut want = Vec::new();
+        while want.len() < 128 {
+            assert!(
+                probe.next_chunk(rate, &mut want),
+                "half a second in, 2 s to go"
+            );
+        }
+        want.truncate(128);
+
+        let (mut src, _) = Source::open(&path, rate, None).expect("the fixture opens");
+        let mut out = Vec::new();
+        let mut played: Vec<f32> = Vec::new();
+        let mut wraps = 0;
+        let mut cut = None;
+        // Four seconds off a two second file. Without the loop the source
+        // is finished halfway through this.
+        while played.len() / 2 < 4 * rate as usize {
+            out.clear();
+            let more = src.next_chunk(rate, &mut out);
+            match src.wrap_ab(a, b, !more, &mut out) {
+                Some(landed) => {
+                    wraps += 1;
+                    cut.get_or_insert(played.len() / 2 + out.len() / 2);
+                    assert!(
+                        (landed - a_secs).abs() < 0.05,
+                        "the wrap lands on A, got {landed}"
+                    );
+                }
+                None => assert!(more, "a loop set means the source never runs out"),
+            }
+            played.extend_from_slice(&out);
+        }
+
+        assert!(
+            wraps >= 5,
+            "0.5 s sections across 4 s of output, got {wraps}"
+        );
+        assert_eq!(
+            cut,
+            Some(b as usize),
+            "the overshoot comes off, so the cut is on B rather than a packet past it"
+        );
+        let after: Vec<f32> = played[b as usize * 2..][..128].to_vec();
+        assert!(
+            after.iter().any(|s| s.abs() > 1e-4),
+            "the window after the wrap is music, not silence"
+        );
+        assert!(
+            after
+                .iter()
+                .zip(&want)
+                .all(|(got, want)| (got - want).abs() < 1e-5),
+            "what plays after the wrap is what plays at A"
+        );
+    }
+
+    /// B past the end of the track, which is where a container that
+    /// overstates its length puts it. `next_chunk` runs out first, and the
+    /// EOF flag is the whole reason the section still repeats instead of
+    /// the track quietly ending under it.
+    #[test]
+    fn an_ab_loop_wraps_at_eof_instead_of_ending_the_track() {
+        let fx = Fixtures::new("ab-eof");
+        let path = fx.wav("t.wav", 2.0);
+        let rate = 48_000u32;
+        let a = (1.5 * rate as f64) as u64;
+        let b = (2.1 * rate as f64) as u64;
+        let (mut src, _) = Source::open(&path, rate, None).expect("the fixture opens");
+
+        let mut out = Vec::new();
+        let landed = loop {
+            out.clear();
+            let more = src.next_chunk(rate, &mut out);
+            let wrapped = src.wrap_ab(a, b, !more, &mut out);
+            if !more {
+                break wrapped.expect("EOF with a section set wraps");
+            }
+            assert!(wrapped.is_none(), "nothing to wrap short of B");
+        };
+
+        assert!((landed - 1.5).abs() < 0.05, "back on A, got {landed}");
+        out.clear();
+        assert!(
+            src.next_chunk(rate, &mut out),
+            "and the decoder carries on from there"
+        );
+    }
+
+    /// The published snapshot is the only copy anyone outside the engine
+    /// reads (ADR 16), so it has to survive the round trip through frames
+    /// and back, and it has to go quiet the moment the section does.
+    #[test]
+    fn the_ab_snapshot_round_trips_and_clears() {
+        let mut e = test_engine(2);
+        assert_eq!(e.shared.ab(), None, "nothing loops on a fresh engine");
+
+        e.ab = Some(AbLoop {
+            track: 0,
+            a: 48_000,
+            b: 96_000,
+        });
+        e.publish_ab();
+        let (a, b) = e.shared.ab().expect("the section is published");
+        assert!(
+            (a - 1.0).abs() < 1e-9 && (b - 2.0).abs() < 1e-9,
+            "{a} to {b}"
+        );
+
+        e.clear_ab();
+        assert_eq!(e.shared.ab(), None, "and clearing it is heard downstream");
+    }
+
+    /// A section belongs to the track it was marked on, so scrubbing out of
+    /// it ends it. Scrubbing around inside it doesn't: replaying the first
+    /// half of a bar you're drilling is the point of the feature.
+    #[test]
+    fn a_seek_out_of_the_section_clears_it_and_one_inside_keeps_it() {
+        let fx = Fixtures::new("ab-seek");
+        let mut e = engine_over(vec![fx.wav("a.wav", 4.0)]);
+        let source = ready_to_skip(&mut e, 0);
+        e.ab = Some(AbLoop {
+            track: 0,
+            a: 48_000,
+            b: 144_000,
+        });
+        e.publish_ab();
+
+        let source = e.seek_to(source, 2.0);
+        assert!(source.is_some(), "the seek stays on the track");
+        assert!(
+            e.shared.ab().is_some(),
+            "a seek inside the section leaves it alone"
+        );
+
+        let _ = e.seek_to(source, 3.5);
+        assert_eq!(
+            e.shared.ab(),
+            None,
+            "and a seek past B is how you leave the section"
+        );
+    }
+
+    /// A skip is a move to different music, and the section doesn't come
+    /// with it. Covers Next, Prev, and Jump alike: they all reach the same
+    /// clear on the way through the flush.
+    #[test]
+    fn a_skip_clears_the_section() {
+        let mut e = test_engine(2);
+        e.ab = Some(AbLoop {
+            track: 0,
+            a: 0,
+            b: 48_000,
+        });
+        e.publish_ab();
+
+        e.clear_ab();
+
+        assert!(e.ab.is_none(), "the engine's own copy goes");
+        assert_eq!(e.shared.ab(), None, "and so does the published one");
+    }
+
+    /// A section set in the last seconds of a track would otherwise open
+    /// the boundary crossfade on every wrap, fading into a track the loop
+    /// is never going to reach.
+    #[test]
+    fn a_section_holds_the_boundary_fade_shut() {
+        let mut e = test_engine(2);
+        set_groups(&mut e, &[None, None]);
+        e.fade_secs = 4.0;
+        assert!(
+            e.window_open(Some(480_000), Some(48_000)),
+            "a second from the end of an ungrouped boundary, the window opens"
+        );
+        e.ab = Some(AbLoop {
+            track: e.idx,
+            a: 0,
+            b: 48_000,
+        });
+        assert!(
+            !e.window_open(Some(480_000), Some(48_000)),
+            "with a section on this track it stays shut"
+        );
     }
 
     /// A directory of fixture files that clears itself when the test ends.
@@ -3561,5 +4059,110 @@ mod tests {
             e.order.iter().any(|entry| entry.id == 1),
             "audible entry kept"
         );
+    }
+
+    /// A decoder that falls over the way the real one did: an arithmetic
+    /// overflow deep inside a third-party codec, on a file that reads fine
+    /// everywhere else. Both entry points a source calls into go down, since
+    /// a codec with state bad enough to panic on a packet has no reason to
+    /// survive being reset either.
+    struct PanickingDecoder;
+
+    impl AudioDecoder for PanickingDecoder {
+        fn reset(&mut self) {
+            panic!("attempt to shift left with overflow");
+        }
+
+        fn decode_ref(
+            &mut self,
+            _packet: &symphonia::core::packet::PacketRef<'_>,
+        ) -> symphonia::core::errors::Result<symphonia::core::audio::GenericAudioBufferRef<'_>>
+        {
+            panic!("attempt to shift left with overflow");
+        }
+
+        fn codec_info(&self) -> &symphonia::core::codecs::CodecInfo {
+            unimplemented!("a panicking decoder is never asked what it is")
+        }
+
+        fn codec_params(&self) -> &symphonia::core::codecs::audio::AudioCodecParameters {
+            unimplemented!("a panicking decoder is never asked what it is")
+        }
+
+        fn finalize(&mut self) -> symphonia::core::codecs::audio::FinalizeResult {
+            unimplemented!("nothing finishes a decode that panicked")
+        }
+
+        fn last_decoded(&self) -> symphonia::core::audio::GenericAudioBufferRef<'_> {
+            unimplemented!("nothing decoded")
+        }
+    }
+
+    /// The one this whole guard exists for: a panic inside the codec ends
+    /// the track and leaves the thread standing. Before the guard it
+    /// unwound out of the decode worker, and the panic printed below is the
+    /// caught one, not a failure.
+    #[test]
+    fn a_decoder_panic_ends_the_track_rather_than_the_thread() {
+        let fx = Fixtures::new("decoder-panic");
+        let path = fx.wav("tone.wav", 1.0);
+        let (mut src, _) = Source::open(&path, 48_000, None).expect("the fixture opens");
+        src.decoder = Box::new(PanickingDecoder);
+
+        let mut out = Vec::new();
+        assert!(
+            !src.next_chunk(48_000, &mut out),
+            "a panicked decode is the end of the stream"
+        );
+        assert!(out.is_empty(), "and it handed out no samples");
+        assert!(src.poisoned, "the source is poisoned against a second try");
+
+        // The second call is the other half of it: a poisoned source reports
+        // the end again without going back into the state the unwind came
+        // out of, which would panic a second time.
+        assert!(!src.next_chunk(48_000, &mut out));
+        assert!(out.is_empty());
+    }
+
+    /// A seek into a decoder that panics reads as a seek that failed, which
+    /// every caller already handles, and poisons the source with it.
+    #[test]
+    fn a_panic_on_seek_reads_as_a_seek_that_failed() {
+        let fx = Fixtures::new("seek-panic");
+        let path = fx.wav("tone.wav", 2.0);
+        let (mut src, _) = Source::open(&path, 48_000, None).expect("the fixture opens");
+        src.decoder = Box::new(PanickingDecoder);
+        // The wav reader seeks without decoding, so what goes down here is
+        // the decoder reset that follows the landing.
+        assert_eq!(src.seek_file(1.0), None, "no landing to report");
+        assert!(src.poisoned);
+    }
+
+    /// The guard itself: a panic comes back as an error naming the file and
+    /// carrying the panic's own message, and a call that doesn't panic is
+    /// untouched.
+    #[test]
+    fn the_decode_guard_turns_a_panic_into_an_error_on_the_file() {
+        let path = PathBuf::from("/music/broken.opus");
+        let err = guard_decode("decode", &path, || {
+            panic!("attempt to shift left with overflow")
+        })
+        .expect_err("a panic is an error");
+        assert!(
+            err.contains("/music/broken.opus"),
+            "the file is named: {err}"
+        );
+        assert!(err.contains("shift left with overflow"), "and why: {err}");
+        assert!(
+            err.starts_with("decode panicked"),
+            "and what was doing it: {err}"
+        );
+
+        // A `&'static str` payload reads the same way a formatted one does.
+        let err = guard_decode("probe", &path, || panic!("static message"))
+            .expect_err("a panic is an error");
+        assert!(err.contains("static message"), "{err}");
+
+        assert_eq!(guard_decode("decode", &path, || 7).ok(), Some(7));
     }
 }

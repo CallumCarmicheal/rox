@@ -6,7 +6,8 @@
 //! reads or drives the same player and library entities the panels do, so
 //! the socket can never say something the UI wouldn't.
 //!
-//! Method surface, version 1: `transport.*` for the deck, `queue.*` for
+//! Method surface, version 1: `transport.*` for the deck and its A-B
+//! section, `queue.*` for
 //! edits by stable entry id, `library.*` for search, now-playing tags,
 //! artwork, and kicking off a rescan, `tasks.*` for the long analysis
 //! passes the tasks window runs. `subscribe` turns on the push half: `event.*` frames for track
@@ -26,6 +27,7 @@ use rox_library::cue::TrackKey;
 use rox_library::projection::Projection;
 use rox_panel_api::panel::AppState;
 use rox_services::catalog::Library;
+use rox_services::player::AbState;
 
 /// How many search rows come back when the caller doesn't say, and the most
 /// it can ask for. Each row costs a path lookup on the UI-side connection,
@@ -72,6 +74,7 @@ struct Snapshot {
     muted: bool,
     queue_rev: Option<u64>,
     track: Option<TrackKey>,
+    ab: AbState,
 }
 
 impl Snapshot {
@@ -84,6 +87,7 @@ impl Snapshot {
             muted: player.muted(),
             queue_rev: player.queue_rev(),
             track: player.now_playing().map(|now| now.key),
+            ab: player.ab_state(),
         }
     }
 }
@@ -107,6 +111,7 @@ fn publish_events(state: &AppState, events: rox_ipc::Events, cx: &mut App) {
         }
         if (now.playing, now.active, now.muted) != (seen.playing, seen.active, seen.muted)
             || now.volume != seen.volume
+            || now.ab != seen.ab
         {
             events.emit("event.playback", status(&state, cx));
         }
@@ -185,6 +190,40 @@ fn route(state: &AppState, method: &str, params: &Value, cx: &mut App) -> Result
             state
                 .player
                 .update(cx, |player, cx| player.set_volume(volume as f32, cx));
+            Ok(status(state, cx))
+        }
+        // The A-B section the transport button runs. `mark` steps the same
+        // three-press cycle the button does (A, then B and loop, then
+        // clear), `clear` drops it wherever the cycle stands, and two
+        // positions set a section outright. Nothing playing is a refusal
+        // rather than a silent no-op, since a mark on silence has nothing
+        // to hold onto.
+        "transport.ab" => {
+            let a = params.get("a").and_then(Value::as_f64);
+            let b = params.get("b").and_then(Value::as_f64);
+            let action = params.get("action").and_then(Value::as_str);
+            match (action, a, b) {
+                (None, Some(a), Some(b)) | (Some("set"), Some(a), Some(b)) => {
+                    state
+                        .player
+                        .update(cx, |player, cx| player.ab_set(a, b, cx))
+                        .map_err(RpcError::app)?;
+                }
+                (Some("mark"), None, None) => {
+                    if state.player.read(cx).now_playing().is_none() {
+                        return Err(RpcError::app("nothing is playing"));
+                    }
+                    state.player.update(cx, |player, cx| player.ab_mark(cx));
+                }
+                (Some("clear"), None, None) => {
+                    state.player.update(cx, |player, cx| player.ab_clear(cx));
+                }
+                _ => {
+                    return Err(RpcError::invalid_params(
+                        "ab takes {\"action\": \"mark\"|\"clear\"} or {\"a\": secs, \"b\": secs}",
+                    ))
+                }
+            }
             Ok(status(state, cx))
         }
         "queue.list" => Ok(queue_list(state, cx)),
@@ -587,7 +626,8 @@ fn panel_tree(cx: &mut App) -> Result<Value, RpcError> {
     serde_json::to_value(dump).map_err(RpcError::app)
 }
 
-/// The deck at a glance: what's playing, where its clock is, and the
+/// The deck at a glance: what's playing, where its clock is, the A-B
+/// section if one is marked, and the
 /// queue revision an event consumer will later diff against. Every
 /// transport verb replies with this, so a caller sees what its command did
 /// without a second round trip.
@@ -606,8 +646,20 @@ fn status(state: &AppState, cx: &App) -> Value {
         "volume": player.volume(),
         "muted": player.muted(),
         "queue_rev": player.queue_rev(),
+        "ab": ab_json(player.ab_state()),
         "track": track,
     })
+}
+
+/// The A-B section as the wire shows it: null with nothing marked, `a`
+/// alone while the cycle waits for B, both ends once the section repeats.
+/// Seconds are track-relative, the same clock `position_secs` runs on.
+fn ab_json(ab: AbState) -> Value {
+    match ab {
+        AbState::Off => Value::Null,
+        AbState::ASet(a) => json!({ "a": a }),
+        AbState::Looping(a, b) => json!({ "a": a, "b": b }),
+    }
 }
 
 /// The playing track's full tags, or null while nothing plays.

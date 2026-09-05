@@ -493,10 +493,11 @@ impl From<&SeekConfig> for StripLook {
 /// dim, played side solid, the waveform's playhead on top. `look` holds
 /// the config's line and playhead knobs, the radius capped at a pill.
 /// `marker` draws the scrobble threshold as a thin full-height line under
-/// the playhead.
+/// the playhead, and `ab` the repeat section's ends and wash under that.
 fn paint_strip(
     progress: f32,
     marker: Option<f32>,
+    ab: Option<(f32, Option<f32>)>,
     look: StripLook,
     bounds: Bounds<Pixels>,
     window: &mut Window,
@@ -545,6 +546,7 @@ fn paint_strip(
             palette::alpha(palette::highlight(), 0x80),
         ));
     }
+    panel::paint_ab(ab, 1.0, bounds, window);
     // The playhead: the panel's full height, capped when the config says
     // so, or the line's when it hugs. Either way it centers on the line.
     let head_w = look.playhead_width.clamp(1.0, w);
@@ -623,7 +625,9 @@ impl Render for SeekStripPanel {
 
 impl SeekStripPanel {
     fn body(&mut self, cx: &mut Context<Self>) -> Div {
-        let now = self.state.player.read(cx).now_playing();
+        let player = self.state.player.read(cx);
+        let now = player.now_playing();
+        let ab = player.ab_state();
 
         // No frame polling: the raw observe in `new` re-renders the strip
         // on every pump tick while audio moves, which is the rate the clock
@@ -650,10 +654,12 @@ impl SeekStripPanel {
             .map(|d| (now.position_secs / d) as f32)
             .unwrap_or(0.0);
         // The marker only shows where a scrobble could actually happen: the
-        // toggle on and the scrobbler armed.
+        // toggle on and some destination armed.
         let marker = (self.config.scrobble_marker)
-            .then(|| self.state.scrobbler.read(cx).marker())
+            .then(|| self.state.scrobble_marker(cx))
             .flatten();
+        // The A-B section, or the lone A while the cycle waits for B.
+        let ab = panel::ab_fractions(ab, now.duration_secs);
         // The seek click is on the track alone so the clocks beside it
         // stay inert.
         // The seek preview shows once the duration resolves; before that a
@@ -685,7 +691,7 @@ impl SeekStripPanel {
                         move |bounds, _, _| scrub.set_bounds(bounds)
                     },
                     move |bounds, _, window, _| {
-                        paint_strip(progress, marker, look, bounds, window);
+                        paint_strip(progress, marker, ab, look, bounds, window);
                         panel::scrub_on_paint(&scrub, window, {
                             let player = player.clone();
                             move |fraction, cx| panel::seek_fraction(&player, fraction, cx)

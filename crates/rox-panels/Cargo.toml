@@ -36,6 +36,11 @@ rox-playback = { path = "../rox-playback" }
 rox-net = { path = "../rox-net" }
 # The PCM feed and the signal pool the audio views draw from.
 rox-viz = { path = "../rox-viz" }
+# The Milkdrop panel's engine: libprojectM on its own thread with its own GL
+# context, handing back an rgba8 frame the panel uploads (ADR 28). The heavy
+# half is the static C++ library it links, which is why it sits behind one
+# panel rather than in the panel layer generally.
+rox-milkdrop = { path = "../rox-milkdrop" }
 # The metadata panel's Romanize button reads sort names out of Japanese,
 # Korean and Chinese titles the same way the library pass does. A leaf
 # crate, and the heavy half is a download rather than a link: the engine

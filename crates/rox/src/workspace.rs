@@ -70,6 +70,7 @@ use rox_panels::history::HistoryPanel;
 use rox_panels::library::{LibraryConfig, LibraryPanel};
 use rox_panels::lyrics::LyricsPanel;
 use rox_panels::metadata::MetadataPanel;
+use rox_panels::milkdrop::MilkdropPanel;
 use rox_panels::oscilloscope::OscilloscopePanel;
 use rox_panels::output::OutputPanel;
 use rox_panels::particles::ParticlesPanel;
@@ -91,7 +92,9 @@ use rox_services::catalog::Library;
 use rox_services::discord_presence::DiscordPresence;
 use rox_services::history::{History, HistoryEvent};
 use rox_services::lastfm::Scrobbler;
-use rox_services::player::Player;
+use rox_services::librefm::LibreFm;
+use rox_services::listenbrainz::ListenBrainz;
+use rox_services::player::{AbState, Player};
 use rox_services::portraits::Portraits;
 use rox_services::selection::{Selection, SelectionEvent};
 use rox_services::thumbs::Thumbs;
@@ -412,18 +415,41 @@ pub(crate) fn refresh_backdrop(cx: &mut App) {
 /// service can't tell a workspace from a settings window.
 pub(crate) fn install_backdrop_shade() {
     rox_services::backdrop::set_shade(|window, cx| {
-        let config = settings::backdrop_shader().filter(|config| config.enabled)?;
-        if !config.all_windows && !workspace_window(window, cx) {
+        // The Milkdrop visual goes first, straight over the art wash, so a
+        // backdrop shader painted after it reads the composite the way it
+        // reads the bare wash today.
+        let visual = crate::backdrop_visual::layer(window, backdrop_allowed(window, cx));
+        let shader = settings::backdrop_shader()
+            .filter(|config| config.enabled)
+            .filter(|config| config.all_windows || workspace_window(window, cx))
+            .and_then(|_| backdrop_shader_layer());
+        if visual.is_none() && shader.is_none() {
             return None;
         }
-        backdrop_shader_layer()
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .children(visual)
+                .children(shader)
+                .into_any_element(),
+        )
     });
     // The layer's gate goes on in the same install: whether a child window
     // paints the cover backdrop at all is the Transparency section's All
     // Windows switch, and the workspaces always do.
-    rox_services::backdrop::set_gate(|window, cx| {
-        rox_design::palette::backdrop_all_windows() || workspace_window(window, cx)
-    });
+    rox_services::backdrop::set_gate(backdrop_allowed);
+}
+
+/// Whether a window paints the backdrop at all: the Transparency section's
+/// All Windows switch, with the workspaces always in.
+///
+/// The service takes this as its gate, and the Milkdrop visual reads it
+/// directly. The service keeps the hook in a static with no way back out,
+/// and duplicating the rule as a second predicate is how the two would
+/// drift apart.
+fn backdrop_allowed(window: &Window, cx: &App) -> bool {
+    rox_design::palette::backdrop_all_windows() || workspace_window(window, cx)
 }
 
 /// Whether this window is one of the open workspaces, which always get
@@ -1165,6 +1191,7 @@ actions!(
         NextTrack,
         PreviousTrack,
         StopPlayback,
+        AbRepeat,
         PlayRandom,
         ToggleMute,
         ToggleShuffle,
@@ -1325,6 +1352,13 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &StopPlayback, cx| {
         with_front_workspace(cx, |ws, _, cx| {
             ws.state.player.update(cx, |player, cx| player.stop(cx));
+        });
+    });
+    // One chord for the whole A-B cycle: mark, mark, clear. The player
+    // holds where the cycle is, so the chord doesn't need to know.
+    cx.on_action(|_: &AbRepeat, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            ws.state.player.update(cx, |player, cx| player.ab_mark(cx));
         });
     });
     // The plain draw, the transport panel's dice button without its per-panel
@@ -1609,6 +1643,7 @@ fn register_panels(state: &AppState, workspace: WeakEntity<Workspace>, cx: &mut 
     // gates the panel menus, not a layout that already holds one.
     configured!("particles", ParticlesPanel);
     configured!("shader", ShaderPanel);
+    configured!("milkdrop", MilkdropPanel);
     configured!("drag anchor", DragAnchorPanel);
     configured!("spacer", SpacerPanel);
     configured!("theme toggle", ThemeTogglePanel);
@@ -1633,6 +1668,57 @@ fn register_panels(state: &AppState, workspace: WeakEntity<Workspace>, cx: &mut 
     });
 }
 
+/// How long the sleep timer runs, as the menu offers it. Fixed picks
+/// rather than a number entry: the menu system has no field to type into,
+/// and a persisted default belongs in the settings window, which is a
+/// different feature from "stop after this one, I'm going to bed".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SleepPick {
+    Off,
+    Min15,
+    Min30,
+    Min60,
+    Min90,
+}
+
+impl SleepPick {
+    /// The duration to arm, None for the row that cancels.
+    fn minutes(self) -> Option<u64> {
+        match self {
+            SleepPick::Off => None,
+            SleepPick::Min15 => Some(15),
+            SleepPick::Min30 => Some(30),
+            SleepPick::Min60 => Some(60),
+            SleepPick::Min90 => Some(90),
+        }
+    }
+
+    /// The pick's half of a `sleep:` command id, and back. Only the native
+    /// bar encodes, so this exists for the same reason `panel:` does, and
+    /// carries the same cfg: off macOS nothing but the test calls it.
+    #[cfg(any(target_os = "macos", test))]
+    fn id(self) -> &'static str {
+        match self {
+            SleepPick::Off => "off",
+            SleepPick::Min15 => "15",
+            SleepPick::Min30 => "30",
+            SleepPick::Min60 => "60",
+            SleepPick::Min90 => "90",
+        }
+    }
+
+    fn from_id(id: &str) -> Option<SleepPick> {
+        Some(match id {
+            "off" => SleepPick::Off,
+            "15" => SleepPick::Min15,
+            "30" => SleepPick::Min30,
+            "60" => SleepPick::Min60,
+            "90" => SleepPick::Min90,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum MenuAction {
     NewWindow,
@@ -1641,6 +1727,13 @@ pub(crate) enum MenuAction {
     /// Space shortcut matches the global [`TogglePlayback`] binding.
     TogglePlayback,
     Stop,
+    /// Step the A-B cycle: mark A, mark B, clear. The row's label says
+    /// which of the three a pick would do.
+    AbRepeat,
+    /// Set or cancel the sleep timer. Five rows, one action: the timer
+    /// arms the stop-after that already exists, so the track playing when
+    /// it fires plays out and the next one cues paused.
+    Sleep(SleepPick),
     Next,
     Previous,
     OpenSettings,
@@ -1743,6 +1836,8 @@ impl MenuAction {
             MenuAction::NewWindow => "new-window".into(),
             MenuAction::EmptyWindow => "empty-window".into(),
             MenuAction::Stop => "stop".into(),
+            MenuAction::AbRepeat => "ab-repeat".into(),
+            MenuAction::Sleep(pick) => format!("sleep:{}", pick.id()),
             MenuAction::Next => "next".into(),
             MenuAction::Previous => "previous".into(),
             MenuAction::OpenHealth => "health".into(),
@@ -1784,6 +1879,9 @@ impl MenuAction {
     /// the catalog, so a row for a panel that has since been gated off
     /// (experimental) decodes to None and the pick does nothing.
     fn from_command_id(id: &str) -> Option<MenuAction> {
+        if let Some(pick) = id.strip_prefix("sleep:") {
+            return SleepPick::from_id(pick).map(MenuAction::Sleep);
+        }
         if let Some(name) = id.strip_prefix("panel:") {
             return catalog::sections()
                 .flat_map(|section| section.panels.iter())
@@ -1794,6 +1892,7 @@ impl MenuAction {
             "new-window" => MenuAction::NewWindow,
             "empty-window" => MenuAction::EmptyWindow,
             "stop" => MenuAction::Stop,
+            "ab-repeat" => MenuAction::AbRepeat,
             "next" => MenuAction::Next,
             "previous" => MenuAction::Previous,
             "health" => MenuAction::OpenHealth,
@@ -2173,6 +2272,46 @@ pub(crate) const MENUS: &[Menu] = &[
                 icon: icons::STOP,
                 action: MenuAction::Stop,
             }),
+            // The label follows the cycle, so the row says what the pick
+            // would do rather than naming the feature and leaving you to
+            // work out which press you're on.
+            MenuEntry::Item(MenuItem {
+                label: "playback-item-ab-repeat",
+                icon: icons::MOVE_HORIZONTAL,
+                action: MenuAction::AbRepeat,
+            }),
+            // Fixed durations and a cancel row. The timer arms the stop
+            // above rather than ending playback on the minute: a track cut
+            // off mid-phrase is the one thing nobody falling asleep wants.
+            MenuEntry::Section("menu-section-sleep"),
+            MenuEntry::Item(MenuItem {
+                label: "playback-sleep-15",
+                icon: icons::MOON,
+                action: MenuAction::Sleep(SleepPick::Min15),
+            }),
+            MenuEntry::Item(MenuItem {
+                label: "playback-sleep-30",
+                icon: icons::MOON,
+                action: MenuAction::Sleep(SleepPick::Min30),
+            }),
+            MenuEntry::Item(MenuItem {
+                label: "playback-sleep-60",
+                icon: icons::MOON,
+                action: MenuAction::Sleep(SleepPick::Min60),
+            }),
+            MenuEntry::Item(MenuItem {
+                label: "playback-sleep-90",
+                icon: icons::MOON,
+                action: MenuAction::Sleep(SleepPick::Min90),
+            }),
+            // The one row that reads the timer back: with one running it
+            // says how long is left, which is where the countdown lives
+            // until something asks for it on the transport.
+            MenuEntry::Item(MenuItem {
+                label: "playback-sleep-off",
+                icon: icons::CLOCK,
+                action: MenuAction::Sleep(SleepPick::Off),
+            }),
             MenuEntry::Section("menu-section-track"),
             MenuEntry::Item(MenuItem {
                 label: "playback-item-next",
@@ -2339,14 +2478,50 @@ pub(crate) fn section_shows(section: &'static PanelSection) -> bool {
 /// The label and icon a dropdown row shows, read live. Most rows are static,
 /// but the Play/Pause toggle flips both to match the player: "Pause" while
 /// playing, "Play" while stopped or paused.
-pub(crate) fn menu_item_display(item: MenuItem, is_playing: bool) -> (&'static str, &'static str) {
+pub(crate) fn menu_item_display(
+    item: MenuItem,
+    is_playing: bool,
+    ab: AbState,
+    sleep_remaining_secs: Option<u64>,
+) -> (SharedString, &'static str) {
     match item.action {
         MenuAction::TogglePlayback if is_playing => {
-            (rox_i18n::t_static("menu-pause"), icons::PAUSE)
+            (rox_i18n::t_static("menu-pause").into(), icons::PAUSE)
         }
+        // Three presses, three labels: the row names the next step of the
+        // cycle, the same way Play flips to Pause.
+        MenuAction::AbRepeat => {
+            let label = match ab {
+                AbState::Off => "playback-ab-set-a",
+                AbState::ASet(_) => "playback-ab-set-b",
+                AbState::Looping(..) => "playback-ab-clear",
+            };
+            (rox_i18n::t_static(label).into(), item.icon)
+        }
+        // The cancel row carries the readout. Rounded up and floored at a
+        // minute, so the last stretch says "1 min left" rather than
+        // counting down to a zero that reads as "no timer".
+        MenuAction::Sleep(SleepPick::Off) => (sleep_off_label(sleep_remaining_secs), item.icon),
         // `item.label` is an i18n key, not display text. See `menu_section`.
-        _ => (rox_i18n::t_static(item.label), item.icon),
+        _ => (rox_i18n::t_static(item.label).into(), item.icon),
     }
+}
+
+/// The cancel row's text: the plain "no timer" line, or the countdown
+/// once one runs. Shared with the status bar's sleep dropdown so the two
+/// never read a different minute.
+pub(crate) fn sleep_off_label(sleep_remaining_secs: Option<u64>) -> SharedString {
+    match sleep_minutes_left(sleep_remaining_secs) {
+        Some(minutes) => rox_i18n::t!("playback-sleep-off-remaining", minutes = minutes),
+        None => rox_i18n::t_static("playback-sleep-off").into(),
+    }
+}
+
+/// Whole minutes the timer has left, rounded up and floored at one, so the
+/// last stretch says "1 min left" rather than counting down to a zero that
+/// reads as "no timer".
+pub(crate) fn sleep_minutes_left(sleep_remaining_secs: Option<u64>) -> Option<u64> {
+    sleep_remaining_secs.map(|secs| secs.div_ceil(60).max(1))
 }
 
 /// Whether a dropdown row trails the signal glyph: a catalog row for a
@@ -2369,6 +2544,7 @@ fn keymap_command(action: MenuAction) -> Option<&'static str> {
     Some(match action {
         MenuAction::TogglePlayback => "toggle_playback",
         MenuAction::Stop => "stop_playback",
+        MenuAction::AbRepeat => "ab_repeat",
         MenuAction::Next => "next_track",
         MenuAction::Previous => "previous_track",
         MenuAction::NewWindow => "new_window",
@@ -2478,11 +2654,32 @@ pub struct Workspace {
     /// The painted bounds of the open dropdown ([0]) and the panel picker's
     /// flyout ([1]), captured each frame they draw. The next frame's flyouts
     /// read them to pick a side, the same measure-then-decide the
-    /// gpui-component menus run on.
-    menu_surfaces: [Option<Bounds<Pixels>>; 2],
+    /// gpui-component menus run on. A collapsed bar puts its root surface
+    /// at [0] and shifts the two along by one.
+    menu_surfaces: [Option<Bounds<Pixels>>; 3],
+    /// The menus are folded behind one button because the bar ran out of
+    /// room for them. Decided from the last paint, see
+    /// [`Self::note_menubar_fit`]; the bar draws the row it measured so a
+    /// resize settles in a frame.
+    menubar_collapsed: bool,
+    /// The width the unfolded row wanted at its last paint: the menus, the
+    /// status side squeezed to its floor, and the chrome around them. A
+    /// collapsed bar unfolds once the window has that much again.
+    menubar_need_w: Pixels,
+    /// The painted bounds of the bar itself, set before its status side
+    /// paints so the fit check has both halves in one frame.
+    menubar_bounds: Option<Bounds<Pixels>>,
+    /// The collapsed bar's root surface is open: the list of top menus,
+    /// with [`Self::open_menu`] saying which of them is flown out. Always
+    /// false while the bar is unfolded.
+    menu_root: bool,
     /// The window width at the last menu paint, the other half of the
     /// side decision.
     menu_viewport_w: Pixels,
+    /// The popup off the menubar's status side, the sleep dropdown or the
+    /// right-click button toggles, pinned where the press landed, with the
+    /// dismiss subscription that clears it.
+    status_menu: Option<(Point<Pixels>, Entity<PopupMenu>, Subscription)>,
     /// A mouse button is held down somewhere in the window. Alt+drag is
     /// the compositor's window move/resize, so an alt-revealed menubar
     /// stays hidden while a button is down: the overlay must never be in
@@ -2751,11 +2948,15 @@ impl Workspace {
             crate::tempo_job::follow(&library, cx);
             let scrobbler = cx.new(|cx| Scrobbler::new(&player, &library, cx));
             let discord = cx.new(|cx| DiscordPresence::new(&player, &library, cx));
+            let listenbrainz = cx.new(|cx| ListenBrainz::new(&scrobbler, cx));
+            let librefm = cx.new(|cx| LibreFm::new(&scrobbler, cx));
             AppState {
                 thumbs: cx.new(|cx| Thumbs::new(&library, cx)),
                 portraits: cx.new(|_| Portraits::default()),
                 history: cx.new(|cx| History::new(&scrobbler, cx)),
                 scrobbler,
+                listenbrainz,
+                librefm,
                 discord,
                 library,
                 now_art: cx.new(|cx| NowPlayingArt::new(player.clone(), cx)),
@@ -2973,6 +3174,15 @@ impl Workspace {
             // rebuild can't reach back through this workspace mid-update.
             let playing = this.state.player.read(cx).is_playing();
             native_menu::sync_playback(playing, cx);
+            // The Milkdrop backdrop parks itself at the bottom of its fade,
+            // and nothing repaints a layer that stopped asking for frames.
+            // A play or a stop is what has to wake every window drawing it;
+            // the ticks in between are not.
+            if crate::backdrop_visual::enabled()
+                && crate::backdrop_visual::note_playing(this.state.player.entity_id(), playing)
+            {
+                crate::backdrop_visual::wake(cx);
+            }
         });
         let _history_changed = cx.subscribe(&state.history, |this, _, event: &HistoryEvent, cx| {
             let HistoryEvent::Recorded { track_id } = *event;
@@ -3058,8 +3268,13 @@ impl Workspace {
             menu_group_slot: None,
             open_submenu: None,
             open_subgroup: None,
-            menu_surfaces: [None; 2],
+            menu_surfaces: [None; 3],
+            menubar_collapsed: false,
+            menubar_need_w: Pixels::ZERO,
+            menubar_bounds: None,
+            menu_root: false,
             menu_viewport_w: Pixels::ZERO,
+            status_menu: None,
             pointer_down: false,
             alt_tap: menubar::AltTap::default(),
             menubar_pinned: false,
@@ -5446,6 +5661,7 @@ impl Render for Workspace {
         let menubar_revealed = self.menubar_pinned
             || self.menubar_keys
             || self.open_menu.is_some()
+            || self.menu_root
             || (window.modifiers().alt && !self.pointer_down);
         // Every panel in this window renders under its player's art tint,
         // and the window claims the one widget theme while it holds focus.
@@ -5828,6 +6044,32 @@ mod tests {
                 "{id} decodes to a different row"
             );
         }
+    }
+
+    /// The five sleep rows are the only Playback rows that encode a
+    /// payload into their command id, so the native bar's round trip is
+    /// where a mistyped prefix would show up: a pick that decoded to the
+    /// wrong duration would quietly stop playback at the wrong minute.
+    #[test]
+    fn every_sleep_pick_round_trips_through_its_command_id() {
+        use super::{MenuAction, SleepPick};
+        for pick in [
+            SleepPick::Off,
+            SleepPick::Min15,
+            SleepPick::Min30,
+            SleepPick::Min60,
+            SleepPick::Min90,
+        ] {
+            let id = MenuAction::Sleep(pick)
+                .command_id()
+                .expect("a sleep row encodes");
+            let back = MenuAction::from_command_id(&id).expect("and decodes");
+            let MenuAction::Sleep(back) = back else {
+                panic!("{id} decodes to a different kind of row");
+            };
+            assert_eq!(back, pick, "{id} decodes to a different duration");
+        }
+        assert!(MenuAction::from_command_id("sleep:45").is_none());
     }
 
     #[test]

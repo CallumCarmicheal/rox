@@ -11,12 +11,12 @@ use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
 use gpui::{
-    anchored, deferred, div, linear_color_stop, linear_gradient, prelude::*, px, relative, size,
-    AbsoluteLength, AnyElement, App, Bounds, ClipboardItem, Context, DismissEvent, Div, Element,
-    Entity, FocusHandle, Focusable as _, GlobalElementId, HighlightStyle, InspectorElementId,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Rgba, SharedString, Size,
-    Stateful, StyledText, Subscription, TitlebarOptions, WeakEntity, Window, WindowBounds,
-    WindowHandle, WindowOptions,
+    anchored, deferred, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px,
+    relative, size, AbsoluteLength, AnyElement, App, Bounds, ClipboardItem, Context, DismissEvent,
+    Div, Element, Entity, FocusHandle, Focusable as _, GlobalElementId, HighlightStyle,
+    InspectorElementId, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Rgba,
+    SharedString, Size, Stateful, StyledText, Subscription, TitlebarOptions, WeakEntity, Window,
+    WindowBounds, WindowHandle, WindowOptions,
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::{Icon, Root};
@@ -34,7 +34,9 @@ use rox_services::catalog::Library;
 use rox_services::discord_presence::DiscordPresence;
 use rox_services::history::History;
 use rox_services::lastfm::Scrobbler;
-use rox_services::player::{fmt_time, FadeView, Player};
+use rox_services::librefm::LibreFm;
+use rox_services::listenbrainz::ListenBrainz;
+use rox_services::player::{fmt_time, AbState, FadeView, Player};
 use rox_services::portraits::Portraits;
 use rox_services::selection::Selection;
 use rox_services::thumbs::Thumbs;
@@ -85,6 +87,11 @@ pub struct AppState {
     /// The Last.fm scrobbler over this workspace's player; also where the
     /// live scrobble config is stored, for the panels' threshold markers.
     pub scrobbler: Entity<Scrobbler>,
+    /// The ListenBrainz publisher riding the scrobbler's signals; also
+    /// where its live config is stored, for the settings page.
+    pub listenbrainz: Entity<ListenBrainz>,
+    /// The Libre.fm publisher, riding the same signals the same way.
+    pub librefm: Entity<LibreFm>,
     /// The listen recorder driven by the scrobbler's listen signal; history
     /// views subscribe to it for the refresh when an event arrives.
     pub history: Entity<History>,
@@ -94,6 +101,23 @@ pub struct AppState {
     /// sources any panel's parameters can be bound to. Panels tick it from their
     /// paint and read values; edits persist through settings.
     pub signals: Arc<rox_viz::signal::SignalHub>,
+}
+
+impl AppState {
+    /// Where the scrobble threshold line goes, 0 to 1, or None while no
+    /// destination would send on it, so the panels never draw a line that
+    /// lies. The line itself is the scrobbler's, since it owns the clock;
+    /// whether it shows depends on the switch and all three accounts,
+    /// which is why the question is asked here rather than of any one of
+    /// them.
+    pub fn scrobble_marker(&self, cx: &gpui::App) -> Option<f32> {
+        let scrobbler = self.scrobbler.read(cx);
+        let armed = scrobbler.scrobbling()
+            && (scrobbler.connected()
+                || self.listenbrainz.read(cx).connected()
+                || self.librefm.read(cx).connected());
+        armed.then(|| scrobbler.marker()).flatten()
+    }
 }
 
 /// Every tab panel that has hosted one of our panels, reported from each
@@ -199,6 +223,81 @@ pub fn icon_control_fading<V: 'static>(
 /// How far either side of the fade's position the sweep's edge blurs, as a
 /// fraction of the button.
 const EDGE: f32 = 0.2;
+
+/// The A-B section as a strip draws it: A's fraction of the track, and
+/// B's once it's marked. `None` when nothing is marked or the duration
+/// hasn't resolved, since a fraction of an unknown length points nowhere.
+pub fn ab_fractions(ab: AbState, duration_secs: Option<f64>) -> Option<(f32, Option<f32>)> {
+    let duration = duration_secs.filter(|d| *d > 0.0)?;
+    let frac = |secs: f64| (secs / duration) as f32;
+    match ab {
+        AbState::Off => None,
+        AbState::ASet(a) => Some((frac(a), None)),
+        AbState::Looping(a, b) => Some((frac(a), Some(frac(b)))),
+    }
+}
+
+/// Paint the A-B section over a strip, the seek strip's and the waveform's
+/// shared look: a full-height line at each end and a wash between them,
+/// all in the accent so it reads as part of the played side rather than a
+/// second marker. With only A down the line stands alone, which is the
+/// waiting state the button's dot also shows. `weight` scales every alpha,
+/// for a strip fading its shape in or out.
+pub fn paint_ab(
+    ab: Option<(f32, Option<f32>)>,
+    weight: f32,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+) {
+    let Some((a, b)) = ab else {
+        return;
+    };
+    let w = f32::from(bounds.size.width);
+    let h = f32::from(bounds.size.height);
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let level = |max: u8| (max as f32 * weight.clamp(0.0, 1.0)) as u8;
+    let a_x = a.clamp(0.0, 1.0) * w;
+    if let Some(b) = b {
+        let b_x = b.clamp(0.0, 1.0) * w;
+        let wash = level(AB_WASH);
+        if wash > 0 && b_x > a_x {
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(bounds.origin.x + px(a_x), bounds.origin.y),
+                    size(px(b_x - a_x), px(h)),
+                ),
+                palette::alpha(palette::accent(), wash),
+            ));
+        }
+    }
+    let line = level(AB_LINE);
+    if line == 0 {
+        return;
+    }
+    for x in [Some(a_x), b.map(|b| b.clamp(0.0, 1.0) * w)]
+        .into_iter()
+        .flatten()
+    {
+        window.paint_quad(fill(
+            Bounds::new(
+                point(bounds.origin.x + px(x - AB_LINE_W / 2.0), bounds.origin.y),
+                size(px(AB_LINE_W), px(h)),
+            ),
+            palette::alpha(palette::accent(), line),
+        ));
+    }
+}
+
+/// The section wash's alpha at full weight, light enough that the played
+/// side's own fill still reads through it.
+const AB_WASH: u8 = 0x30;
+/// The end lines' alpha at full weight.
+const AB_LINE: u8 = 0xcc;
+/// The end lines' width, a touch under the playhead so the head still
+/// stands out when it crosses one.
+const AB_LINE_W: f32 = 1.5;
 
 /// Map a strip fraction to an absolute seek on the playing track, the
 /// seek strip's and the waveform's shared apply.

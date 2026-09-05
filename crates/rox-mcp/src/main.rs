@@ -163,6 +163,24 @@ fn base_tools() -> Value {
             },
         },
         {
+            "name": "ab_repeat",
+            "description": "Repeat a section of the playing track. Actions: mark steps \
+                            the three-press cycle (mark A at the current position, then \
+                            B and start repeating, then clear); clear drops the section; \
+                            set takes a and b in track seconds, at least a quarter second \
+                            apart. Answers with the player state, whose ab field holds the \
+                            section.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["mark", "clear", "set"] },
+                    "a": { "type": "number", "minimum": 0 },
+                    "b": { "type": "number", "minimum": 0 },
+                },
+                "required": ["action"],
+            },
+        },
+        {
             "name": "search_library",
             "description": "Search the music library. Free terms match title, artist, \
                             album, and genre; pins like artist:name, album:name, \
@@ -402,6 +420,18 @@ fn call(rox: &mut Option<Client>, socket: &std::path::Path, params: &Value, dev:
                     "transport takes an action: toggle, play, pause, next, prev, or stop",
                 )
             }
+        },
+        "ab_repeat" => match args.get("action").and_then(Value::as_str) {
+            Some("mark") => ("transport.ab", json!({ "action": "mark" })),
+            Some("clear") => ("transport.ab", json!({ "action": "clear" })),
+            Some("set") => match (
+                args.get("a").and_then(Value::as_f64),
+                args.get("b").and_then(Value::as_f64),
+            ) {
+                (Some(a), Some(b)) => ("transport.ab", json!({ "a": a, "b": b })),
+                _ => return refusal("ab_repeat set takes a and b in track seconds"),
+            },
+            _ => return refusal("ab_repeat takes an action: mark, clear, or set"),
         },
         "search_library" => {
             let Some(query) = args.get("query").and_then(Value::as_str) else {

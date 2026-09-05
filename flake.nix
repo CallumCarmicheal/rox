@@ -18,13 +18,15 @@
       forEachSystem = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
       # gpui dlopens these at runtime on Linux (blade renders via Vulkan,
-      # windowing via Wayland or X11). They have to be on the library path
-      # because nothing links them at build time.
+      # windowing via Wayland or X11), and so does glutin for the Milkdrop
+      # worker's GL context (libglvnd carries both EGL and GL). They have to
+      # be on the library path because nothing links them at build time.
       runtimeLibs =
         pkgs: with pkgs; [
           vulkan-loader
           wayland
           libxkbcommon
+          libglvnd
         ];
 
       # Native libraries the Linux build links against.
@@ -37,6 +39,8 @@
           libx11
           # rendering
           vulkan-loader
+          # OpenGL for the Milkdrop worker's context, EGL and GL both
+          libglvnd
           # text
           fontconfig
           freetype
@@ -75,6 +79,22 @@
           installPhase = "cp -r . $out";
         };
 
+      # libprojectM, which crates/rox-milkdrop-sys builds with cmake. Same
+      # deal as the crates above: no network in the sandbox, so the source
+      # the shellHook's scripts/vendor-projectm.sh downloads arrives as a
+      # fetch here instead. The commit is duplicated from that script, bump
+      # both together. fetchSubmodules pulls vendor/projectm-eval, which the
+      # build needs since ENABLE_SYSTEM_PROJECTM_EVAL is off.
+      projectmSrc =
+        pkgs:
+        pkgs.fetchFromGitHub {
+          owner = "projectM-visualizer";
+          repo = "projectm";
+          rev = "88f23c76743a38c6d8456a8c354c62186270f661";
+          fetchSubmodules = true;
+          hash = "sha256-vWVT5SF6SueykBX0NM5LLJGwWzxXsXzis2uMorBmN9w=";
+        };
+
       # Linux only: on macOS gpui's build script compiles Metal shaders with
       # Apple's toolchain, which nix can't ship. Use the dev shell there.
       mkRox =
@@ -86,6 +106,7 @@
           gpuiComponent =
             vendoredCrate pkgs "gpui-component" "0.5.1"
               "d021d46b4088d3d93a57ccdf443da85695a77272108caca2f6fe5369f584966a";
+          projectm = projectmSrc pkgs;
         in
         lib.makeOverridable (
           # Service identities build.rs bakes in (see .env.template). Already
@@ -129,9 +150,15 @@
               mkdir -p vendor
               cp -r ${gpui} vendor/gpui
               cp -r ${gpuiComponent} vendor/gpui-component
+              cp -r ${projectm} vendor/projectm
+              chmod -R u+w vendor/projectm
             '';
 
-            nativeBuildInputs = [ pkgs.pkg-config ];
+            nativeBuildInputs = [
+              pkgs.pkg-config
+              # libprojectM's only build system, driven by rox-milkdrop-sys.
+              pkgs.cmake
+            ];
             buildInputs = linuxBuildInputs pkgs;
 
             # The dlopened libs are unused at link time, so the fixup phase's
@@ -188,6 +215,8 @@
                 clippy
                 rust-analyzer
                 pkg-config
+                # rox-milkdrop-sys builds libprojectM with it
+                cmake
               ]
               # Dev links go through mold (see the gitignored
               # .cargo/config.toml); CI, release, and the nix package build
@@ -199,10 +228,12 @@
             };
 
             # Regenerate the patched gpui copy Cargo's [patch.crates-io]
-            # points at (see patches/gpui). Stamped, so it's a no-op on
-            # every shell entry after the first.
+            # points at (see patches/gpui) and fetch the libprojectM source
+            # rox-milkdrop-sys compiles. Both are stamped, so they're no-ops
+            # on every shell entry after the first.
             shellHook = ''
               ./scripts/vendor-gpui.sh
+              ./scripts/vendor-projectm.sh
             ''
             # gpui's build script compiles Metal shaders with `xcrun metal`,
             # and nix can't ship Apple's Metal toolchain. Undo the SDK env

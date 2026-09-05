@@ -212,6 +212,15 @@ pub fn shaders_dir() -> PathBuf {
     data_dir().join("shaders")
 }
 
+/// The folder the Milkdrop panel looks for presets and textures in:
+/// `presets/` holds the `.milk` files, `textures/` the images a preset can
+/// ask for by name. Nothing is created here; the packs worth having are a
+/// download the user makes themselves, and the panel's settings page shows
+/// this path so they know where to unzip them (ADR 28).
+pub fn milkdrop_dir() -> PathBuf {
+    data_dir().join("milkdrop")
+}
+
 /// Where a workspace's shader ejects to. Both halves of the name double as
 /// path components, so both go through [`safe_file_stem`]; a look that was
 /// never saved under a name (the live one you're editing) goes under
@@ -502,6 +511,17 @@ pub struct Settings {
     /// it left off. The track below is written either way; this only
     /// gates the restore.
     pub restore_last_track: bool,
+    /// Whether played tracks scrobble at all, to every connected
+    /// destination at once; the connections stay either way. One switch
+    /// rather than one per account, like the threshold under it: off for
+    /// an evening means off, not off here and still on over there.
+    pub scrobbling: bool,
+    /// How much of a track has to actually play before it scrobbles, as a
+    /// fraction of its duration. One knob for every scrobble destination:
+    /// Last.fm, Libre.fm and ListenBrainz all send on the same crossing,
+    /// and the seek strip and waveform can mark it. The listen rule behind
+    /// history is its own fixed line and doesn't read this.
+    pub scrobble_threshold: f32,
     /// The equalizer's curve and whether it's on, the Audio page's
     /// Equalizer section. A preference rather than session state: it's a
     /// tone choice, and it travels with a copied settings file the way the
@@ -657,6 +677,18 @@ pub struct Settings {
     /// The whole-window post-process shader, the Shader settings page's Screen
     /// shader section.
     pub post_shader: PostShaderConfig,
+    /// The Milkdrop visual behind the whole app, composited over the
+    /// blurred cover while something plays.
+    ///
+    /// Machine settings rather than the look bundle, next to the screen
+    /// shader and for the same reason: it only draws anything if this
+    /// machine has preset packs on disk, so a look carrying it would
+    /// import as a switch that does nothing on anyone else's install.
+    pub backdrop_visual: BackdropVisualConfig,
+    /// What every Milkdrop surface shares: the favorites list. Machine
+    /// state, like the backdrop visual above it, since it names files on
+    /// this disk.
+    pub milkdrop: MilkdropSettings,
     /// What the convert dialog opens on: the preset it last ran, where it
     /// wrote, how it named the files, and which ffmpeg to spawn.
     pub convert: ConvertSettings,
@@ -905,9 +937,16 @@ fn is_zero(value: &f32) -> bool {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AccountsState {
-    /// The Last.fm connection and scrobbling knobs, the settings window's
-    /// Scrobbling page.
+    /// The Last.fm connection and the hearts mirror, the settings window's
+    /// Integrations page. The scrobble switch and threshold every
+    /// destination shares live on [`Settings`] itself.
     pub lastfm: Lastfm,
+    /// The ListenBrainz connection, beside the Last.fm one on the same
+    /// page. Two scrobble destinations, no relationship between them.
+    pub listenbrainz: ListenBrainz,
+    /// The Libre.fm connection, the third destination. Its own session,
+    /// not one of Last.fm's: same protocol, different account.
+    pub librefm: LibreFm,
     /// The online enrichment providers and their knobs (ADR 14), the
     /// settings window's Providers page.
     pub providers: Providers,
@@ -1158,6 +1197,68 @@ pub fn hide_menubar() -> bool {
 /// caller's, startup seeds from the file through here too.
 pub fn set_hide_menubar(on: bool, cx: &mut App) {
     HIDE_MENUBAR.store(on, Ordering::Relaxed);
+    for window in cx.windows() {
+        window.update(cx, |_, window, _| window.refresh()).ok();
+    }
+}
+
+/// Which of the menubar's status-side buttons draw. Each is on by default;
+/// a right-click on that side of the bar flips them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct MenubarButtons {
+    /// The tasks button, the clock that opens the library tasks window.
+    pub tasks: bool,
+    /// The sleep timer button and its dropdown.
+    pub sleep: bool,
+    /// The rescan button that shows once a library folder is known.
+    pub rescan: bool,
+}
+
+impl Default for MenubarButtons {
+    fn default() -> Self {
+        MenubarButtons {
+            tasks: true,
+            sleep: true,
+            rescan: true,
+        }
+    }
+}
+
+impl MenubarButtons {
+    const TASKS: u8 = 1;
+    const SLEEP: u8 = 2;
+    const RESCAN: u8 = 4;
+
+    fn to_bits(self) -> u8 {
+        (self.tasks as u8) * Self::TASKS
+            | (self.sleep as u8) * Self::SLEEP
+            | (self.rescan as u8) * Self::RESCAN
+    }
+
+    fn from_bits(bits: u8) -> Self {
+        MenubarButtons {
+            tasks: bits & Self::TASKS != 0,
+            sleep: bits & Self::SLEEP != 0,
+            rescan: bits & Self::RESCAN != 0,
+        }
+    }
+}
+
+/// The live menubar-buttons set, packed into a static the way the hidden
+/// flag is: the bar reads it per frame. Seeded at startup, flipped from
+/// the bar's own right-click menu.
+static MENUBAR_BUTTONS: AtomicU8 =
+    AtomicU8::new(MenubarButtons::TASKS | MenubarButtons::SLEEP | MenubarButtons::RESCAN);
+
+pub fn menubar_buttons() -> MenubarButtons {
+    MenubarButtons::from_bits(MENUBAR_BUTTONS.load(Ordering::Relaxed))
+}
+
+/// Set the live set and repaint every window, the hidden flag's
+/// arrangement. Persisting is the caller's.
+pub fn set_menubar_buttons(buttons: MenubarButtons, cx: &mut App) {
+    MENUBAR_BUTTONS.store(buttons.to_bits(), Ordering::Relaxed);
     for window in cx.windows() {
         window.update(cx, |_, window, _| window.refresh()).ok();
     }
@@ -1839,6 +1940,298 @@ pub fn note_backdrop_shader(config: Option<PostShaderConfig>) {
     *BACKDROP_SHADER.write().unwrap() = config;
 }
 
+/// The Milkdrop backdrop: whether the visual runs behind the whole app,
+/// how far over the blurred cover it composites, and what fraction of the
+/// window it renders at.
+///
+/// Only three knobs, because everything else about the visual is the
+/// Milkdrop panel's business. Preset rotation, beat sensitivity and the
+/// rest belong to a surface someone is looking at; a backdrop is furniture,
+/// and its whole job is to move behind the text without being read.
+///
+/// This is the live, merged shape every paint reads. Three of its fields
+/// are the look's ([`MilkdropLook`]) and are skipped here so the machine
+/// file never carries a second copy of them: they're filled from the
+/// look on load and whenever a workspace applies.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackdropVisualConfig {
+    /// Whether the visual runs at all. The look's; see [`MilkdropLook`].
+    #[serde(skip)]
+    pub enabled: bool,
+    /// How far the frame carries over the blurred cover. The look's.
+    #[serde(skip)]
+    pub strength: f32,
+    /// Render size as a fraction of the window's device pixels. The
+    /// backdrop sits under a heavy blur and everything the app draws, so
+    /// this defaults well below 1: half the side is a quarter of the
+    /// readback for a picture nobody can focus on.
+    pub scale: f32,
+    /// Shuffle from the favorites list rather than the whole library. With
+    /// nothing starred yet the worker falls back to everything, so
+    /// switching this on before starring anything changes nothing.
+    pub favorites_only: bool,
+    /// Stay on the current preset: no timed switch, no cut on a beat. On
+    /// by default: a backdrop is furniture, and furniture that rearranges
+    /// itself every half minute is the panel's job, not this layer's.
+    pub locked: bool,
+    /// Seconds a preset holds before the next one comes up.
+    pub duration_secs: f64,
+    /// How the frame's colours meet the theme. The look's.
+    #[serde(skip)]
+    pub color: MilkdropColor,
+    /// The preset the backdrop is on, restored on the next start. Written
+    /// on a pick from the Appearance page and, while the lock is on, on
+    /// every switch; an unlocked backdrop changes preset every half
+    /// minute, and that isn't worth a settings write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<PathBuf>,
+}
+
+/// How a Milkdrop frame's colours are treated before they reach the screen.
+///
+/// Presets are drawn on black by people who assumed black, and on the
+/// light theme that makes a Milkdrop surface a dark hole in a pale window.
+/// The two remaps here are the answer: one keeps the preset and flips its
+/// lightness so black becomes white, the other paints the preset's shape
+/// in the theme's own colours.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MilkdropColor {
+    /// The preset's own colours, whatever the theme.
+    Preset,
+    /// The preset's own colours on the dark theme, and its lightness
+    /// inverted on the light one, so the black it was drawn on reads as
+    /// the pale background it's sitting over.
+    #[default]
+    Theme,
+    /// The frame's lightness mapped onto a ramp from the theme's root
+    /// background to its accent. Reads as the app's own colours on both
+    /// themes, and follows the cover when song theming is on.
+    Palette,
+    /// The same ramp with the playing cover's dominant colour at the top
+    /// instead of the accent, whatever the song-theming switch says. The
+    /// accent stands in while nothing plays or the cover has no colour.
+    Cover,
+}
+
+/// The seconds a backdrop preset holds by default, the same half minute
+/// the panel starts at.
+pub const BACKDROP_VISUAL_DURATION: f64 = 30.0;
+
+/// Everything Milkdrop shares across the panels and the backdrop.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MilkdropSettings {
+    /// The starred presets, by path, in the order they were starred. One
+    /// list for the whole app: a favorite is a favorite whichever panel
+    /// it was starred from, and the backdrop shuffles the same list.
+    pub favorites: Vec<PathBuf>,
+    /// Preset folders beyond `milkdrop_dir()/presets`, which is always
+    /// scanned. Somebody who keeps their packs on another drive points at
+    /// them here rather than copying a few thousand files. App-wide and
+    /// machine-local: every panel and the backdrop walk the same folders,
+    /// and a layout never carries a path off this machine.
+    pub roots: Vec<PathBuf>,
+}
+
+/// The strength a fresh install runs at: present enough to see the visual
+/// moving, faint enough that a track's own colours still set the mood.
+pub const BACKDROP_VISUAL_STRENGTH: f32 = 0.35;
+
+/// The render scale a fresh install runs at. See [`BackdropVisualConfig::scale`].
+pub const BACKDROP_VISUAL_SCALE: f32 = 0.5;
+
+/// The engine's frame rate for the backdrop, fixed rather than exposed.
+/// The panel offers a rate because someone is watching it; the backdrop
+/// runs the whole time the app plays, so it takes the rate that reads as
+/// motion for half the bill of sixty.
+pub const BACKDROP_VISUAL_FPS: u32 = 30;
+
+impl Default for BackdropVisualConfig {
+    fn default() -> Self {
+        BackdropVisualConfig {
+            enabled: false,
+            strength: BACKDROP_VISUAL_STRENGTH,
+            scale: BACKDROP_VISUAL_SCALE,
+            favorites_only: false,
+            locked: true,
+            duration_secs: BACKDROP_VISUAL_DURATION,
+            color: MilkdropColor::default(),
+            preset: None,
+        }
+    }
+}
+
+impl BackdropVisualConfig {
+    /// The look's three fields taken over this config.
+    pub fn with_look(mut self, look: &MilkdropLook) -> BackdropVisualConfig {
+        self.enabled = look.enabled;
+        self.strength = look.strength;
+        self.color = look.color;
+        self.clamped()
+    }
+
+    /// The look's three fields as they stand here, for writing back into
+    /// the bundle when the Appearance page edits them.
+    pub fn look(&self) -> MilkdropLook {
+        MilkdropLook {
+            enabled: self.enabled,
+            strength: self.strength,
+            color: self.color,
+        }
+    }
+
+    /// The config with hand-edited numbers pulled back into range. Both
+    /// scalars read straight into render math, so a file that says 1e30
+    /// has to land somewhere sane rather than allocating a framebuffer
+    /// nobody asked for.
+    fn clamped(mut self) -> BackdropVisualConfig {
+        self.strength = if self.strength.is_finite() {
+            self.strength.clamp(0.0, 1.0)
+        } else {
+            BACKDROP_VISUAL_STRENGTH
+        };
+        self.scale = if self.scale.is_finite() {
+            self.scale.clamp(0.1, 1.0)
+        } else {
+            BACKDROP_VISUAL_SCALE
+        };
+        // The duration goes straight to projectM's timer; a zero or a NaN
+        // there is a preset switch every frame.
+        self.duration_secs = if self.duration_secs.is_finite() {
+            self.duration_secs.clamp(1.0, 120.0)
+        } else {
+            BACKDROP_VISUAL_DURATION
+        };
+        self
+    }
+}
+
+/// The live backdrop visual config, cached out of the settings file the
+/// way the backdrop shader is: every window's backdrop layer reads it on
+/// every frame it paints, which is no place for disk.
+static BACKDROP_VISUAL: LazyLock<RwLock<BackdropVisualConfig>> = LazyLock::new(|| {
+    let settings = Settings::load();
+    RwLock::new(
+        settings
+            .backdrop_visual
+            .clone()
+            .with_look(&settings.look.bundle.appearance.milkdrop),
+    )
+});
+
+/// What the backdrop visual is set to right now.
+pub fn backdrop_visual() -> BackdropVisualConfig {
+    BACKDROP_VISUAL.read().unwrap().clone()
+}
+
+/// Replace the backdrop visual in the cache alone, so a slider drag reaches
+/// the paint without a settings write per pixel of travel.
+pub fn note_backdrop_visual(config: BackdropVisualConfig) {
+    *BACKDROP_VISUAL.write().unwrap() = config.clamped();
+}
+
+/// Take a look's Milkdrop share into the live config, keeping the
+/// machine's own fields. What a workspace apply calls.
+pub fn set_backdrop_visual_look(look: &MilkdropLook) {
+    let mut cache = BACKDROP_VISUAL.write().unwrap();
+    *cache = cache.clone().with_look(look);
+}
+
+/// The favorites list, cached out of the settings file for the same reason
+/// the backdrop visual is: every Milkdrop surface asks on every frame
+/// whether the list moved, and a menu row asks per render whether the
+/// preset on screen is in it.
+static MILKDROP_FAVORITES: LazyLock<RwLock<Vec<PathBuf>>> =
+    LazyLock::new(|| RwLock::new(Settings::load().milkdrop.favorites.clone()));
+
+/// The extra preset folders, cached like the favorites and for the same
+/// reason: the scan roots are asked for on every rescan and compared on
+/// every frame that checks the generation.
+static MILKDROP_ROOTS: LazyLock<RwLock<Vec<PathBuf>>> =
+    LazyLock::new(|| RwLock::new(Settings::load().milkdrop.roots.clone()));
+
+/// Bumped on every edit to either list, so a surface can tell whether the
+/// favorites or the folders changed with one atomic load rather than a
+/// list compare.
+static MILKDROP_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// The starred presets, in starring order.
+pub fn milkdrop_favorites() -> Vec<PathBuf> {
+    MILKDROP_FAVORITES.read().unwrap().clone()
+}
+
+/// The extra preset folders, in the order they were added.
+pub fn milkdrop_roots() -> Vec<PathBuf> {
+    MILKDROP_ROOTS.read().unwrap().clone()
+}
+
+/// Every folder a Milkdrop scan walks: the app's own presets folder
+/// first, then the extras.
+pub fn milkdrop_scan_roots() -> Vec<PathBuf> {
+    let mut roots = vec![milkdrop_dir().join("presets")];
+    roots.extend(milkdrop_roots());
+    roots
+}
+
+/// Replace the extra preset folders. Returns whether the list changed.
+pub fn set_milkdrop_roots(roots: Vec<PathBuf>) -> bool {
+    {
+        let mut held = MILKDROP_ROOTS.write().unwrap();
+        if *held == roots {
+            return false;
+        }
+        *held = roots.clone();
+    }
+    MILKDROP_GEN.fetch_add(1, Ordering::AcqRel);
+    Settings::update(move |s| s.milkdrop.roots = roots);
+    true
+}
+
+/// Which edit of the Milkdrop lists (favorites and folders) is current.
+/// Starts at zero and only ever goes up; a surface that stored the value
+/// it last acted on has a change to pick up whenever this reads higher.
+pub fn milkdrop_gen() -> u64 {
+    MILKDROP_GEN.load(Ordering::Acquire)
+}
+
+pub fn is_milkdrop_favorite(path: &Path) -> bool {
+    MILKDROP_FAVORITES
+        .read()
+        .unwrap()
+        .iter()
+        .any(|favorite| favorite == path)
+}
+
+/// Star or unstar a preset. Returns whether the list actually changed;
+/// starring what's already starred is a no-op that costs no write.
+pub fn set_milkdrop_favorite(path: &Path, on: bool) -> bool {
+    let changed = {
+        let mut favorites = MILKDROP_FAVORITES.write().unwrap();
+        let held = favorites.iter().position(|favorite| favorite == path);
+        match (held, on) {
+            (None, true) => {
+                favorites.push(path.to_path_buf());
+                true
+            }
+            (Some(index), false) => {
+                favorites.remove(index);
+                true
+            }
+            _ => false,
+        }
+    };
+    if changed {
+        MILKDROP_GEN.fetch_add(1, Ordering::AcqRel);
+        let favorites = milkdrop_favorites();
+        Settings::update(move |s| s.milkdrop.favorites = favorites);
+    }
+    changed
+}
+
 /// One connected account. Last.fm binds a session to the api key it was
 /// authorized under, so this is only ever usable by a build signing with
 /// that same key.
@@ -1862,7 +2255,7 @@ impl LastfmSession {
 /// The Last.fm account and how scrobbling behaves. The key and secret
 /// override the build's own api identity (`lastfm::keys`), for builds
 /// that ship none.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Lastfm {
     pub api_key: String,
@@ -1886,31 +2279,32 @@ pub struct Lastfm {
     session_key: String,
     #[serde(skip_serializing)]
     username: String,
-    /// Whether playback scrobbles at all; the connection stays either way.
-    pub scrobbling: bool,
+    /// Where the switch lived before every scrobble destination shared
+    /// it ([`Settings::scrobbling`]). Read once on load to seed the shared
+    /// one, never written back.
+    #[serde(skip_serializing)]
+    scrobbling: Option<bool>,
     /// Whether the heart also sends a Last.fm love. Off by default, unlike
     /// scrobbling: connecting an account is consent to publish what played,
     /// not to rewrite the loved list a user may have curated over there for
     /// years. Turning it on applies from that point forward; it never pushes
     /// the favourites already on the shelf.
     pub love_favourites: bool,
-    /// How much of a track has to actually play before it scrobbles, as a
-    /// fraction of its duration. The seek strip and waveform can mark it.
-    pub threshold: f32,
+    /// Where the threshold lived before every scrobble destination shared
+    /// it ([`Settings::scrobble_threshold`]). Read once on load to seed the
+    /// shared knob, never written back.
+    #[serde(skip_serializing)]
+    threshold: Option<f32>,
 }
 
-impl Default for Lastfm {
-    fn default() -> Self {
-        Lastfm {
-            api_key: String::new(),
-            api_secret: String::new(),
-            sessions: BTreeMap::new(),
-            session_key: String::new(),
-            username: String::new(),
-            scrobbling: true,
-            love_favourites: false,
-            threshold: 0.5,
-        }
+/// The band the scrobble threshold is held to: the low end stops short of
+/// a threshold that scrobbles on the first note, and a non-finite value
+/// from a hand-edited file falls back to the default.
+pub fn clamp_threshold(threshold: f32) -> f32 {
+    if threshold.is_finite() {
+        threshold.clamp(0.1, 1.0)
+    } else {
+        0.5
     }
 }
 
@@ -2001,6 +2395,35 @@ impl Lastfm {
         self.sessions
             .insert(UNATTRIBUTED.to_string(), LastfmSession { key, username });
     }
+}
+
+/// The ListenBrainz connection: a user token minted on the site is the
+/// whole credential, so there's no auth dance and nothing filed per api
+/// key the way Last.fm's sessions are. All this holds is the token and
+/// the name the service answered with when it accepted it.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ListenBrainz {
+    /// The user token from listenbrainz.org/settings. Empty means not
+    /// connected: nothing is ever sent without one.
+    pub token: String,
+    /// The MusicBrainz account name `validate-token` returned, None until
+    /// a check has come back clean. Only the settings readout uses it.
+    pub username: Option<String>,
+}
+
+/// The Libre.fm connection. Libre.fm takes any api pair, so rox signs
+/// with the one baked into rox-net and there's nothing to file sessions
+/// under: one session key and the name it came with is the whole
+/// connection.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LibreFm {
+    /// The session key the connect flow traded the authorized token for.
+    /// Empty means not connected.
+    pub session_key: String,
+    /// The account name the session came back with, for the readout.
+    pub username: String,
 }
 
 /// Where a fetched lyrics sheet saves: the embedded tag through the
@@ -2668,10 +3091,19 @@ pub struct AppearanceBundle {
     /// The quick-play modal's appearance knobs, edited from its own config
     /// panel.
     pub quick_play: QuickPlayConfig,
+    /// The Milkdrop backdrop as a look: whether it's on, how far it carries
+    /// over the cover wash, and how it's coloured. Here rather than with
+    /// the machine's own Milkdrop state because a workspace can be built
+    /// around it, the way Metro is built around song theming; what stays
+    /// per machine (the preset, the lock, the render scale) is in
+    /// [`BackdropVisualConfig`].
+    pub milkdrop: MilkdropLook,
     /// Whether the in-window menubar stays hidden, showing only while alt
     /// is held or a menu is open. Off by default: the bar is the way into
     /// everything.
     pub hide_menubar: bool,
+    /// Which of the bar's status-side buttons show. All on by default.
+    pub menubar_buttons: MenubarButtons,
     /// Whether the main workspace windows get the OS's own decorations
     /// (titlebar, borders). Off asks the compositor for a bare
     /// client-drawn window; the window controls panel stands in for the
@@ -2700,9 +3132,35 @@ impl Default for AppearanceBundle {
             rating_style: RatingStyle::default(),
             rating_dots: false,
             quick_play: QuickPlayConfig::default(),
+            milkdrop: MilkdropLook::default(),
             hide_menubar: false,
+            menubar_buttons: MenubarButtons::default(),
             os_decorations: true,
             resize_border: true,
+        }
+    }
+}
+
+/// The Milkdrop backdrop's share of a look. See
+/// [`AppearanceBundle::milkdrop`].
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct MilkdropLook {
+    /// Whether the visual runs at all. Off is exactly the cover backdrop.
+    pub enabled: bool,
+    /// How far the frame carries over the blurred cover, 0 to 1. It goes
+    /// out as the pass's alpha, so 0 is the art alone and 1 replaces it.
+    pub strength: f32,
+    /// How the frame's colours meet the theme.
+    pub color: MilkdropColor,
+}
+
+impl Default for MilkdropLook {
+    fn default() -> Self {
+        MilkdropLook {
+            enabled: false,
+            strength: BACKDROP_VISUAL_STRENGTH,
+            color: MilkdropColor::default(),
         }
     }
 }
@@ -3266,6 +3724,35 @@ pub struct WindowState {
     pub maximized: bool,
 }
 
+/// Carry the threshold over from where it lived before every scrobble
+/// destination shared it: the Last.fm account. A settings file that has
+/// never written the shared knob takes the account's value; once it has,
+/// the account's copy is stale and stays ignored until a save drops it.
+/// `core` is the settings file as parsed, the only place that says
+/// whether the knob was written or defaulted.
+fn seed_threshold(settings: &mut Settings, core: &serde_json::Value) {
+    let legacy = settings.accounts.lastfm.threshold.take();
+    if core.get("scrobble_threshold").is_some() {
+        return;
+    }
+    if let Some(threshold) = legacy {
+        settings.scrobble_threshold = threshold;
+    }
+}
+
+/// The switch moved the same way, and seeds the same way: an account
+/// file that turned Last.fm's scrobbling off keeps scrobbling off until
+/// the shared switch has been written once.
+fn seed_scrobbling(settings: &mut Settings, core: &serde_json::Value) {
+    let legacy = settings.accounts.lastfm.scrobbling.take();
+    if core.get("scrobbling").is_some() {
+        return;
+    }
+    if let Some(scrobbling) = legacy {
+        settings.scrobbling = scrobbling;
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
@@ -3285,6 +3772,8 @@ impl Default for Settings {
             app_font_size: palette::FONT_SIZE_DEFAULT,
             icon_pack: None,
             restore_last_track: true,
+            scrobbling: true,
+            scrobble_threshold: 0.5,
             eq: EqSettings::default(),
             crossfade_secs: 0.0,
             crossfade_restore_secs: DEFAULT_CROSSFADE_SECS,
@@ -3312,6 +3801,8 @@ impl Default for Settings {
             acoustic_local_model: None,
             acoustic_save: AcousticSave::default(),
             post_shader: PostShaderConfig::default(),
+            backdrop_visual: BackdropVisualConfig::default(),
+            milkdrop: MilkdropSettings::default(),
             convert: ConvertSettings::default(),
             keymap: BTreeMap::new(),
         }
@@ -3378,18 +3869,21 @@ impl Settings {
         // The frame knobs go straight into div sizes, so a hand-edited file
         // clamps each to its ceiling.
         appearance.frame = appearance.frame.clamped();
+        // Same deal for the backdrop visual's pair: strength is an alpha
+        // and scale sizes a framebuffer.
+        settings.backdrop_visual = settings
+            .backdrop_visual
+            .clone()
+            .with_look(&settings.look.bundle.appearance.milkdrop);
+        seed_threshold(&mut settings, &value);
+        seed_scrobbling(&mut settings, &value);
         // The threshold reads straight into the scrobble math and the
         // marker paint, so a hand-edited value clamps to a sane band.
-        let lastfm = &mut settings.accounts.lastfm;
-        lastfm.threshold = if lastfm.threshold.is_finite() {
-            lastfm.threshold.clamp(0.1, 1.0)
-        } else {
-            0.5
-        };
+        settings.scrobble_threshold = clamp_threshold(settings.scrobble_threshold);
         // A file from before sessions were filed by api key holds one
         // flat session; it reads in unattributed here and the next save
         // drops the flat pair.
-        lastfm.fold_legacy_session();
+        settings.accounts.lastfm.fold_legacy_session();
         // The restored frame reads straight into window Bounds on open: a
         // non-finite field drops back to the centered default, and the size
         // floors at the window minimum so a zero or negative frame can't
@@ -4589,14 +5083,16 @@ mod tests {
         assert_eq!(back.last_scan, 12345);
 
         let mut accounts = AccountsState::default();
-        accounts.lastfm.threshold = 0.8;
         accounts
             .lastfm
             .connect("api-key", "sk".into(), "zealsprince".into());
+        accounts.listenbrainz.token = "a-user-token".into();
+        accounts.listenbrainz.username = Some("zealsprince".into());
         let back: AccountsState =
             serde_json::from_str(&serde_json::to_string(&accounts).unwrap()).unwrap();
-        assert_eq!(back.lastfm.threshold, 0.8);
         assert_eq!(back.lastfm.username("api-key"), "zealsprince");
+        assert_eq!(back.listenbrainz.token, "a-user-token");
+        assert_eq!(back.listenbrainz.username.as_deref(), Some("zealsprince"));
 
         let windows = WindowsState {
             main: Some(WindowState {
@@ -4666,6 +5162,66 @@ mod tests {
         ] {
             assert!(!json.contains(key), "settings.json still carries {key}");
         }
+    }
+
+    /// The threshold moved off the Last.fm account. A file that predates
+    /// the move seeds the shared knob from there once; a file that has
+    /// written the knob keeps it, whatever the account still says.
+    #[test]
+    fn the_legacy_threshold_seeds_the_shared_knob_once() {
+        let mut settings = Settings::default();
+        settings.accounts.lastfm = serde_json::from_value(serde_json::json!({
+            "threshold": 0.8
+        }))
+        .unwrap();
+        seed_threshold(&mut settings, &serde_json::json!({}));
+        assert_eq!(settings.scrobble_threshold, 0.8);
+        assert!(
+            settings.accounts.lastfm.threshold.is_none(),
+            "read once, then gone"
+        );
+
+        let mut settings = Settings {
+            scrobble_threshold: 0.3,
+            ..Settings::default()
+        };
+        settings.accounts.lastfm = serde_json::from_value(serde_json::json!({
+            "threshold": 0.8
+        }))
+        .unwrap();
+        seed_threshold(
+            &mut settings,
+            &serde_json::json!({ "scrobble_threshold": 0.3 }),
+        );
+        assert_eq!(
+            settings.scrobble_threshold, 0.3,
+            "the written knob wins over the stale account copy"
+        );
+    }
+
+    /// The switch moved off the Last.fm account the same way: a file from
+    /// before reads the account's setting once, and one that has written
+    /// the shared switch keeps it.
+    #[test]
+    fn the_legacy_switch_seeds_the_shared_one_once() {
+        let mut settings = Settings::default();
+        settings.accounts.lastfm =
+            serde_json::from_value(serde_json::json!({ "scrobbling": false })).unwrap();
+        seed_scrobbling(&mut settings, &serde_json::json!({}));
+        assert!(!settings.scrobbling);
+        assert!(
+            settings.accounts.lastfm.scrobbling.is_none(),
+            "read once, then gone"
+        );
+
+        let mut settings = Settings::default();
+        settings.accounts.lastfm =
+            serde_json::from_value(serde_json::json!({ "scrobbling": false })).unwrap();
+        seed_scrobbling(&mut settings, &serde_json::json!({ "scrobbling": true }));
+        assert!(
+            settings.scrobbling,
+            "the written switch wins over the stale account copy"
+        );
     }
 
     /// The look round-trips through its own file, the other half of the
@@ -4845,7 +5401,7 @@ mod tests {
         let mut accounts: AccountsState = from_legacy(&json);
         accounts.lastfm.fold_legacy_session();
         assert_eq!(accounts.lastfm.username("any-key"), "zealsprince");
-        assert_eq!(accounts.lastfm.threshold, 0.8);
+        assert_eq!(accounts.lastfm.threshold, Some(0.8));
         assert!(accounts.discord.enabled);
 
         // The renamed window fields come across on their aliases.
@@ -5147,6 +5703,10 @@ mod tests {
             accounts.lastfm.session("api-key").map(|s| s.key.as_str()),
             Some("a-real-secret")
         );
+        // An accounts file written before ListenBrainz existed reads as
+        // not connected.
+        assert!(accounts.listenbrainz.token.is_empty());
+        assert!(accounts.listenbrainz.username.is_none());
 
         let look: LookState = serde_json::from_value(serde_json::json!({
             "bundle": {
@@ -5237,5 +5797,38 @@ mod tests {
         assert!(written.contains("volume"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Milkdrop backdrop's look fields never reach the machine file:
+    /// they're the workspace's, and a second copy would shadow the one a
+    /// workspace apply brings.
+    #[test]
+    fn the_backdrop_visual_look_lives_in_the_bundle_not_the_machine_file() {
+        let config = BackdropVisualConfig {
+            enabled: true,
+            strength: 0.8,
+            color: MilkdropColor::Cover,
+            locked: false,
+            ..BackdropVisualConfig::default()
+        };
+        let machine = serde_json::to_value(&config).expect("serializes");
+        assert!(machine.get("enabled").is_none());
+        assert!(machine.get("strength").is_none());
+        assert!(machine.get("color").is_none());
+        assert_eq!(machine["locked"], false);
+
+        let look = config.look();
+        let bundled = serde_json::to_value(look).expect("serializes");
+        assert_eq!(bundled["enabled"], true);
+        assert_eq!(bundled["color"], "cover");
+
+        // Read back from the machine file, the look fills the gaps.
+        let read: BackdropVisualConfig = serde_json::from_value(machine).expect("reads");
+        assert!(!read.enabled, "the machine file says nothing about it");
+        let merged = read.with_look(&look);
+        assert!(merged.enabled);
+        assert_eq!(merged.strength, 0.8);
+        assert_eq!(merged.color, MilkdropColor::Cover);
+        assert!(!merged.locked, "the machine's own field survives the merge");
     }
 }

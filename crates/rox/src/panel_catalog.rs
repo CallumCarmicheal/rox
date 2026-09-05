@@ -36,6 +36,7 @@ use rox_panels::history::{HistoryConfig, HistoryPanel};
 use rox_panels::library::{LibraryConfig, LibraryPanel};
 use rox_panels::lyrics::{LyricsConfig, LyricsPanel};
 use rox_panels::metadata::{MetadataConfig, MetadataPanel};
+use rox_panels::milkdrop::{MilkdropConfig, MilkdropPanel};
 use rox_panels::oscilloscope::{OscilloscopeConfig, OscilloscopePanel};
 use rox_panels::output::{OutputConfig, OutputPanel};
 use rox_panels::particles::{ParticlesConfig, ParticlesPanel};
@@ -572,6 +573,17 @@ pub(crate) static VISUALIZERS: PanelSection = PanelSection {
             placement: PanelPlacement::Bottom,
             build: |state, _, _, cx| {
                 Arc::new(cx.new(|cx| ShaderPanel::new(state.clone(), ShaderConfig::default(), cx)))
+            },
+        },
+        PanelDef {
+            label: "panel-title-milkdrop",
+            name: "milkdrop",
+            icon: icons::LAYERS,
+            placement: PanelPlacement::Bottom,
+            build: |state, _, _, cx| {
+                Arc::new(
+                    cx.new(|cx| MilkdropPanel::new(state.clone(), MilkdropConfig::default(), cx)),
+                )
             },
         },
     ],

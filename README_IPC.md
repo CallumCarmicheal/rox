@@ -44,10 +44,11 @@ did without a second round trip.
 
 | Method                                                     | Params                                        | Answers                                                                |
 | ---------------------------------------------------------- | --------------------------------------------- | ---------------------------------------------------------------------- |
-| `transport.status`                                         |                                               | playing, position, duration, volume, mute, queue revision, current track |
+| `transport.status`                                         |                                               | playing, position, duration, volume, mute, A-B section, queue revision, current track |
 | `transport.toggle` `.play` `.pause` `.next` `.prev` `.stop` |                                               | status                                                                 |
 | `transport.seek`                                           | `{"to": secs}` or `{"by": secs}`              | status                                                                 |
 | `transport.set_volume`                                     | `{"volume": 0..2}`                            | status                                                                 |
+| `transport.ab`                                             | `{"action": "mark"/"clear"}` or `{"a": secs, "b": secs}` | status                                                      |
 | `queue.list`                                               |                                               | every entry with its stable id, path, explicit flag, and current marker |
 | `queue.add`                                                | `{"paths": [..], "mode": "end"/"next"/"now"}` | `{"queued": n}`                                                        |
 | `queue.remove`                                             | `{"ids": [..]}` or `{"id": n}`                | null                                                                   |
@@ -70,6 +71,15 @@ shifts underneath it. `queue.add` takes files and folders, filters to decodable
 audio, and accepts `path#N` for a cue sheet's Nth track, the same spelling the m3u
 export uses. `mode` places the batch: `end` behind what's queued, `next` right after
 the playing track, `now` splices and plays.
+
+`transport.ab` drives the A-B repeat the transport button runs. `mark` steps the
+same three-press cycle: the first marks A at the current position, the second marks
+B and starts the section repeating, the third clears it. `clear` drops the section
+wherever the cycle stands, and `a` with `b` sets one outright, both in track
+seconds and at least a quarter second apart. Status carries the section as `ab`:
+null with nothing marked, `{"a": secs}` while the cycle waits for B, and both ends
+once it repeats. A skip or a seek outside the section clears it, and the change
+shows up as an `event.playback` frame.
 
 Search uses the panels' query language: free terms match title, artist, album, and
 genre, while `artist:name`, `album:name`, `genre:name`, and `year:1990` pin one
@@ -122,6 +132,8 @@ commands:
   next | prev | stop
   seek <secs|+secs|-secs>    absolute, or relative when signed
   volume <0..2>
+  ab [mark|clear|<a> <b>]    A-B repeat: step the cycle (default), clear
+                             it, or set a section in seconds outright
   queue                      the play order with entry ids
   add [--next|--now] <paths> queue files (default: end of the queue)
   remove <id...>             drop queued entries by id

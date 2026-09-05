@@ -96,8 +96,9 @@ Contract:
   last-played, artist / album / genre rollups, recents), and a change event per append
   so open views refresh.
 - To enrichment: the scrobbler accrues played time off the same position clock, so
-  seeks and pauses don't count for either, but sends on its own threshold, a user
-  knob, rather than the listen rule.
+  seeks and pauses don't count for either, but every scrobble destination (Last.fm,
+  Libre.fm, ListenBrainz) sends on one shared threshold, a user knob, rather than
+  the listen rule.
 
 ## Metadata writer
 

@@ -1,0 +1,15 @@
+[package]
+name = "rox-milkdrop-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Declaring the native library we link makes cargo refuse a second crate that
+# claims the same one, which is the guard against linking two copies of a
+# static C++ library with global state into one binary.
+links = "projectM"
+
+[build-dependencies]
+# libprojectM only ships a CMake build, and it pulls in its own vendored glm,
+# glad and projectm-eval, so build.rs drives cmake over the vendored tree
+# rather than trying to compile the sources itself.
+cmake = "0.1"

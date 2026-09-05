@@ -46,6 +46,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::{Time, Timestamp};
 
+use crate::engine::guard_decode;
 use crate::gain::ReplayGain;
 
 /// ReplayGain 2's reference loudness. RG1 calibrated against an 89 dB SPL
@@ -220,14 +221,20 @@ pub fn measure(
         hint.with_extension(ext);
     }
 
-    let mut format = symphonia::default::get_probe()
-        .probe(
+    // Guarded for the same reason the engine's open is: the probe and the
+    // decoder build are third-party parsing of file bytes, and a panic in
+    // either has to read as a file this can't measure rather than as the end
+    // of the worker. Nothing outlives the failed call, so there's no state
+    // left half-updated to argue about.
+    let mut format = guard_decode("probe", path, || {
+        symphonia::default::get_probe().probe(
             &hint,
             mss,
             FormatOptions::default(),
             MetadataOptions::default(),
         )
-        .map_err(|e| format!("probe: {e}"))?;
+    })?
+    .map_err(|e| format!("probe: {e}"))?;
 
     let track = format
         .default_track(TrackType::Audio)
@@ -265,9 +272,10 @@ pub fn measure(
                 .map(|secs| (secs * rate as f64).round() as u64)
         });
 
-    let mut decoder = symphonia::default::get_codecs()
-        .make_audio_decoder(params, &AudioDecoderOptions::default())
-        .map_err(|e| format!("decoder: {e}"))?;
+    let mut decoder = guard_decode("decoder setup", path, || {
+        crate::codecs::registry().make_audio_decoder(params, &AudioDecoderOptions::default())
+    })?
+    .map_err(|e| format!("decoder: {e}"))?;
 
     let mut meter = new_meter(channels, rate)?;
     // The peak is tracked out here rather than in the meter because a
@@ -282,7 +290,11 @@ pub fn measure(
     let mut tick = tick_frames(rate);
 
     loop {
-        let packet = match format.next_packet() {
+        // A panic in the reader or the decoder ends the measurement as an
+        // error rather than as a dead worker, and it ends it for good: the
+        // unwind came out of the middle of that state, so the loop never
+        // goes back in for another packet.
+        let packet = match guard_decode("packet read", path, || format.next_packet())? {
             Ok(Some(p)) => p,
             Ok(None) => break,
             Err(e) => {
@@ -297,8 +309,26 @@ pub fn measure(
             continue;
         }
 
-        let decoded = match decoder.decode(&packet) {
-            Ok(decoded) => decoded,
+        // The copy into the scratch buffer is inside the guard because the
+        // decoded audio is borrowed from the decoder: reading it runs the
+        // codec's own code as much as producing it did.
+        let decoded = guard_decode("decode", path, || {
+            decoder.decode(&packet).map(|decoded| {
+                let frames = decoded.frames();
+                if frames == 0 {
+                    return None;
+                }
+                let spec = decoded.spec();
+                let got = (frames, spec.rate(), spec.channels().count() as u32);
+                scratch.resize(decoded.samples_interleaved(), 0.0);
+                decoded.copy_to_slice_interleaved(&mut scratch);
+                Some(got)
+            })
+        })?;
+
+        let (packet_frames, packet_rate, packet_channels) = match decoded {
+            Ok(Some(got)) => got,
+            Ok(None) => continue,
             // Corrupt or truncated packet: skip it and keep measuring, the
             // same call playback makes.
             Err(Error::DecodeError(e)) => {
@@ -314,15 +344,6 @@ pub fn measure(
                 break;
             }
         };
-
-        let packet_frames = decoded.frames();
-        if packet_frames == 0 {
-            continue;
-        }
-        let spec = decoded.spec();
-        let (packet_rate, packet_channels) = (spec.rate(), spec.channels().count() as u32);
-        scratch.resize(decoded.samples_interleaved(), 0.0);
-        decoded.copy_to_slice_interleaved(&mut scratch);
 
         if (packet_rate, packet_channels) != (rate, channels) {
             // A chained stream or a container switching format mid-file.
@@ -413,14 +434,15 @@ pub fn decode_mono(
         hint.with_extension(ext);
     }
 
-    let mut format = symphonia::default::get_probe()
-        .probe(
+    let mut format = guard_decode("probe", path, || {
+        symphonia::default::get_probe().probe(
             &hint,
             mss,
             FormatOptions::default(),
             MetadataOptions::default(),
         )
-        .map_err(|e| format!("probe: {e}"))?;
+    })?
+    .map_err(|e| format!("probe: {e}"))?;
 
     let track = format
         .default_track(TrackType::Audio)
@@ -433,9 +455,10 @@ pub fn decode_mono(
         .ok_or("no audio codec parameters")?;
     let rate = params.sample_rate.ok_or("unknown sample rate")?;
 
-    let mut decoder = symphonia::default::get_codecs()
-        .make_audio_decoder(params, &AudioDecoderOptions::default())
-        .map_err(|e| format!("decoder: {e}"))?;
+    let mut decoder = guard_decode("decoder setup", path, || {
+        crate::codecs::registry().make_audio_decoder(params, &AudioDecoderOptions::default())
+    })?
+    .map_err(|e| format!("decoder: {e}"))?;
 
     if from_secs > 0.0 {
         let time = Time::try_from_secs_f64(from_secs).unwrap_or(Time::ZERO);
@@ -443,16 +466,19 @@ pub fn decode_mono(
         // the head of the track instead of the span asked for. That's a
         // worse excerpt, not a broken one, so it's a warning rather than an
         // error: a format with no seek table still gets analyzed.
-        if let Err(e) = format.seek(
-            SeekMode::Coarse,
-            SeekTo::Time {
-                time,
-                track_id: Some(track_id),
-            },
-        ) {
+        let seeked = guard_decode("seek", path, || {
+            format.seek(
+                SeekMode::Coarse,
+                SeekTo::Time {
+                    time,
+                    track_id: Some(track_id),
+                },
+            )
+        })?;
+        if let Err(e) = seeked {
             log::warn!("seek to {from_secs:.1}s in {} failed: {e}", path.display());
         }
-        decoder.reset();
+        guard_decode("decoder reset", path, || decoder.reset())?;
     }
 
     let want = ((max_secs * rate as f64) as usize).max(1);
@@ -462,7 +488,10 @@ pub fn decode_mono(
     let mut since_tick = 0usize;
 
     while mono.len() < want {
-        let packet = match format.next_packet() {
+        // Same guard as [`measure`]: a panic out of the reader or the codec
+        // is this excerpt failing, not this worker dying, and the decoder is
+        // never re-entered after one.
+        let packet = match guard_decode("packet read", path, || format.next_packet())? {
             Ok(Some(p)) => p,
             Ok(None) => break,
             Err(e) => {
@@ -473,8 +502,21 @@ pub fn decode_mono(
         if packet.track_id != track_id {
             continue;
         }
-        let decoded = match decoder.decode(&packet) {
-            Ok(decoded) => decoded,
+        let decoded = guard_decode("decode", path, || {
+            decoder.decode(&packet).map(|decoded| {
+                let spec = decoded.spec();
+                let got = (
+                    decoded.frames(),
+                    spec.rate(),
+                    spec.channels().count().max(1),
+                );
+                scratch.resize(decoded.samples_interleaved(), 0.0);
+                decoded.copy_to_slice_interleaved(&mut scratch);
+                got
+            })
+        })?;
+        let (packet_frames, packet_rate, channels) = match decoded {
+            Ok(got) => got,
             Err(Error::DecodeError(e)) => {
                 log::warn!("decode error, skipping packet: {e}");
                 continue;
@@ -488,26 +530,23 @@ pub fn decode_mono(
                 break;
             }
         };
-        let channels = decoded.spec().channels().count().max(1);
         // A chained stream that changes rate mid-file would put two rates in
         // one buffer, and the caller resamples the whole thing as if it were
         // one. Stopping at the seam keeps the samples honest; the excerpt is
         // short by whatever came after it, which the caller already handles
         // for a track that ran out early.
-        if decoded.spec().rate() != rate {
+        if packet_rate != rate {
             log::warn!(
                 "{} changes sample rate mid-file, ending the excerpt at the seam",
                 path.display()
             );
             break;
         }
-        scratch.resize(decoded.samples_interleaved(), 0.0);
-        decoded.copy_to_slice_interleaved(&mut scratch);
         for frame in scratch.chunks_exact(channels) {
             mono.push(frame.iter().sum::<f32>() / channels as f32);
         }
 
-        since_tick += decoded.frames();
+        since_tick += packet_frames;
         if since_tick >= tick {
             since_tick = 0;
             if !should_continue() {
@@ -1067,5 +1106,28 @@ mod tests {
         assert!(decode_mono(&fx.missing("gone.wav"), 0.0, 1.0, || true).is_err());
         assert!(decode_mono(&fx.junk("junk.wav"), 0.0, 1.0, || true).is_err());
         assert!(decode_mono(&fx.wav("empty.wav", 48_000, 2, &[]), 0.0, 1.0, || true).is_err());
+    }
+
+    /// The checked-in Opus fixture goes through the same registry playback
+    /// uses, so a measurement proves the analyzer and the engine agree about
+    /// what decodes. A one-second sine at a fixed level measures to a real,
+    /// finite gain; anything else means the decode came back silent.
+    #[test]
+    fn an_opus_file_measures_a_finite_gain() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tone-440.opus");
+        let out = measure(&path, || true, |_, _| {})
+            .expect("the fixture decodes")
+            .expect("nothing asked it to stop");
+        let gain = out.gain_db();
+        assert!(
+            gain.is_some_and(f32::is_finite),
+            "a real tone measures a real gain, got {gain:?}"
+        );
+        assert!(
+            out.frames.abs_diff(48_000) <= 1,
+            "and it measured the trimmed second, got {} frames",
+            out.frames
+        );
     }
 }
