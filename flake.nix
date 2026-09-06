@@ -3,10 +3,21 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # CI and releases build on rustup's stable channel, and nixpkgs trails it
+    # by a release or two. The overlay ships the same latest stable, so a
+    # clippy lint that lands upstream fails here before it fails on CI.
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      rust-overlay,
+    }:
     let
       lib = nixpkgs.lib;
       systems = [
@@ -203,17 +214,23 @@
         pkgs:
         let
           inherit (pkgs) stdenv;
+          rustToolchain =
+            (pkgs.extend rust-overlay.overlays.default).rust-bin.stable.latest.default.override
+              {
+                extensions = [
+                  "rust-analyzer"
+                  "rust-src"
+                ];
+              };
         in
         {
           default = pkgs.mkShell {
             packages =
               with pkgs;
               [
-                rustc
-                cargo
-                rustfmt
-                clippy
-                rust-analyzer
+                # rustc, cargo, clippy, rustfmt, rust-analyzer, at the
+                # version CI's dtolnay/rust-toolchain@stable resolves to.
+                rustToolchain
                 pkg-config
                 # rox-milkdrop-sys builds libprojectM with it
                 cmake

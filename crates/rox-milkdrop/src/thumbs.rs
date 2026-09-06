@@ -555,7 +555,7 @@ fn write_png(path: &Path, frame: &crate::Frame) -> Result<(), String> {
     let mut pixels = (*frame.rgba8).clone();
     // The readback's alpha is whatever projectM left in the framebuffer,
     // and a transparent thumbnail is a blank one.
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel[3] = 0xff;
     }
     let image = image::RgbaImage::from_raw(frame.width, frame.height, pixels)
