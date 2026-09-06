@@ -1689,7 +1689,7 @@ impl Player {
         // belongs to the shuffle order rather than to a continuation mode of
         // its own. Read here rather than inside the provider, because this is
         // the same tick that decides the mode is still current.
-        let similar = self.similar_order();
+        let order = self.queue_order();
         self.continuing = true;
         self.continued_rev = Some(rev);
         let db_path = rox_core::settings::data_dir().join("library.db");
@@ -1701,7 +1701,7 @@ impl Player {
             let picks = cx
                 .background_executor()
                 .spawn(async move {
-                    let provider = continuation::provider(mode, similar)?;
+                    let provider = continuation::provider(mode, order)?;
                     let conn = store::open(&db_path).ok()?;
                     Some(provider.next(&conn, &seed))
                 })
@@ -1709,7 +1709,7 @@ impl Player {
                 .unwrap_or_default();
             this.update(cx, |this, cx| {
                 this.continuing = false;
-                this.land_continuation(mode, similar, force, picks, cx);
+                this.land_continuation(mode, order, force, picks, cx);
                 if force {
                     this.continued_rev = None;
                 }
@@ -1719,7 +1719,7 @@ impl Player {
                 // been dropped by the landing for being the wrong order, so
                 // nothing is left to bring the radio in before the floor. Ask
                 // again on the press's behalf.
-                if !similar && this.similar_order() {
+                if order != continuation::Order::Similar && this.similar_order() {
                     this.request_continuation(true, cx);
                 }
             })
@@ -1738,7 +1738,7 @@ impl Player {
     fn land_continuation(
         &mut self,
         mode: continuation::Mode,
-        similar: bool,
+        order: continuation::Order,
         force: bool,
         picks: Vec<Pick>,
         cx: &mut Context<Self>,
@@ -1747,11 +1747,11 @@ impl Player {
         // question nobody is asking any more. A cleared revision says the
         // same thing about the session: a fresh context or a stream rebuild
         // resets it, and a batch picked for the queue that was playing then
-        // has no business being appended to this one. `similar` goes the same way,
+        // has no business being appended to this one. `order` goes the same way,
         // since a batch the radio drew is the wrong twenty tracks for a queue
         // that has since gone back to browse order.
         if mode != self.settings.session.continuation
-            || similar != self.similar_order()
+            || order != self.queue_order()
             || self.continued_rev.is_none()
             || self.session.is_none()
         {
@@ -1876,6 +1876,17 @@ impl Player {
     /// to do it. What the radio draw runs off rather than a mode of its own.
     fn similar_order(&self) -> bool {
         self.settings.session.shuffle && self.shuffle_mode() == ShuffleMode::Similar
+    }
+
+    /// The order the queue is in, for the continuation draw to follow.
+    fn queue_order(&self) -> continuation::Order {
+        if !self.settings.session.shuffle {
+            continuation::Order::Browse
+        } else if self.shuffle_mode() == ShuffleMode::Similar {
+            continuation::Order::Similar
+        } else {
+            continuation::Order::Random
+        }
     }
 
     /// Resolve a batch to playable keys, each with the group its pick asked
@@ -3857,7 +3868,9 @@ mod tests {
             true,
             false
         ));
-        assert!(continuation::provider(continuation::Mode::Off, true).is_none());
+        assert!(
+            continuation::provider(continuation::Mode::Off, continuation::Order::Similar).is_none()
+        );
         assert!(!similar_draw_now(
             continuation::Mode::Continue,
             true,

@@ -1188,6 +1188,7 @@ actions!(
         OpenWelcome,
         OpenAbout,
         OpenEqualizer,
+        OpenPresetPicker,
         NextTrack,
         PreviousTrack,
         StopPlayback,
@@ -1329,6 +1330,9 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &OpenConsole, cx| crate::console_window::open(cx));
     cx.on_action(|_: &OpenTasks, cx| crate::tasks_window::open(cx));
     cx.on_action(|_: &OpenEqualizer, cx| crate::eq_window::open(cx));
+    cx.on_action(|_: &OpenPresetPicker, cx| {
+        crate::milkdrop_picker::open(Box::new(crate::backdrop_visual::BackdropHost), cx)
+    });
     cx.on_action(|_: &OpenWelcome, cx| {
         with_front_workspace(cx, |ws, _, cx| {
             crate::startup::welcome_window::open(ws.state.clone(), cx);

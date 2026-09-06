@@ -54,8 +54,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    canvas, div, prelude::*, px, AnyElement, App, Entity, UserShaderChain, UserShaderId,
-    UserShaderPass, UserTextureId, Window,
+    canvas, div, prelude::*, px, AnyElement, App, Entity, SharedString, UserShaderChain,
+    UserShaderId, UserShaderPass, UserTextureId, Window,
 };
 
 use rox_core::settings::{self, BackdropVisualConfig, MilkdropColor, Settings};
@@ -63,9 +63,11 @@ use rox_design::palette::{self, Mode};
 use rox_milkdrop::library::Shuffle;
 use rox_milkdrop::{Command, Engine, EngineOptions, Event, PresetLibrary, Rotation, Status};
 use rox_panel_api::panel::shader as surface;
+use rox_panel_api::preset_browser::{
+    find_folder_by_relative, folder_label, relative_to_roots, PresetHost,
+};
 use rox_panel_kit::fade::{self, Fade};
 use rox_panel_kit::grade::{self, Grade, GradeMode};
-use rox_panel_kit::PickRow;
 use rox_services::player::Player;
 
 /// The smallest and largest render each side gets. The floor keeps a window
@@ -117,11 +119,23 @@ fn fs_user(uv: vec2<f32>) -> vec4<f32> {
     let fill = max(bounds.x / frame_size.x, bounds.y / frame_size.y);
     let covered = frame_size * fill;
     let margin = (covered - bounds) * 0.5;
-    let source = clamp((uv * bounds + margin) / covered, vec2<f32>(0.0), vec2<f32>(1.0));
+    var source = clamp((uv * bounds + margin) / covered, vec2<f32>(0.0), vec2<f32>(1.0));
+    // Slots 14 and 15 mirror the sample, which mirrors the frame.
+    if (params.signals[3].z > 0.5) {
+        source.x = 1.0 - source.x;
+    }
+    if (params.signals[3].w > 0.5) {
+        source.y = 1.0 - source.y;
+    }
     let graded = grade(textureSample(frame, samp, source).rgb);
     return vec4<f32>(graded * weight, weight);
 }
 ";
+
+/// The signal slots the flips ride in, past the grade's, the same two
+/// the Milkdrop panel's shader reads.
+const SLOT_FLIP_H: usize = 14;
+const SLOT_FLIP_V: usize = 15;
 
 /// One window's texture and compiled chain. Both belong to the window that
 /// handed them out, so there's one of these per window painting the layer.
@@ -202,20 +216,25 @@ struct Visual {
     /// whether the settings moved with one compare rather than re-sending
     /// every command every frame.
     applied: Option<Applied>,
-    /// The library as the Appearance page's picker lists it, built once
-    /// per scan and shared from there: ten thousand rows is not something
-    /// to rebuild per settings render.
-    rows: Option<Arc<Vec<PickRow>>>,
+    /// Every folder in the scan that holds presets, and the rotation
+    /// picker's row for each, worked out once per scan. See
+    /// [`rotation_folders`].
+    folders: Option<Vec<PathBuf>>,
+    folder_options: Option<Arc<Vec<(String, SharedString)>>>,
 }
 
 /// The slice of the config that goes to the worker as commands, plus the
 /// favorites edit it was resolved against.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct Applied {
     favorites_only: bool,
     lists_gen: u64,
     locked: bool,
     duration_secs: f64,
+    fps: u32,
+    beat_sensitivity: f32,
+    hard_cuts: bool,
+    rotation_folder: Option<String>,
 }
 
 impl Applied {
@@ -225,18 +244,111 @@ impl Applied {
             lists_gen: settings::milkdrop_gen(),
             locked: config.locked,
             duration_secs: config.duration_secs,
+            fps: config.fps,
+            beat_sensitivity: config.beat_sensitivity,
+            hard_cuts: config.hard_cuts,
+            rotation_folder: config.rotation_folder.clone(),
         }
     }
 }
 
 /// What the config's rotation means to the engine: the favorites while
-/// the switch is on, the whole library otherwise. The backdrop has no
-/// folder pick; the panel's rotation is a panel's business.
-fn rotation(config: &BackdropVisualConfig) -> Rotation {
+/// the switch is on, the picked folder where the scan holds it, the
+/// whole library otherwise. The same reading the panel makes of its own
+/// config.
+fn rotation(visual: &mut Visual, config: &BackdropVisualConfig) -> Rotation {
     if config.favorites_only {
-        Rotation::Set(settings::milkdrop_favorites())
-    } else {
-        Rotation::All
+        return Rotation::Set(settings::milkdrop_favorites());
+    }
+    match rotation_dir(visual, config) {
+        Some(folder) => Rotation::Folder(folder),
+        None => Rotation::All,
+    }
+}
+
+/// The folder the config's rotation names on this machine, found in the
+/// scan by its path under a root and then by its name. None with no
+/// pick, or a pick this scan doesn't hold, which rotates everything the
+/// way a deleted folder always did.
+fn rotation_dir(visual: &mut Visual, config: &BackdropVisualConfig) -> Option<PathBuf> {
+    let relative = config.rotation_folder.as_deref()?;
+    let roots = library(visual).roots().to_vec();
+    find_folder_by_relative(folders(visual), &roots, relative)
+}
+
+/// The scan's folders, worked out once per scan.
+fn folders(visual: &mut Visual) -> &Vec<PathBuf> {
+    if visual.folders.is_none() {
+        visual.folders = Some(library(visual).folders());
+    }
+    visual.folders.as_ref().expect("just listed")
+}
+
+/// Replace the held library, and with it everything worked out of it.
+fn set_library(visual: &mut Visual, library: PresetLibrary) {
+    visual.library = Some(library);
+    visual.folders = None;
+    visual.folder_options = None;
+}
+
+/// What the Appearance page's rotation picker offers past All and
+/// Favorites: every folder in the scan that holds presets, keyed by its
+/// path under its root and labelled the same way. Built once per scan and
+/// shared from there.
+pub(crate) fn rotation_folders() -> Arc<Vec<(String, SharedString)>> {
+    let mut guard = visual();
+    let visual = guard.as_mut().expect("initialised on first lock");
+    if let Some(options) = visual.folder_options.clone() {
+        return options;
+    }
+    let roots = library(visual).roots().to_vec();
+    let options: Vec<(String, SharedString)> = folders(visual)
+        .iter()
+        .filter_map(|folder| {
+            let key = relative_to_roots(folder, &roots)?;
+            Some((key, SharedString::from(folder_label(folder, &roots))))
+        })
+        .collect();
+    let options = Arc::new(options);
+    visual.folder_options = Some(options.clone());
+    options
+}
+
+/// The rotation picker's reading of the config, and what it writes back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum BackdropRotation {
+    All,
+    Favorites,
+    /// A folder by its path under a scan root.
+    Folder(String),
+}
+
+impl BackdropRotation {
+    pub(crate) fn of(config: &BackdropVisualConfig) -> BackdropRotation {
+        if config.favorites_only {
+            return BackdropRotation::Favorites;
+        }
+        match config.rotation_folder.clone() {
+            Some(folder) => BackdropRotation::Folder(folder),
+            None => BackdropRotation::All,
+        }
+    }
+
+    /// Write the pick into the config: All clears the folder too, since a
+    /// folder that comes back when Favorites is switched off is the
+    /// panel's behaviour, but All is a choice to rotate everything.
+    pub(crate) fn apply(self, config: &mut BackdropVisualConfig) {
+        match self {
+            BackdropRotation::All => {
+                config.favorites_only = false;
+                config.rotation_folder = None;
+            }
+            BackdropRotation::Favorites => config.favorites_only = true,
+            BackdropRotation::Folder(folder) => {
+                config.favorites_only = false;
+                config.rotation_folder = Some(folder);
+            }
+        }
     }
 }
 
@@ -344,48 +456,38 @@ fn library(visual: &mut Visual) -> &PresetLibrary {
     visual.library.as_ref().expect("just scanned")
 }
 
-/// The picker's rows: every preset by file stem, its folder as the hidden
-/// search term so "fractal" finds a pack's whole category. Built once
-/// per scan; the picker holds the `Arc`.
-pub(crate) fn preset_rows() -> Arc<Vec<PickRow>> {
+/// Every preset the backdrop's library holds, for the picker. Scanned on
+/// first ask like everything else here.
+pub(crate) fn presets() -> Vec<PathBuf> {
     let mut guard = visual();
     let visual = guard.as_mut().expect("initialised on first lock");
-    if let Some(rows) = visual.rows.clone() {
-        return rows;
-    }
-    let roots = library(visual).roots().to_vec();
-    let rows: Vec<PickRow> = library(visual)
-        .presets()
-        .iter()
-        .map(|path| {
-            let folder = roots
-                .iter()
-                .filter_map(|root| path.parent()?.strip_prefix(root).ok())
-                .map(|relative| relative.to_string_lossy().to_lowercase())
-                .next()
-                .unwrap_or_default();
-            PickRow {
-                label: preset_label(path).into(),
-                value: Some(path.to_string_lossy().into_owned().into()),
-                terms: if folder.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![folder.into()]
-                },
-            }
-        })
-        .collect();
-    let rows = Arc::new(rows);
-    visual.rows = Some(rows.clone());
-    rows
+    library(visual).presets().to_vec()
 }
 
-/// What the picker and the readout call a preset: its file stem, the
-/// same name the panel's banner uses.
-fn preset_label(path: &std::path::Path) -> String {
-    path.file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+/// The backdrop as the preset picker sees it. A unit: the backdrop is a
+/// static, so there's nothing to hold, and every call reads it fresh.
+pub(crate) struct BackdropHost;
+
+impl PresetHost for BackdropHost {
+    fn title(&self, _cx: &App) -> SharedString {
+        rox_i18n::t!("milkdrop-picker-backdrop")
+    }
+
+    fn presets(&self, _cx: &mut App) -> Vec<PathBuf> {
+        presets()
+    }
+
+    fn current(&self, _cx: &App) -> Option<PathBuf> {
+        current_preset()
+    }
+
+    fn pick(&self, path: PathBuf, cx: &mut App) {
+        pick_preset(path, cx);
+    }
+
+    fn random(&self, cx: &mut App) {
+        random_preset(cx);
+    }
 }
 
 /// Put a preset up, from the Appearance page. Works with nothing
@@ -418,8 +520,9 @@ pub(crate) fn random_preset(cx: &mut App) {
         let visual = guard.as_mut().expect("initialised on first lock");
         let config = settings::backdrop_visual();
         let current = visual.current.clone();
+        let rotation = rotation(visual, &config);
         let library = library(visual);
-        let mut indices = library.rotation_indices(&rotation(&config));
+        let mut indices = library.rotation_indices(&rotation);
         if indices.is_empty() {
             indices = library.rotation_indices(&Rotation::All);
         }
@@ -736,6 +839,8 @@ fn paint(bounds: gpui::Bounds<gpui::Pixels>, window: &mut Window, cx: &mut App, 
     let meta = surface::meta_slots(window, cx);
     let mut signals = [0.0f32; 16];
     signals[grade::SLOT_FADE] = weight(config.strength, opacity);
+    signals[SLOT_FLIP_H] = if config.flip_horizontal { 1.0 } else { 0.0 };
+    signals[SLOT_FLIP_V] = if config.flip_vertical { 1.0 } else { 0.0 };
     // The grade reads the app-wide theme rather than any panel's scope:
     // this layer sits under every panel, so it's the window's theme it
     // has to agree with. The resolved palette carries the cover tint when
@@ -782,15 +887,18 @@ fn start(visual: &mut Visual, player: &Entity<Player>, size: (u32, u32), cx: &Ap
     let engine = Engine::spawn(EngineOptions {
         feed: player.read(cx).feed(),
         library,
-        fps: settings::BACKDROP_VISUAL_FPS,
+        fps: config.fps,
         width: size.0,
         height: size.1,
     });
     // The knobs the config carries, pushed once at startup so a restart
     // comes up the way it was left rather than at projectM's defaults.
     engine.send(Command::SetPresetDuration(config.duration_secs));
+    engine.send(Command::SetBeatSensitivity(config.beat_sensitivity));
+    engine.send(Command::SetHardCut(config.hard_cuts));
     engine.send(Command::SetLocked(config.locked));
-    engine.send(Command::SetRotation(rotation(&config)));
+    let rotation = rotation(visual, &config);
+    engine.send(Command::SetRotation(rotation));
     // The preset that was picked or locked last time comes back up. An
     // unlocked backdrop moves on from it after the duration, which is
     // what unlocked means; it still starts where it was left.
@@ -813,12 +921,13 @@ fn start(visual: &mut Visual, player: &Entity<Player>, size: (u32, u32), cx: &Ap
 }
 
 /// Push whatever moved in the settings since the worker last heard: the
-/// lock, the duration, the favorites switch, or the favorites list itself.
+/// lock, the duration, the frame rate, the favorites switch, or the
+/// favorites list itself.
 /// One compare per paint, and nothing goes down the channel while nothing
 /// changed.
 fn sync(visual: &mut Visual, engine: &Engine, config: &BackdropVisualConfig) {
     let want = Applied::of(config);
-    let Some(had) = visual.applied else {
+    let Some(had) = visual.applied.clone() else {
         visual.applied = Some(want);
         return;
     };
@@ -830,6 +939,15 @@ fn sync(visual: &mut Visual, engine: &Engine, config: &BackdropVisualConfig) {
     }
     if had.duration_secs != want.duration_secs {
         engine.send(Command::SetPresetDuration(want.duration_secs));
+    }
+    if had.fps != want.fps {
+        engine.send(Command::SetFps(want.fps));
+    }
+    if had.beat_sensitivity != want.beat_sensitivity {
+        engine.send(Command::SetBeatSensitivity(want.beat_sensitivity));
+    }
+    if had.hard_cuts != want.hard_cuts {
+        engine.send(Command::SetHardCut(want.hard_cuts));
     }
     if had.lists_gen != want.lists_gen {
         // A folder edit is the one thing that earns a rescan. A new
@@ -845,17 +963,21 @@ fn sync(visual: &mut Visual, engine: &Engine, config: &BackdropVisualConfig) {
         };
         grown.extend(&settings::milkdrop_favorites());
         if grown.presets().len() != before || grown.roots() != library.roots() {
-            visual.library = Some(grown.clone());
-            visual.rows = None;
+            set_library(visual, grown.clone());
+            let rotation = rotation(visual, config);
             engine.send(Command::SetLibrary {
                 library: grown,
-                rotation: rotation(config),
+                rotation,
             });
         } else if config.favorites_only {
-            engine.send(Command::SetRotation(rotation(config)));
+            let rotation = rotation(visual, config);
+            engine.send(Command::SetRotation(rotation));
         }
-    } else if had.favorites_only != want.favorites_only {
-        engine.send(Command::SetRotation(rotation(config)));
+    } else if had.favorites_only != want.favorites_only
+        || had.rotation_folder != want.rotation_folder
+    {
+        let rotation = rotation(visual, config);
+        engine.send(Command::SetRotation(rotation));
     }
     visual.applied = Some(want);
 }
@@ -879,6 +1001,7 @@ fn drain(visual: &mut Visual, engine: &Engine, config: &BackdropVisualConfig, cx
                     settings::note_backdrop_visual(noted.clone());
                     cx.defer(move |_| Settings::update(move |s| s.backdrop_visual = noted));
                 }
+                rox_panels::milkdrop::thumbnails().loaded(&path);
                 visual.current = Some(path);
                 wake(cx);
             }

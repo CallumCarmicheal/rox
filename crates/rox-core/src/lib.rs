@@ -21,3 +21,10 @@ pub const APP_ID: &str = "rox";
 /// behind it. Every surface that plays out of a list caps the same way,
 /// the quick-play modal and the stats window included.
 pub const QUEUE_CAP: usize = 1000;
+
+/// Play a view shuffled: this many tracks are drawn at random across the
+/// whole view to seed the session, and continuation keeps drawing from
+/// whatever the draw left. A window off the top of the view would only ever
+/// shuffle the first few artists of a big library, so the seed samples the
+/// list instead of slicing it.
+pub const SHUFFLE_SEED: usize = 100;

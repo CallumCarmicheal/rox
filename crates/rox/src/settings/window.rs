@@ -31,6 +31,7 @@ use gpui_component::scroll::Scrollbar;
 use gpui_component::text::TextView;
 use gpui_component::{Root, Sizable as _};
 
+use crate::backdrop_visual::BackdropRotation;
 use crate::convert;
 use crate::embeddings;
 use crate::integrations::tray;
@@ -62,7 +63,7 @@ use rox_panel_kit::ui::{
     self as settings_ui, chord, dialog_button, grid_columns, icon_button, kbd, kbd_line, sidebar,
     small_button, PageBody, Query, Rows, Section, Seg, SidesScrub, SECTION_GAP,
 };
-use rox_panel_kit::{search_picker, ScrubState};
+use rox_panel_kit::ScrubState;
 use rox_playback::continuation;
 use rox_playback::engine;
 use rox_playback::output;
@@ -419,6 +420,8 @@ struct SettingsWindow {
     backdrop_visual_strength_scrub: ScrubState,
     backdrop_visual_scale_scrub: ScrubState,
     backdrop_visual_duration_scrub: ScrubState,
+    backdrop_visual_fps_scrub: ScrubState,
+    backdrop_visual_sensitivity_scrub: ScrubState,
     backdrop_visual_persist_gen: u64,
     /// The app font size's working copy: what the Typography slider shows
     /// and writes through [`palette::set_app_font_size`].
@@ -1210,6 +1213,8 @@ impl SettingsWindow {
             backdrop_visual_strength_scrub: ScrubState::default(),
             backdrop_visual_scale_scrub: ScrubState::default(),
             backdrop_visual_duration_scrub: ScrubState::default(),
+            backdrop_visual_fps_scrub: ScrubState::default(),
+            backdrop_visual_sensitivity_scrub: ScrubState::default(),
             backdrop_visual_persist_gen: 0,
             font_size: settings.app_font_size,
             frame: appearance_frame,
@@ -1780,9 +1785,9 @@ impl SettingsWindow {
         self.backdrop_visual_switched(config, cx);
     }
 
-    fn set_backdrop_visual_favorites(&mut self, on: bool, cx: &mut Context<Self>) {
+    fn set_backdrop_visual_rotation(&mut self, choice: BackdropRotation, cx: &mut Context<Self>) {
         let mut config = settings::backdrop_visual();
-        config.favorites_only = on;
+        choice.apply(&mut config);
         self.backdrop_visual_switched(config, cx);
     }
 
@@ -1815,6 +1820,36 @@ impl SettingsWindow {
         let mut config = settings::backdrop_visual();
         config.duration_secs = f64::from(seconds.round());
         self.backdrop_visual_edited(config, cx);
+    }
+
+    fn set_backdrop_visual_sensitivity(&mut self, value: f32, cx: &mut Context<Self>) {
+        let mut config = settings::backdrop_visual();
+        config.beat_sensitivity = value;
+        self.backdrop_visual_edited(config, cx);
+    }
+
+    fn set_backdrop_visual_hard_cuts(&mut self, on: bool, cx: &mut Context<Self>) {
+        let mut config = settings::backdrop_visual();
+        config.hard_cuts = on;
+        self.backdrop_visual_switched(config, cx);
+    }
+
+    fn set_backdrop_visual_fps(&mut self, fps: f32, cx: &mut Context<Self>) {
+        let mut config = settings::backdrop_visual();
+        config.fps = fps.round() as u32;
+        self.backdrop_visual_edited(config, cx);
+    }
+
+    fn set_backdrop_visual_flip_horizontal(&mut self, on: bool, cx: &mut Context<Self>) {
+        let mut config = settings::backdrop_visual();
+        config.flip_horizontal = on;
+        self.backdrop_visual_switched(config, cx);
+    }
+
+    fn set_backdrop_visual_flip_vertical(&mut self, on: bool, cx: &mut Context<Self>) {
+        let mut config = settings::backdrop_visual();
+        config.flip_vertical = on;
+        self.backdrop_visual_switched(config, cx);
     }
 
     /// Star or unstar the preset the backdrop is showing. The list is
@@ -2419,122 +2454,57 @@ impl SettingsWindow {
             rox_i18n::t!("settings-appearance-section-milkdrop"),
             None,
             move |mut rows| {
+                rows = rows.keyed(
+                    "settings-appearance-milkdrop-enabled",
+                    &["milkdrop", "visual", "visualizer", "background"],
+                    panel::toggle(config.enabled, Self::set_backdrop_visual_enabled, cx),
+                );
+                // Everything under the switch is about a visual that's
+                // running; with it off the rows would only be furniture.
+                if !config.enabled {
+                    return rows;
+                }
                 rows = rows
-                    .keyed(
-                        "settings-appearance-milkdrop-enabled",
-                        &["milkdrop", "visual", "visualizer", "background"],
-                        panel::toggle(config.enabled, Self::set_backdrop_visual_enabled, cx),
-                    )
-                    .keyed(
-                        "settings-appearance-milkdrop-strength",
-                        &["milkdrop", "visual", "opacity", "blend", "intensity"],
-                        settings_ui::slider_edit(
-                            &self.backdrop_visual_strength_scrub,
-                            &self.value_edit,
-                            config.strength,
-                            Self::set_backdrop_visual_strength,
-                            cx,
-                        ),
-                    )
-                    .keyed(
-                        "settings-appearance-milkdrop-scale",
-                        &["milkdrop", "visual", "resolution", "performance", "cost"],
-                        settings_ui::scalar(
-                            &self.backdrop_visual_scale_scrub,
-                            &self.value_edit,
-                            config.scale * 100.0,
-                            settings_ui::span(10.0, 100.0, "%").hard(),
-                            Self::set_backdrop_visual_scale,
-                            cx,
-                        ),
-                    )
-                    .keyed(
-                        "settings-appearance-milkdrop-color",
-                        &["milkdrop", "light", "dark", "theme", "palette", "invert"],
-                        panel::choices_shared(
-                            &[
-                                (
-                                    rox_i18n::t!("milkdrop-color-preset"),
-                                    settings::MilkdropColor::Preset,
-                                ),
-                                (
-                                    rox_i18n::t!("milkdrop-color-theme"),
-                                    settings::MilkdropColor::Theme,
-                                ),
-                                (
-                                    rox_i18n::t!("milkdrop-color-palette"),
-                                    settings::MilkdropColor::Palette,
-                                ),
-                                (
-                                    rox_i18n::t!("milkdrop-color-cover"),
-                                    settings::MilkdropColor::Cover,
-                                ),
-                            ],
-                            config.color,
-                            Self::set_backdrop_visual_color,
-                            cx,
-                        ),
-                    )
-                    .keyed(
-                        "settings-appearance-milkdrop-favorites",
-                        &["milkdrop", "favorites", "starred", "shuffle"],
-                        panel::toggle(
-                            config.favorites_only,
-                            Self::set_backdrop_visual_favorites,
-                            cx,
-                        ),
-                    )
-                    // Favorites picked with nothing starred is the one pick
-                    // that does something other than what it says.
-                    .when(config.favorites_only && favorites == 0, |rows| {
-                        rows.custom(&["milkdrop", "favorites"], || {
-                            div()
-                                .text_xs()
-                                .text_color(palette::text_muted())
-                                .child(rox_i18n::t!("milkdrop-no-favorites"))
-                                .into_any_element()
-                        })
-                    })
-                    .keyed(
-                        "settings-appearance-milkdrop-duration",
-                        &["milkdrop", "preset", "seconds", "switch", "rotation"],
-                        settings_ui::scalar(
-                            &self.backdrop_visual_duration_scrub,
-                            &self.value_edit,
-                            config.duration_secs as f32,
-                            settings_ui::span(1.0, 120.0, " s").hard(),
-                            Self::set_backdrop_visual_duration,
-                            cx,
-                        ),
-                    )
-                    .keyed(
-                        "settings-appearance-milkdrop-locked",
-                        &["milkdrop", "preset", "lock", "hold", "stay"],
-                        panel::toggle(config.locked, Self::set_backdrop_visual_locked, cx),
-                    )
                     // The picker works with nothing playing: the worker
                     // takes a load while parked, and one that hasn't
                     // started yet gets the pick at start. Random is
-                    // chosen here for the same reason.
+                    // chosen here for the same reason. The row reads the
+                    // preset that's up and opens the picker window over
+                    // the backdrop; the list itself is too big for a row.
                     .keyed(
                         "settings-appearance-milkdrop-preset",
-                        &["milkdrop", "preset", "now showing", "pick", "search"],
-                        search_picker(
-                            "milkdrop-backdrop-preset",
-                            crate::backdrop_visual::preset_rows(),
-                            showing,
-                            current
-                                .as_ref()
-                                .map(|path| path.to_string_lossy().into_owned().into()),
-                            rox_i18n::t!("milkdrop-filter-presets"),
-                            rox_i18n::t!("picker-no-matches"),
-                            |_, value, cx| {
-                                if let Some(path) = value {
-                                    crate::backdrop_visual::pick_preset(PathBuf::from(path), cx);
-                                }
-                            },
-                            cx,
-                        ),
+                        &[
+                            "milkdrop",
+                            "preset",
+                            "now showing",
+                            "pick",
+                            "search",
+                            "choose",
+                        ],
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(tokens::SPACE_SM)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(palette::text_muted())
+                                    .child(showing),
+                            )
+                            .child(small_button(
+                                rox_i18n::t!("milkdrop-choose"),
+                                icons::SEARCH,
+                                false,
+                                |_, _, cx| {
+                                    crate::milkdrop_picker::open(
+                                        Box::new(crate::backdrop_visual::BackdropHost),
+                                        cx,
+                                    )
+                                },
+                            )),
                     )
                     .custom(
                         &["milkdrop", "preset", "random", "favorite", "reveal"],
@@ -2578,6 +2548,178 @@ impl SettingsWindow {
                                 ))
                                 .into_any_element()
                         },
+                    )
+                    .keyed(
+                        "settings-appearance-milkdrop-locked",
+                        &["milkdrop", "preset", "lock", "hold", "stay"],
+                        panel::toggle(config.locked, Self::set_backdrop_visual_locked, cx),
+                    )
+                    .keyed(
+                        "settings-appearance-milkdrop-duration",
+                        &["milkdrop", "preset", "seconds", "switch", "rotation"],
+                        settings_ui::scalar(
+                            &self.backdrop_visual_duration_scrub,
+                            &self.value_edit,
+                            config.duration_secs as f32,
+                            settings_ui::span(1.0, 120.0, " s").hard(),
+                            Self::set_backdrop_visual_duration,
+                            cx,
+                        ),
+                    )
+                    // The rotation options: everything, the favorites,
+                    // then every folder in the scan, the panel's list.
+                    .keyed(
+                        "settings-appearance-milkdrop-rotation",
+                        &[
+                            "milkdrop",
+                            "favorites",
+                            "starred",
+                            "shuffle",
+                            "folder",
+                            "rotation",
+                        ],
+                        {
+                            let mut rotations: Vec<(BackdropRotation, SharedString)> = vec![
+                                (BackdropRotation::All, rox_i18n::t!("milkdrop-rotation-all")),
+                                (
+                                    BackdropRotation::Favorites,
+                                    rox_i18n::t!(
+                                        "milkdrop-rotation-favorites",
+                                        count = favorites.to_string()
+                                    ),
+                                ),
+                            ];
+                            rotations.extend(
+                                crate::backdrop_visual::rotation_folders().iter().map(
+                                    |(key, label)| {
+                                        (BackdropRotation::Folder(key.clone()), label.clone())
+                                    },
+                                ),
+                            );
+                            panel::picker(
+                                "milkdrop-backdrop-rotation",
+                                BackdropRotation::of(&config),
+                                rotations,
+                                false,
+                                Self::set_backdrop_visual_rotation,
+                                cx,
+                            )
+                        },
+                    )
+                    // Favorites picked with nothing starred is the one pick
+                    // that does something other than what it says.
+                    .when(config.favorites_only && favorites == 0, |rows| {
+                        rows.custom(&["milkdrop", "favorites"], || {
+                            div()
+                                .text_xs()
+                                .text_color(palette::text_muted())
+                                .child(rox_i18n::t!("milkdrop-no-favorites"))
+                                .into_any_element()
+                        })
+                    })
+                    // From here the rows are the panel's Tuning page in
+                    // the panel's order, so the two visuals tune alike.
+                    .keyed(
+                        "settings-appearance-milkdrop-beat-sensitivity",
+                        &["milkdrop", "beat", "sensitivity", "detect"],
+                        settings_ui::scalar(
+                            &self.backdrop_visual_sensitivity_scrub,
+                            &self.value_edit,
+                            config.beat_sensitivity,
+                            settings_ui::span(0.0, 5.0, "").decimals(2).hard(),
+                            Self::set_backdrop_visual_sensitivity,
+                            cx,
+                        ),
+                    )
+                    .keyed(
+                        "settings-appearance-milkdrop-hard-cuts",
+                        &["milkdrop", "beat", "cut", "switch"],
+                        panel::toggle(config.hard_cuts, Self::set_backdrop_visual_hard_cuts, cx),
+                    )
+                    .keyed(
+                        "settings-appearance-milkdrop-fps",
+                        &["milkdrop", "visual", "frame rate", "performance", "cost"],
+                        settings_ui::scalar(
+                            &self.backdrop_visual_fps_scrub,
+                            &self.value_edit,
+                            config.fps as f32,
+                            settings_ui::span(
+                                settings::BACKDROP_VISUAL_FPS_MIN as f32,
+                                settings::BACKDROP_VISUAL_FPS_MAX as f32,
+                                " fps",
+                            )
+                            .hard(),
+                            Self::set_backdrop_visual_fps,
+                            cx,
+                        ),
+                    )
+                    .keyed(
+                        "settings-appearance-milkdrop-scale",
+                        &["milkdrop", "visual", "resolution", "performance", "cost"],
+                        settings_ui::scalar(
+                            &self.backdrop_visual_scale_scrub,
+                            &self.value_edit,
+                            config.scale * 100.0,
+                            settings_ui::span(10.0, 100.0, "%").hard(),
+                            Self::set_backdrop_visual_scale,
+                            cx,
+                        ),
+                    )
+                    .keyed(
+                        "settings-appearance-milkdrop-strength",
+                        &["milkdrop", "visual", "opacity", "blend", "intensity"],
+                        settings_ui::slider_edit(
+                            &self.backdrop_visual_strength_scrub,
+                            &self.value_edit,
+                            config.strength,
+                            Self::set_backdrop_visual_strength,
+                            cx,
+                        ),
+                    )
+                    .keyed(
+                        "settings-appearance-milkdrop-color",
+                        &["milkdrop", "light", "dark", "theme", "palette", "invert"],
+                        panel::choices_shared(
+                            &[
+                                (
+                                    rox_i18n::t!("milkdrop-color-preset"),
+                                    settings::MilkdropColor::Preset,
+                                ),
+                                (
+                                    rox_i18n::t!("milkdrop-color-theme"),
+                                    settings::MilkdropColor::Theme,
+                                ),
+                                (
+                                    rox_i18n::t!("milkdrop-color-palette"),
+                                    settings::MilkdropColor::Palette,
+                                ),
+                                (
+                                    rox_i18n::t!("milkdrop-color-cover"),
+                                    settings::MilkdropColor::Cover,
+                                ),
+                            ],
+                            config.color,
+                            Self::set_backdrop_visual_color,
+                            cx,
+                        ),
+                    )
+                    .keyed(
+                        "settings-appearance-milkdrop-flip-horizontal",
+                        &["milkdrop", "flip", "mirror", "horizontal"],
+                        panel::toggle(
+                            config.flip_horizontal,
+                            Self::set_backdrop_visual_flip_horizontal,
+                            cx,
+                        ),
+                    )
+                    .keyed(
+                        "settings-appearance-milkdrop-flip-vertical",
+                        &["milkdrop", "flip", "mirror", "vertical"],
+                        panel::toggle(
+                            config.flip_vertical,
+                            Self::set_backdrop_visual_flip_vertical,
+                            cx,
+                        ),
                     );
                 match error {
                     Some(error) => rows.custom(&["milkdrop", "visual", "error"], || {
@@ -2710,20 +2852,25 @@ impl SettingsWindow {
             rox_i18n::t!("settings-shader-section-overlay"),
             None,
             move |mut rows| {
+                rows = rows.keyed(
+                    "settings-shader-overlay-enabled",
+                    &[
+                        "shader",
+                        "wgsl",
+                        "post process",
+                        "effect",
+                        "crt",
+                        "overlay",
+                        "screen",
+                    ],
+                    panel::toggle(enabled, Self::set_post_shader_enabled, cx),
+                );
+                // The source, its scope and its error are all about a
+                // shader that's running; off, the switch is the whole row.
+                if !enabled {
+                    return rows;
+                }
                 rows = rows
-                    .keyed(
-                        "settings-shader-overlay-enabled",
-                        &[
-                            "shader",
-                            "wgsl",
-                            "post process",
-                            "effect",
-                            "crt",
-                            "overlay",
-                            "screen",
-                        ],
-                        panel::toggle(enabled, Self::set_post_shader_enabled, cx),
-                    )
                     .custom(
                         &[
                             "shader",
@@ -3547,12 +3694,18 @@ impl SettingsWindow {
             rox_i18n::t!("settings-shader-section-backdrop"),
             None,
             move |mut rows| {
+                rows = rows.keyed(
+                    "settings-shader-backdrop-enabled",
+                    &["shader", "wgsl", "backdrop", "wash", "art", "bokeh"],
+                    panel::toggle(enabled, Self::set_backdrop_enabled, cx),
+                );
+                // The source, its scope, its error and its routes are all
+                // about a shader that's running; off, the switch is the
+                // whole row.
+                if !enabled {
+                    return rows;
+                }
                 rows = rows
-                    .keyed(
-                        "settings-shader-backdrop-enabled",
-                        &["shader", "wgsl", "backdrop", "wash", "art", "bokeh"],
-                        panel::toggle(enabled, Self::set_backdrop_enabled, cx),
-                    )
                     .custom(
                         &[
                             "shader",
@@ -4700,27 +4853,39 @@ impl SettingsWindow {
                         &["release", "version", "upgrade"],
                         panel::toggle(self.check_updates, Self::set_check_updates, cx),
                     )
-                    .keyed(
-                        "settings-application-prerelease-updates",
-                        &[
-                            "release",
-                            "candidate",
-                            "rc",
-                            "prerelease",
-                            "beta",
-                            "preview",
-                        ],
-                        panel::toggle(self.prerelease_updates, Self::set_prerelease_updates, cx),
-                    )
-                    // Meaningless where the install can't replace itself (a
-                    // distro package, a read-only folder), so the row only
-                    // exists where the updater can act on it.
-                    .when(updater::can_update(), |rows| {
+                    // Which releases to take and whether to fetch them only
+                    // mean something while something's checking.
+                    .when(self.check_updates, |rows| {
                         rows.keyed(
-                            "settings-application-download-updates",
-                            &["release", "download", "auto", "update"],
-                            panel::toggle(self.download_updates, Self::set_download_updates, cx),
+                            "settings-application-prerelease-updates",
+                            &[
+                                "release",
+                                "candidate",
+                                "rc",
+                                "prerelease",
+                                "beta",
+                                "preview",
+                            ],
+                            panel::toggle(
+                                self.prerelease_updates,
+                                Self::set_prerelease_updates,
+                                cx,
+                            ),
                         )
+                        // Meaningless where the install can't replace itself (a
+                        // distro package, a read-only folder), so the row only
+                        // exists where the updater can act on it.
+                        .when(updater::can_update(), |rows| {
+                            rows.keyed(
+                                "settings-application-download-updates",
+                                &["release", "download", "auto", "update"],
+                                panel::toggle(
+                                    self.download_updates,
+                                    Self::set_download_updates,
+                                    cx,
+                                ),
+                            )
+                        })
                     })
                 },
             ))
@@ -4994,21 +5159,25 @@ impl SettingsWindow {
                             cx,
                         ),
                     )
-                    .keyed(
-                        "settings-integrations-scrobble-threshold",
-                        &["Last.fm", "Libre.fm", "ListenBrainz", "percent"],
-                        settings_ui::slider_edit(
-                            &self.threshold_scrub,
-                            &self.value_edit,
-                            threshold,
-                            |this: &mut Self, fraction, cx| {
-                                this.scrobbler
-                                    .update(cx, |s, cx| s.set_threshold(fraction, cx));
-                                cx.notify();
-                            },
-                            cx,
-                        ),
-                    )
+                    // The threshold is when a listen counts, and with
+                    // nothing counting it's a number about nothing.
+                    .when(scrobbling, |rows| {
+                        rows.keyed(
+                            "settings-integrations-scrobble-threshold",
+                            &["Last.fm", "Libre.fm", "ListenBrainz", "percent"],
+                            settings_ui::slider_edit(
+                                &self.threshold_scrub,
+                                &self.value_edit,
+                                threshold,
+                                |this: &mut Self, fraction, cx| {
+                                    this.scrobbler
+                                        .update(cx, |s, cx| s.set_threshold(fraction, cx));
+                                    cx.notify();
+                                },
+                                cx,
+                            ),
+                        )
+                    })
                 },
             ))
             .section(self.lastfm_section(q, cx))
@@ -5025,24 +5194,27 @@ impl SettingsWindow {
                         &["status", "now playing"],
                         panel::toggle(self.discord_enabled, Self::set_discord_enabled, cx),
                     )
-                    .keyed(
-                        "settings-integrations-discord-show-lastfm",
-                        &["link", "profile"],
-                        panel::toggle(
-                            self.discord_show_lastfm_button,
-                            Self::set_discord_show_lastfm_button,
-                            cx,
-                        ),
-                    )
-                    .keyed(
-                        "settings-integrations-discord-show-youtube",
-                        &["link", "video"],
-                        panel::toggle(
-                            self.discord_show_youtube_button,
-                            Self::set_discord_show_youtube_button,
-                            cx,
-                        ),
-                    )
+                    // The buttons live on a presence that's being shown.
+                    .when(self.discord_enabled, |rows| {
+                        rows.keyed(
+                            "settings-integrations-discord-show-lastfm",
+                            &["link", "profile"],
+                            panel::toggle(
+                                self.discord_show_lastfm_button,
+                                Self::set_discord_show_lastfm_button,
+                                cx,
+                            ),
+                        )
+                        .keyed(
+                            "settings-integrations-discord-show-youtube",
+                            &["link", "video"],
+                            panel::toggle(
+                                self.discord_show_youtube_button,
+                                Self::set_discord_show_youtube_button,
+                                cx,
+                            ),
+                        )
+                    })
                 },
             ))
             .section(self.icecast_section(q, cx))

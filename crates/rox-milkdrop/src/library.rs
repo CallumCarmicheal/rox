@@ -2,7 +2,8 @@
 //!
 //! A MilkDrop preset is a single `.milk` file, and a preset pack is a
 //! directory of a few thousand of them, sometimes nested a few levels deep
-//! with a `textures/` folder alongside. The user downloads packs themselves
+//! with a `textures/` folder alongside. The scan picks those folders up
+//! too, since projectM only searches the paths it's given. The user downloads packs themselves
 //! (the contract names the three worth having) and drops them under
 //! `milkdrop_dir()/presets`, so this is a plain filesystem walk over roots
 //! rox never wrote and can't assume the shape of.
@@ -42,7 +43,7 @@ pub enum Rotation {
     Set(Vec<PathBuf>),
 }
 
-/// The presets found under a set of roots, plus the texture directory
+/// The presets found under a set of roots, plus the texture directories
 /// projectM searches when a preset asks for an image.
 /// `PartialEq` so a rescan can tell whether anything actually changed before
 /// pushing a new list at the worker.
@@ -50,7 +51,7 @@ pub enum Rotation {
 pub struct PresetLibrary {
     roots: Vec<PathBuf>,
     presets: Vec<PathBuf>,
-    textures: Option<PathBuf>,
+    textures: Vec<PathBuf>,
 }
 
 impl PresetLibrary {
@@ -61,12 +62,22 @@ impl PresetLibrary {
     /// blank panel with projectM's idle preset is the right answer for that,
     /// not an error. Symlinks aren't followed, so a root that points at its
     /// own parent doesn't hang the scan.
+    ///
+    /// Every `textures/` directory met under the roots joins the search
+    /// list after `textures`, the app's own folder. projectM only ever looks
+    /// in the paths it's handed, never beside the preset file, and the big
+    /// packs ship their images inside the pack, so without this a pack
+    /// dropped into the presets folder renders its textured presets blank.
     pub fn scan(roots: &[PathBuf], textures: Option<PathBuf>) -> PresetLibrary {
         let mut presets = Vec::new();
+        let mut found_textures = Vec::new();
         for root in roots {
             for entry in WalkDir::new(root).follow_links(false).into_iter().flatten() {
-                if entry.file_type().is_file() && is_preset(entry.path()) {
+                let file_type = entry.file_type();
+                if file_type.is_file() && is_preset(entry.path()) {
                     presets.push(entry.into_path());
+                } else if file_type.is_dir() && is_textures_dir(entry.path()) {
+                    found_textures.push(entry.into_path());
                 }
             }
         }
@@ -74,6 +85,18 @@ impl PresetLibrary {
         // Overlapping roots are the user's to make, and hitting the same file
         // twice in a shuffle would just feel like a bug.
         presets.dedup();
+        found_textures.sort();
+        found_textures.dedup();
+
+        // The app's own folder goes first: projectM keeps the first file it
+        // finds under a name, so a texture the user put there wins over a
+        // pack's copy.
+        let mut textures: Vec<PathBuf> = textures.into_iter().collect();
+        for found in found_textures {
+            if !textures.contains(&found) {
+                textures.push(found);
+            }
+        }
 
         PresetLibrary {
             roots: roots.to_vec(),
@@ -114,8 +137,10 @@ impl PresetLibrary {
         &self.roots
     }
 
-    pub fn textures(&self) -> Option<&Path> {
-        self.textures.as_deref()
+    /// The directories projectM searches for a preset's images, in the
+    /// order it should search them.
+    pub fn textures(&self) -> &[PathBuf] {
+        &self.textures
     }
 
     /// Where `path` sits in the sorted list, so the worker can step forward
@@ -181,6 +206,12 @@ fn is_preset(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("milk"))
+}
+
+fn is_textures_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("textures"))
 }
 
 /// The shuffle behind `Command::NextPreset`.
@@ -310,8 +341,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let textures = dir.path().join("textures");
         let library = PresetLibrary::scan(&[dir.path().to_path_buf()], Some(textures.clone()));
-        assert_eq!(library.textures(), Some(textures.as_path()));
+        assert_eq!(library.textures(), &[textures]);
         assert_eq!(library.roots(), &[dir.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn scan_picks_up_texture_folders_shipped_inside_packs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let own = root.join("own-textures");
+        touch(&root.join("pack/presets/a.milk"));
+        touch(&root.join("pack/textures/001.jpg"));
+        touch(&root.join("other/Textures/b.png"));
+        touch(&root.join("other/textures.txt"));
+
+        let library = PresetLibrary::scan(&[root.to_path_buf()], Some(own.clone()));
+        assert_eq!(
+            library.textures(),
+            &[own, root.join("other/Textures"), root.join("pack/textures")]
+        );
+        assert_eq!(library.presets(), &[root.join("pack/presets/a.milk")]);
+    }
+
+    #[test]
+    fn a_texture_folder_named_explicitly_and_found_by_the_walk_is_listed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let textures = root.join("textures");
+        touch(&textures.join("001.jpg"));
+
+        let library = PresetLibrary::scan(&[root.to_path_buf()], Some(textures.clone()));
+        assert_eq!(library.textures(), &[textures]);
     }
 
     #[test]

@@ -502,8 +502,8 @@ impl Worker {
         let was_empty = self.library.is_empty();
         self.library = library;
         self.rotation = resolve_rotation(&self.library, rotation);
-        // A preset search path is per instance, not per preset, so a new
-        // library's textures folder has to go in now.
+        // Texture search paths are per instance, not per preset, so a new
+        // library's textures folders have to go in now.
         set_texture_paths(self.instance, &self.library);
         self.current = self
             .preset
@@ -782,13 +782,15 @@ impl Trail {
 }
 
 fn set_texture_paths(instance: pm::projectm_handle, library: &PresetLibrary) {
-    let Some(textures) = library.textures() else {
+    let owned: Vec<CString> = library
+        .textures()
+        .iter()
+        .filter_map(|path| CString::new(path.as_os_str().as_encoded_bytes()).ok())
+        .collect();
+    if owned.is_empty() {
         return;
-    };
-    let Ok(path) = CString::new(textures.as_os_str().as_encoded_bytes()) else {
-        return;
-    };
-    let paths = [path.as_ptr()];
+    }
+    let paths: Vec<*const c_char> = owned.iter().map(|path| path.as_ptr()).collect();
     unsafe { pm::projectm_set_texture_search_paths(instance, paths.as_ptr(), paths.len()) };
 }
 

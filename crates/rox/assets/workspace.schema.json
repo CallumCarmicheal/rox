@@ -123,7 +123,9 @@
         "milkdrop": {
           "enabled": false,
           "strength": 0.3499999940395355,
-          "color": "theme"
+          "color": "theme",
+          "flip_horizontal": false,
+          "flip_vertical": false
         },
         "hide_menubar": false,
         "menubar_buttons": {
@@ -607,7 +609,9 @@
           "default": {
             "enabled": false,
             "strength": 0.3499999940395355,
-            "color": "theme"
+            "color": "theme",
+            "flip_horizontal": false,
+            "flip_vertical": false
           }
         },
         "hide_menubar": {
@@ -737,6 +741,16 @@
           "description": "How the frame's colours meet the theme.",
           "$ref": "#/$defs/MilkdropColor",
           "default": "theme"
+        },
+        "flip_horizontal": {
+          "description": "Mirror the frame left to right.",
+          "type": "boolean",
+          "default": false
+        },
+        "flip_vertical": {
+          "description": "Mirror the frame top to bottom.",
+          "type": "boolean",
+          "default": false
         }
       }
     },
@@ -759,7 +773,7 @@
           "const": "palette"
         },
         {
-          "description": "The same ramp with the playing cover's dominant colour at the top\ninstead of the accent, whatever the song-theming switch says. The\naccent stands in while nothing plays or the cover has no colour.",
+          "description": "The playing cover's dominant colour, whatever the song-theming\nswitch says: a ramp from the background through the cover's colour\nat full chroma, with the preset's own hue and chroma detail kept on\ntop. The accent stands in while nothing plays or the cover has no\ncolour.",
           "type": "string",
           "const": "cover"
         }

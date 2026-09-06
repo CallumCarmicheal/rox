@@ -51,6 +51,7 @@
 pub mod context;
 mod gl;
 pub mod library;
+pub mod thumbs;
 mod worker;
 
 use std::path::PathBuf;

@@ -1640,6 +1640,35 @@ pub fn choices_shared<P: 'static, V: PartialEq + Copy + 'static>(
     )
 }
 
+/// [`choices_shared`] with an icon per option instead of a word, for a
+/// switch whose meaning a glyph carries better than a label: a tree
+/// against a grid. `options` pairs an icon path with its value.
+pub fn choices_icons<P: 'static, V: PartialEq + Copy + 'static>(
+    options: &[(&'static str, V)],
+    current: V,
+    on_pick: impl Fn(&mut P, V, &mut Context<P>) + Clone + 'static,
+    cx: &mut Context<P>,
+) -> Div {
+    segments(
+        options,
+        move |value| value == current,
+        |_| true,
+        |icon, picked| {
+            Icon::default()
+                .path(icon)
+                .xsmall()
+                .text_color(if picked {
+                    palette::text_on_accent()
+                } else {
+                    palette::text()
+                })
+                .into_any_element()
+        },
+        on_pick,
+        cx,
+    )
+}
+
 /// [`choices`] where some options can't be taken yet: whatever `available`
 /// blocks is dimmed and swallows no press.
 ///

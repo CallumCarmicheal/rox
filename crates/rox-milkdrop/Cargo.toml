@@ -28,6 +28,9 @@ crossbeam-channel = "0.5"
 # symlinks into a loop. Already in the lock through notify.
 walkdir = "2"
 log = "0.4"
+# The thumbnail cache is PNGs on disk. Only the PNG codec: the rest of the
+# crate's formats are weight this crate never reads.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # WGL cannot create a context without an HDC, and an HDC comes from a window,
 # so the worker makes a hidden 1x1 one and destroys it on the way out.

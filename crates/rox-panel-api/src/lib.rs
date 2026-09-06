@@ -16,6 +16,7 @@ pub mod group_head;
 pub mod openers;
 pub mod panel;
 pub mod panel_settings;
+pub mod preset_browser;
 pub mod query;
 pub mod rating_ui;
 pub mod signal_ui;

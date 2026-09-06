@@ -51,17 +51,17 @@ pub use shader::PanelShader;
 // crate::panel the way they always have, so the split stays behind this
 // line.
 pub use rox_panel_kit::{
-    align_row, banner, banner_flow, check_row, choices, choices_gated, choices_shared,
-    display_name, flick_on_paint_axis, follow_panel, font_picker, glide_snap_axis, glide_step,
-    glide_step_axis, glide_target, glide_target_at, glide_target_axis, icon_choices, icon_control,
-    icon_control_sized, icon_toggles, items, justify, justify_v, language_picker, letter_initial,
-    letter_rail, mode_list, paint_slider, panel_nav_context, picker, scrub_on_paint, setting_block,
-    setting_row, setting_row_dyn, title_text, toggle, toggle_face, toggle_locked, tracking_section,
-    type_ahead_context, type_ahead_fade, type_ahead_grow, type_ahead_hit, type_ahead_live,
-    type_ahead_overlay, type_ahead_scan, valign_row, value_slider_edit, value_slider_edit_over,
-    value_slider_edit_sized, window_body, workspace_body, Align, FlickState, ModeSpec, ResumeIdle,
-    ScrubState, SliderWidth, Tip, Tone, TrackedImage, VAlign, ValueEdit, PANEL_NAV_CONTEXT,
-    SLIDER_STEP, TYPE_AHEAD_CYCLE_CONTEXT,
+    align_row, banner, banner_flow, check_row, choices, choices_gated, choices_icons,
+    choices_shared, display_name, flick_on_paint_axis, follow_panel, font_picker, glide_snap_axis,
+    glide_step, glide_step_axis, glide_target, glide_target_at, glide_target_axis, icon_choices,
+    icon_control, icon_control_sized, icon_toggles, items, justify, justify_v, language_picker,
+    letter_initial, letter_rail, mode_list, paint_slider, panel_nav_context, picker,
+    scrub_on_paint, setting_block, setting_row, setting_row_dyn, title_text, toggle, toggle_face,
+    toggle_locked, tracking_section, type_ahead_context, type_ahead_fade, type_ahead_grow,
+    type_ahead_hit, type_ahead_live, type_ahead_overlay, type_ahead_scan, valign_row,
+    value_slider_edit, value_slider_edit_over, value_slider_edit_sized, window_body,
+    workspace_body, Align, FlickState, ModeSpec, ResumeIdle, ScrubState, SliderWidth, Tip, Tone,
+    TrackedImage, VAlign, ValueEdit, PANEL_NAV_CONTEXT, SLIDER_STEP, TYPE_AHEAD_CYCLE_CONTEXT,
 };
 
 /// The shared entities every panel renders over: one player, one catalog,

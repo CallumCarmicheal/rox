@@ -21,6 +21,7 @@ use rox_services::catalog::Library;
 
 use crate::panel::shader::edit::ShaderEditTarget;
 use crate::panel::AppState;
+use crate::preset_browser::PresetHost;
 
 /// The app's windows, as plain function pointers. One field per call a
 /// panel or a shared helper makes upward.
@@ -56,6 +57,8 @@ pub struct Openers {
     pub signals_window: fn(&mut App),
     /// The shader editor over one surface's source.
     pub shader_editor: fn(AppState, ShaderEditTarget, &mut App),
+    /// The Milkdrop preset picker over whatever the host shows presets on.
+    pub milkdrop_picker: fn(Box<dyn PresetHost>, &mut App),
     /// The failed-with-a-reason placeholder a panel shows in place of its
     /// content, with the button into the console.
     pub console_notice: fn(SharedString) -> Div,
@@ -195,6 +198,13 @@ pub fn health_window(state: AppState, cx: &mut App) {
 pub fn signals_window(cx: &mut App) {
     if let Some(openers) = openers("the signals window") {
         (openers.signals_window)(cx);
+    }
+}
+
+/// Open the Milkdrop preset picker over `host`.
+pub fn milkdrop_picker(host: Box<dyn PresetHost>, cx: &mut App) {
+    if let Some(openers) = openers("the preset picker") {
+        (openers.milkdrop_picker)(host, cx);
     }
 }
 

@@ -214,7 +214,8 @@ pub fn shaders_dir() -> PathBuf {
 
 /// The folder the Milkdrop panel looks for presets and textures in:
 /// `presets/` holds the `.milk` files, `textures/` the images a preset can
-/// ask for by name. Nothing is created here; the packs worth having are a
+/// ask for by name, and a pack's own `textures/` folder under `presets/`
+/// is found by the scan as well. Nothing is created here; the packs worth having are a
 /// download the user makes themselves, and the panel's settings page shows
 /// this path so they know where to unzip them (ADR 28).
 pub fn milkdrop_dir() -> PathBuf {
@@ -813,6 +814,11 @@ pub struct WindowsState {
     /// shapes audio whether or not the window is ever opened.
     #[serde(alias = "eq_window", deserialize_with = "lenient::option")]
     pub eq: Option<LayoutSize>,
+    /// The Milkdrop preset picker's last size, shared between the backdrop
+    /// and the panels it serves, restored on the next open. None until the
+    /// window closes.
+    #[serde(deserialize_with = "lenient::option")]
+    pub milkdrop_picker: Option<LayoutSize>,
     /// The signals window's last size and the fold state of its explainer,
     /// restored on the next open. None until the window closes. The pool it
     /// edits is stored in the look bundle, since it travels with a workspace.
@@ -1974,6 +1980,27 @@ pub struct BackdropVisualConfig {
     /// this defaults well below 1: half the side is a quarter of the
     /// readback for a picture nobody can focus on.
     pub scale: f32,
+    /// The frame rate the worker aims for. The other cost lever beside
+    /// the scale: every frame is a readback, so 30 is half the bill of 60
+    /// for a picture that sits under a blur.
+    pub fps: u32,
+    /// How readily projectM calls something a beat, 0 to 5. The panel's
+    /// knob, offered here too so the two visuals tune the same way.
+    pub beat_sensitivity: f32,
+    /// Whether a loud enough beat cuts straight to the next preset.
+    pub hard_cuts: bool,
+    /// The folder the rotation is narrowed to, as its path under a scan
+    /// root with forward slashes, the way a panel keeps its own. None
+    /// rotates the whole library. The favorites switch wins over it while
+    /// on; the pick is kept for when it's off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_folder: Option<String>,
+    /// Mirror the frame left to right. The look's; see [`MilkdropLook`].
+    #[serde(skip)]
+    pub flip_horizontal: bool,
+    /// Mirror the frame top to bottom. The look's.
+    #[serde(skip)]
+    pub flip_vertical: bool,
     /// Shuffle from the favorites list rather than the whole library. With
     /// nothing starred yet the worker falls back to everything, so
     /// switching this on before starring anything changes nothing.
@@ -2018,9 +2045,11 @@ pub enum MilkdropColor {
     /// background to its accent. Reads as the app's own colours on both
     /// themes, and follows the cover when song theming is on.
     Palette,
-    /// The same ramp with the playing cover's dominant colour at the top
-    /// instead of the accent, whatever the song-theming switch says. The
-    /// accent stands in while nothing plays or the cover has no colour.
+    /// The playing cover's dominant colour, whatever the song-theming
+    /// switch says: a ramp from the background through the cover's colour
+    /// at full chroma, with the preset's own hue and chroma detail kept on
+    /// top. The accent stands in while nothing plays or the cover has no
+    /// colour.
     Cover,
 }
 
@@ -2051,11 +2080,17 @@ pub const BACKDROP_VISUAL_STRENGTH: f32 = 0.35;
 /// The render scale a fresh install runs at. See [`BackdropVisualConfig::scale`].
 pub const BACKDROP_VISUAL_SCALE: f32 = 0.5;
 
-/// The engine's frame rate for the backdrop, fixed rather than exposed.
-/// The panel offers a rate because someone is watching it; the backdrop
-/// runs the whole time the app plays, so it takes the rate that reads as
-/// motion for half the bill of sixty.
+/// The frame rate a fresh install runs the backdrop at. The panel defaults
+/// to sixty because someone is watching it; the backdrop runs the whole
+/// time the app plays, so it starts at the rate that reads as motion for
+/// half the bill.
 pub const BACKDROP_VISUAL_FPS: u32 = 30;
+
+/// The frame rates the backdrop will take, the panel's own span: below the
+/// floor the visual stops reading as motion, above the ceiling the
+/// readback is the bottleneck whatever projectM does.
+pub const BACKDROP_VISUAL_FPS_MIN: u32 = 10;
+pub const BACKDROP_VISUAL_FPS_MAX: u32 = 240;
 
 impl Default for BackdropVisualConfig {
     fn default() -> Self {
@@ -2063,6 +2098,12 @@ impl Default for BackdropVisualConfig {
             enabled: false,
             strength: BACKDROP_VISUAL_STRENGTH,
             scale: BACKDROP_VISUAL_SCALE,
+            fps: BACKDROP_VISUAL_FPS,
+            beat_sensitivity: 1.0,
+            hard_cuts: true,
+            rotation_folder: None,
+            flip_horizontal: false,
+            flip_vertical: false,
             favorites_only: false,
             locked: true,
             duration_secs: BACKDROP_VISUAL_DURATION,
@@ -2073,21 +2114,25 @@ impl Default for BackdropVisualConfig {
 }
 
 impl BackdropVisualConfig {
-    /// The look's three fields taken over this config.
+    /// The look's fields taken over this config.
     pub fn with_look(mut self, look: &MilkdropLook) -> BackdropVisualConfig {
         self.enabled = look.enabled;
         self.strength = look.strength;
         self.color = look.color;
+        self.flip_horizontal = look.flip_horizontal;
+        self.flip_vertical = look.flip_vertical;
         self.clamped()
     }
 
-    /// The look's three fields as they stand here, for writing back into
-    /// the bundle when the Appearance page edits them.
+    /// The look's fields as they stand here, for writing back into the
+    /// bundle when the Appearance page edits them.
     pub fn look(&self) -> MilkdropLook {
         MilkdropLook {
             enabled: self.enabled,
             strength: self.strength,
             color: self.color,
+            flip_horizontal: self.flip_horizontal,
+            flip_vertical: self.flip_vertical,
         }
     }
 
@@ -2112,6 +2157,19 @@ impl BackdropVisualConfig {
             self.duration_secs.clamp(1.0, 120.0)
         } else {
             BACKDROP_VISUAL_DURATION
+        };
+        self.beat_sensitivity = if self.beat_sensitivity.is_finite() {
+            self.beat_sensitivity.clamp(0.0, 5.0)
+        } else {
+            1.0
+        };
+        // A zero here is a worker that never renders, and the file from
+        // before the field reads as zero too.
+        self.fps = if self.fps == 0 {
+            BACKDROP_VISUAL_FPS
+        } else {
+            self.fps
+                .clamp(BACKDROP_VISUAL_FPS_MIN, BACKDROP_VISUAL_FPS_MAX)
         };
         self
     }
@@ -3160,6 +3218,10 @@ pub struct MilkdropLook {
     pub strength: f32,
     /// How the frame's colours meet the theme.
     pub color: MilkdropColor,
+    /// Mirror the frame left to right.
+    pub flip_horizontal: bool,
+    /// Mirror the frame top to bottom.
+    pub flip_vertical: bool,
 }
 
 impl Default for MilkdropLook {
@@ -3168,6 +3230,8 @@ impl Default for MilkdropLook {
             enabled: false,
             strength: BACKDROP_VISUAL_STRENGTH,
             color: MilkdropColor::default(),
+            flip_horizontal: false,
+            flip_vertical: false,
         }
     }
 }

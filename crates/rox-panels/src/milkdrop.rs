@@ -26,7 +26,7 @@
 //! ADR 28 is the decision this sits under, including the readback cost it
 //! takes on purpose.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -36,15 +36,17 @@ use gpui::{
     FocusHandle, Focusable, MouseButton, PathPromptOptions, SharedString, Subscription,
     UserShaderChain, UserShaderId, UserShaderPass, UserTextureId, WeakEntity, Window,
 };
-use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
-use gpui_component::{Icon, Sizable};
+use gpui_component::Icon;
 use rox_dock::{Panel, PanelEvent, TabPanel};
 use serde::{Deserialize, Serialize};
 
 use rox_core::settings::{self as core_settings, MilkdropColor};
-use rox_library::folders::{build_roots, sum_counts, Node};
 use rox_milkdrop::{Command, Engine, EngineOptions, Event, PresetLibrary, Rotation, Status};
+use rox_panel_api::preset_browser::{
+    find_folder_by_relative, folder_label, preset_label, relative_to_roots, PresetHost, Thumb,
+    Thumbnails,
+};
 use rox_panel_kit::fade::{self, Fade};
 use rox_panel_kit::grade::{self, Grade, GradeMode};
 
@@ -89,29 +91,13 @@ const TINT_DEFAULT: f32 = 0.35;
 /// change reads as a glitch.
 const TINT_EASE: Duration = Duration::from_millis(1200);
 
-/// How many preset rows the list on the settings page draws at once. The
-/// packs worth having run to ten thousand files, and there's no virtual
-/// list on a settings page, so ten thousand rows is a page that takes
-/// longer to lay out than the visual takes to render.
-///
-/// A safety valve on what's drawn, never on what's searched: the filter
-/// runs over every preset in the library and the cap only decides how many
-/// of the winners get a row. The line under the box says both numbers.
-const PRESET_ROWS: usize = 200;
-
-/// How far each level of the preset tree steps in, matching the folder
-/// tree panel's own indent so the two read as one idiom.
-const PRESET_INDENT: f32 = 14.;
-
-/// How stale a scan is allowed to be before the Presets page redoes it.
-///
-/// The page can't scan per frame: it rebuilds on every keystroke in its
-/// filter box. It also can't scan once and never again, because that's
-/// how a pack dropped in while rox is running stays invisible. A few
-/// thousand `stat` calls every few seconds is cheap enough that opening
-/// the page always shows what's on disk, and the Rescan button is there
-/// for anyone who doesn't want to wait out the window.
-const SCAN_STALE: Duration = Duration::from_secs(5);
+/// What the Presets page checks before it trusts the last scan: each
+/// root's own modification time. A pack dropped into a root moves it; a
+/// file added deep inside a pack doesn't, and that's what the Rescan
+/// button is for. A walk of the whole library is a stat per preset, and
+/// the big pack runs to a hundred and fifty thousand, so it can't be a
+/// thing the page does on a timer.
+type RootsStamp = Vec<(PathBuf, Option<std::time::SystemTime>)>;
 
 /// The frame rates the input will take. Below the floor the visual stops
 /// reading as motion, and above the ceiling the readback is the bottleneck
@@ -420,50 +406,6 @@ fn ease_tint(current: TintAim, goal: Option<f32>, step: f32) -> TintAim {
     }
 }
 
-/// What the banner and the preset list call a preset: its file stem, which
-/// is the name every pack writes into the filename and nowhere else.
-fn preset_label(path: &Path) -> String {
-    path.file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
-}
-
-/// What the rotation picker calls a folder: its path under whichever root
-/// it was found in. A pack lives several directories down inside a home
-/// folder, and the absolute path is mostly the part every option shares.
-///
-/// Falls back to the absolute path when nothing matches, which only
-/// happens if a root was edited out from under a saved pick.
-fn folder_label(folder: &Path, roots: &[PathBuf]) -> String {
-    roots
-        .iter()
-        .filter_map(|root| folder.strip_prefix(root).ok())
-        .map(|relative| relative.to_string_lossy().into_owned())
-        .filter(|relative| !relative.is_empty())
-        // Overlapping roots can both match; the shortest is the one that
-        // strips the most, which is the whole point of the label.
-        .min_by_key(String::len)
-        .unwrap_or_else(|| folder.to_string_lossy().into_owned())
-}
-
-/// A preset's path under whichever root it was found in, as a string with
-/// forward slashes whatever the platform, so the same value matches on
-/// the machine the workspace lands on. None for a path under no root.
-fn relative_to_roots(path: &Path, roots: &[PathBuf]) -> Option<String> {
-    roots
-        .iter()
-        .filter_map(|root| path.strip_prefix(root).ok())
-        .map(|relative| {
-            relative
-                .components()
-                .map(|part| part.as_os_str().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join("/")
-        })
-        .filter(|relative| !relative.is_empty())
-        .min_by_key(String::len)
-}
-
 /// What the layout keeps of a preset: its file name, off whatever was
 /// stored. A current layout stores the name already; one from before
 /// stored the path, and the last component of that is the same name.
@@ -487,227 +429,6 @@ fn find_by_name(presets: &[PathBuf], name: &str) -> Option<PathBuf> {
                 .is_some_and(|file| file.to_string_lossy() == name)
         })
         .cloned()
-}
-
-/// The scanned folder a saved relative path names: the same path under
-/// any root, or failing that a folder of the same name at any depth.
-fn find_folder_by_relative(
-    folders: &[PathBuf],
-    roots: &[PathBuf],
-    relative: &str,
-) -> Option<PathBuf> {
-    if let Some(exact) = folders
-        .iter()
-        .find(|folder| relative_to_roots(folder, roots).as_deref() == Some(relative))
-    {
-        return Some(exact.clone());
-    }
-    let name = relative.rsplit('/').next()?;
-    folders
-        .iter()
-        .find(|folder| {
-            folder
-                .file_name()
-                .is_some_and(|file| file.to_string_lossy() == name)
-        })
-        .cloned()
-}
-
-/// One preset as the settings list needs it, worked out once per scan.
-struct PresetEntry {
-    path: PathBuf,
-    label: SharedString,
-    /// The label case-folded once. A keystroke is then ten thousand
-    /// substring searches over borrowed strings and not one allocation,
-    /// which is the difference between the box feeling live and feeling
-    /// like it's thinking.
-    folded: String,
-}
-
-/// The preset list as a tree: the folders the presets sit in, the presets
-/// themselves, and the index that makes filtering cheap.
-///
-/// Built on a rescan rather than per render. The page rebuilds on every
-/// keystroke, and walking ten thousand paths to re-derive a hierarchy that
-/// can't have changed is the kind of work that turns a filter box into a
-/// stutter.
-///
-/// The hierarchy comes from [`rox_library::folders`], the same trie the
-/// folder tree panel draws the music library with: it collapses the dead
-/// prefix above the pack, sorts naturally, and folds subtree counts up.
-/// Presets aren't tracks, but a path is a path.
-#[derive(Default)]
-struct PresetTree {
-    entries: Vec<PresetEntry>,
-    /// The top folders after the shared prefix collapses away. Mutated in
-    /// place by [`sum_counts`] on every query, which is what the counts on
-    /// the folder rows read.
-    roots: Vec<Node>,
-    /// Which entries each folder holds, in list order.
-    by_folder: HashMap<String, Vec<usize>>,
-}
-
-/// One row the preset list draws.
-#[derive(Clone, Debug, PartialEq)]
-enum PresetRow {
-    Folder {
-        path: String,
-        label: SharedString,
-        /// Presets under here that the query matched, which is the whole
-        /// subtree count when nothing's typed.
-        matched: u32,
-        depth: usize,
-        open: bool,
-        has_children: bool,
-    },
-    Preset {
-        /// Index into [`PresetTree::entries`].
-        entry: usize,
-        depth: usize,
-    },
-}
-
-/// What one pass over a query leaves the page: the rows to draw, how many
-/// presets matched in the whole library, and how many of those got a row.
-#[derive(Debug, PartialEq)]
-struct PresetRows {
-    rows: Vec<PresetRow>,
-    matched: usize,
-    shown: usize,
-}
-
-impl PresetTree {
-    /// Index a scan: fold the labels, group by folder, build the trie.
-    fn build(presets: &[PathBuf]) -> PresetTree {
-        let mut entries = Vec::with_capacity(presets.len());
-        let mut by_folder: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut folders: Vec<String> = Vec::new();
-        for path in presets {
-            let label = preset_label(path);
-            let folder = path
-                .parent()
-                .map(|parent| parent.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let index = entries.len();
-            let list = by_folder.entry(folder.clone()).or_insert_with(|| {
-                folders.push(folder.clone());
-                Vec::new()
-            });
-            list.push(index);
-            entries.push(PresetEntry {
-                path: path.clone(),
-                folded: label.to_lowercase(),
-                label: SharedString::from(label),
-            });
-        }
-        PresetTree {
-            roots: build_roots(&folders),
-            entries,
-            by_folder,
-        }
-    }
-
-    /// The rows for a query, matched-first: every preset in the library is
-    /// tested, folders with nothing left are dropped, and the cap decides
-    /// how many of the survivors get drawn.
-    ///
-    /// `query` arrives already trimmed and case-folded. An empty one
-    /// matches everything, which is how the unfiltered tree comes out of
-    /// the same path as a search.
-    ///
-    /// A query opens every folder it left standing, whatever the expand
-    /// set says. Searching a collapsed tree and being shown folder names
-    /// is the complaint, not the feature.
-    fn rows(&mut self, query: &str, expanded: &HashSet<String>, cap: usize) -> PresetRows {
-        let PresetTree {
-            entries,
-            roots,
-            by_folder,
-        } = self;
-        let searching = !query.is_empty();
-
-        let mut matched_total = 0usize;
-        let mut counts: HashMap<&str, (u32, u32)> = HashMap::with_capacity(by_folder.len());
-        // Per-folder rather than per-entry so the walk below can slice the
-        // folder's own list without re-testing anything.
-        let mut hits: HashMap<String, Vec<usize>> = HashMap::with_capacity(by_folder.len());
-        for (folder, list) in by_folder.iter() {
-            let matching: Vec<usize> = list
-                .iter()
-                .copied()
-                .filter(|&index| !searching || entries[index].folded.contains(query))
-                .collect();
-            matched_total += matching.len();
-            counts.insert(folder.as_str(), (list.len() as u32, matching.len() as u32));
-            hits.insert(folder.clone(), matching);
-        }
-        for root in roots.iter_mut() {
-            sum_counts(root, &counts);
-        }
-
-        struct Walk<'a> {
-            hits: &'a HashMap<String, Vec<usize>>,
-            expanded: &'a HashSet<String>,
-            searching: bool,
-            cap: usize,
-            shown: usize,
-            rows: Vec<PresetRow>,
-        }
-        impl Walk<'_> {
-            fn folder(&mut self, node: &Node, depth: usize) {
-                // Nothing under here survived the query, so neither does
-                // the branch. Nor once the cap is full: a folder row with
-                // no rows left to hold is just a dead end on the page.
-                if node.matched == 0 || self.shown >= self.cap {
-                    return;
-                }
-                let own = self.hits.get(node.path.as_str());
-                let open = self.searching || self.expanded.contains(&node.path);
-                self.rows.push(PresetRow::Folder {
-                    path: node.path.clone(),
-                    label: SharedString::from(node.label.clone()),
-                    matched: node.matched,
-                    depth,
-                    open,
-                    has_children: !node.children.is_empty()
-                        || own.is_some_and(|list| !list.is_empty()),
-                });
-                if !open {
-                    return;
-                }
-                for child in &node.children {
-                    self.folder(child, depth + 1);
-                }
-                for &entry in own.into_iter().flatten() {
-                    if self.shown >= self.cap {
-                        return;
-                    }
-                    self.shown += 1;
-                    self.rows.push(PresetRow::Preset {
-                        entry,
-                        depth: depth + 1,
-                    });
-                }
-            }
-        }
-
-        let mut walk = Walk {
-            hits: &hits,
-            expanded,
-            searching,
-            cap,
-            shown: 0,
-            rows: Vec::new(),
-        };
-        for root in roots.iter() {
-            walk.folder(root, 0);
-        }
-        PresetRows {
-            rows: walk.rows,
-            matched: matched_total,
-            shown: walk.shown,
-        }
-    }
 }
 
 /// The texture and chain a single window holds for this panel, and where
@@ -757,22 +478,14 @@ pub struct MilkdropPanel {
     /// rather than in the constructor, because restoring a layout builds
     /// every panel in it and a pack is a few thousand `stat` calls.
     library: Option<PresetLibrary>,
-    /// The scan indexed for the settings list: folded labels and the folder
-    /// hierarchy, rebuilt with the scan and not with the filter box.
-    tree: PresetTree,
-    /// The folders the preset list is showing open, by path.
-    ///
-    /// Panel state rather than config, unlike the folder tree panel's own
-    /// expand set. That one is the panel, so a relaunch owes the user the
-    /// view they left; this is a settings page they opened to pick a
-    /// preset, and which categories were unfolded during that trip isn't
-    /// worth a line in every saved layout.
-    expanded: HashSet<String>,
-    /// Whether the top folders have been opened once. A rescan keeps the
-    /// user's picks; only the first index seeds.
-    tree_seeded: bool,
-    /// When the cached scan was taken, for [`SCAN_STALE`].
-    scanned_at: Option<Instant>,
+    /// The roots as they stood when the scan was taken. See
+    /// [`RootsStamp`].
+    scanned_stamp: Option<RootsStamp>,
+    /// Every folder in the scan that holds presets, and the rotation
+    /// picker's row for each. Worked out with the scan rather than per
+    /// render: a walk of the whole library per keystroke is the lag.
+    folders: Vec<PathBuf>,
+    folder_options: Vec<(RotationChoice, SharedString)>,
     /// The edit of the app-wide favorites and folders this panel last
     /// acted on. Another panel, or the settings window, starring a preset
     /// or adding a folder moves the lists; the next render here sees the
@@ -797,14 +510,9 @@ pub struct MilkdropPanel {
     /// eases at the same speed as one at 60.
     tint: TintAim,
     tint_at: Instant,
-    /// The preset list's filter box, built on the first visit to the
-    /// settings page because it needs a window.
-    filter: Option<gpui::Entity<InputState>>,
-    _filter_events: Option<Subscription>,
     /// The frame-rate field, built on the first visit to Tuning for the
     /// same reason the filter box is.
-    fps_input: Option<gpui::Entity<InputState>>,
-    _fps_events: Option<Subscription>,
+    fps_scrub: ScrubState,
     /// One scrub per slider on the settings pages.
     duration_scrub: ScrubState,
     sensitivity_scrub: ScrubState,
@@ -837,10 +545,9 @@ impl MilkdropPanel {
             config,
             engine: None,
             library: None,
-            tree: PresetTree::default(),
-            expanded: HashSet::new(),
-            tree_seeded: false,
-            scanned_at: None,
+            scanned_stamp: None,
+            folders: Vec::new(),
+            folder_options: Vec::new(),
             lists_gen: core_settings::milkdrop_gen(),
             current: None,
             draw: Arc::new(Mutex::new(Draw::default())),
@@ -854,10 +561,7 @@ impl MilkdropPanel {
             // rather than opening on a colour.
             tint: TintAim::default(),
             tint_at: Instant::now(),
-            filter: None,
-            _filter_events: None,
-            fps_input: None,
-            _fps_events: None,
+            fps_scrub: ScrubState::default(),
             duration_scrub: ScrubState::default(),
             sensitivity_scrub: ScrubState::default(),
             scale_scrub: ScrubState::default(),
@@ -894,15 +598,15 @@ impl MilkdropPanel {
         // favorite here, so it joins the list rather than falling out of
         // the favorites rotation.
         library.extend(&core_settings::milkdrop_favorites());
-        self.scanned_at = Some(Instant::now());
+        self.scanned_stamp = Some(self.roots_stamp());
         // The worker took the library by value when it spawned, so the
         // settings list and what's actually rotating are two different things
         // until this goes out. Presets dropped in while rox is running are
         // the whole reason anyone presses Rescan, so skipping it would leave
         // the count looking right and the panel still showing the idle preset.
         let changed = self.library.as_ref() != Some(&library);
-        self.tree = PresetTree::build(library.presets());
         self.library = Some(library);
+        self.refresh_folders();
         if changed {
             let library = self.library.clone().expect("just set");
             self.send(Command::SetLibrary {
@@ -910,29 +614,44 @@ impl MilkdropPanel {
                 rotation: self.rotation(),
             });
         }
-        // Open the top folders the first time there's a tree to open, so
-        // the page lands on the pack's categories rather than one closed
-        // row. After that the set is the user's.
-        if !self.tree_seeded && !self.tree.roots.is_empty() {
-            self.tree_seeded = true;
-            self.expanded
-                .extend(self.tree.roots.iter().map(|root| root.path.clone()));
-        }
     }
 
-    /// Fold a preset folder open or closed.
-    fn toggle_folder(&mut self, path: String, cx: &mut Context<Self>) {
-        if !self.expanded.remove(&path) {
-            self.expanded.insert(path);
-        }
-        cx.notify();
+    /// Work the folder list and its picker rows out of the scan.
+    fn refresh_folders(&mut self) {
+        let Some(library) = self.library.as_ref() else {
+            return;
+        };
+        let roots = library.roots().to_vec();
+        self.folders = library.folders();
+        self.folder_options = self
+            .folders
+            .iter()
+            .map(|folder| {
+                let label = SharedString::from(folder_label(folder, &roots));
+                (RotationChoice::Folder(folder.clone()), label)
+            })
+            .collect();
     }
 
-    /// Rescan if the cached one has aged past [`SCAN_STALE`]. This is what
-    /// the Presets page calls, so opening it shows what's on disk now
-    /// rather than what was there the first time the panel was asked.
+    /// Each scan root's modification time now.
+    fn roots_stamp(&self) -> RootsStamp {
+        self.roots()
+            .into_iter()
+            .map(|root| {
+                let modified = std::fs::metadata(&root)
+                    .and_then(|meta| meta.modified())
+                    .ok();
+                (root, modified)
+            })
+            .collect()
+    }
+
+    /// Rescan if a root moved since the scan, or there's been no scan.
+    /// This is what the Presets page calls, so a pack dropped in shows
+    /// up on the next visit without the page walking the library each
+    /// time it draws.
     fn rescan_if_stale(&mut self) {
-        if self.scanned_at.is_none_or(|at| at.elapsed() >= SCAN_STALE) {
+        if self.scanned_stamp.as_ref() != Some(&self.roots_stamp()) {
             self.rescan();
         }
     }
@@ -957,7 +676,7 @@ impl MilkdropPanel {
     fn rotation_dir(&self) -> Option<PathBuf> {
         let relative = self.config.rotation_folder.as_deref()?;
         let library = self.library.as_ref()?;
-        find_folder_by_relative(&library.folders(), library.roots(), relative)
+        find_folder_by_relative(&self.folders, library.roots(), relative)
     }
 
     /// The picker's reading of the config.
@@ -1056,8 +775,8 @@ impl MilkdropPanel {
             let before = library.presets().len();
             library.extend(&favorites);
             if library.presets().len() != before {
-                self.tree = PresetTree::build(library.presets());
                 let library = library.clone();
+                self.refresh_folders();
                 self.send(Command::SetLibrary {
                     library,
                     rotation: self.rotation(),
@@ -1265,6 +984,9 @@ impl MilkdropPanel {
                 Event::PresetChanged(path) => {
                     self.note_preset(&path);
                     self.failed = None;
+                    // A preset that runs here has earned another go at a
+                    // thumbnail, whatever the thumbnailer thought of it.
+                    thumbnails().loaded(&path);
                     if self.config.show_preset_name {
                         self.banner = Some((preset_label(&path), Instant::now()));
                     }
@@ -1341,6 +1063,104 @@ impl MilkdropPanel {
             core_settings::set_milkdrop_roots(roots);
             cx.notify();
         }
+    }
+}
+
+/// The thumbnail service every preset browser in the app draws from: the
+/// engine-driving [`rox_milkdrop::thumbs::Thumbnailer`] behind the seam's
+/// trait, caching under the app's Milkdrop folder. One for the app, since
+/// one tiny engine is plenty and two would race for the same files.
+pub fn thumbnails() -> Arc<dyn Thumbnails> {
+    static THUMBS: std::sync::OnceLock<Arc<ThumbService>> = std::sync::OnceLock::new();
+    THUMBS
+        .get_or_init(|| {
+            let dir = core_settings::milkdrop_dir();
+            let textures = dir.join("textures");
+            let textures = textures.is_dir().then_some(textures);
+            Arc::new(ThumbService(rox_milkdrop::thumbs::Thumbnailer::new(
+                dir.join("thumbs"),
+                textures,
+            )))
+        })
+        .clone()
+}
+
+struct ThumbService(rox_milkdrop::thumbs::Thumbnailer);
+
+impl Thumbnails for ThumbService {
+    fn thumb(&self, preset: &Path) -> Thumb {
+        match self.0.thumb(preset) {
+            rox_milkdrop::thumbs::Thumb::Ready(path) => Thumb::Ready(path),
+            rox_milkdrop::thumbs::Thumb::Pending => Thumb::Pending,
+            rox_milkdrop::thumbs::Thumb::Failed(message) => Thumb::Failed(message),
+        }
+    }
+
+    fn want(&self, presets: Vec<PathBuf>) {
+        self.0.want(presets);
+    }
+
+    fn gen(&self) -> u64 {
+        self.0.gen()
+    }
+
+    fn loaded(&self, preset: &Path) {
+        self.0.loaded(preset);
+    }
+}
+
+/// A Milkdrop panel as the preset picker window sees it. Weak, so a
+/// picker left open over a panel that closed does nothing rather than
+/// keeping the panel alive.
+struct PanelHost(WeakEntity<MilkdropPanel>);
+
+impl PresetHost for PanelHost {
+    fn title(&self, cx: &App) -> SharedString {
+        self.0
+            .upgrade()
+            .and_then(|panel| panel.read(cx).config.chrome.title.clone())
+            .map(SharedString::from)
+            .unwrap_or_else(|| rox_i18n::t!("panel-title-milkdrop"))
+    }
+
+    fn presets(&self, cx: &mut App) -> Vec<PathBuf> {
+        self.0
+            .update(cx, |panel, _| panel.library().presets().to_vec())
+            .unwrap_or_default()
+    }
+
+    fn current(&self, cx: &App) -> Option<PathBuf> {
+        self.0
+            .upgrade()
+            .and_then(|panel| panel.read(cx).current_path())
+    }
+
+    fn pick(&self, path: PathBuf, cx: &mut App) {
+        self.0
+            .update(cx, |panel, cx| panel.load_preset(path, cx))
+            .ok();
+    }
+
+    fn random(&self, cx: &mut App) {
+        if let Some(panel) = self.0.upgrade() {
+            panel.read(cx).send(Command::NextPreset { smooth: false });
+        }
+    }
+
+    fn watch(
+        &self,
+        wake: std::rc::Rc<dyn Fn(&mut App)>,
+        gone: std::rc::Rc<dyn Fn(&mut App)>,
+        cx: &mut App,
+    ) -> Vec<Subscription> {
+        let Some(panel) = self.0.upgrade() else {
+            gone(cx);
+            return Vec::new();
+        };
+        vec![
+            cx.observe(&panel, move |_, cx| wake(cx)),
+            cx.observe_release(&panel, move |_, cx| gone(cx)),
+        ]
     }
 }
 
@@ -1578,14 +1398,11 @@ impl PanelSettings for MilkdropPanel {
 impl MilkdropPanel {
     /// The Presets page: where presets are found, how many turned up, and
     /// the list itself.
-    fn presets_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn presets_page(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
         // Opening the page is what picks up a pack dropped in since the
-        // panel last looked. See [`SCAN_STALE`] for why it's a staleness
+        // panel last looked. See [`RootsStamp`] for why it's a stamp
         // check and not a scan per frame.
         self.rescan_if_stale();
-
-        let filter = self.filter_input(window, cx);
-        let query = filter.read(cx).value().trim().to_lowercase();
 
         let roots = core_settings::milkdrop_roots();
         let mut roots_body = div().flex().flex_col().gap(tokens::SPACE_SM);
@@ -1652,151 +1469,12 @@ impl MilkdropPanel {
                     )),
             );
 
-        // Matching on the file stem rather than the whole path: a pack's
-        // folder name is in every one of its paths, so a query would match
-        // the whole pack instead of narrowing inside it. Every preset in
-        // the library is tested, cap or no cap.
-        let expanded = self.expanded.clone();
-        let listed = self.tree.rows(&query, &expanded, PRESET_ROWS);
-        let current = self.current.clone();
+        let total = self.library().presets().len();
         let favorites: HashSet<PathBuf> = core_settings::milkdrop_favorites().into_iter().collect();
-
-        let mut list = div().flex().flex_col();
-        for row in &listed.rows {
-            list =
-                list.child(match row {
-                    PresetRow::Folder {
-                        path,
-                        label,
-                        matched,
-                        depth,
-                        open,
-                        has_children,
-                    } => {
-                        let path = path.clone();
-                        let toggle = path.clone();
-                        div()
-                            .id(SharedString::from(format!("milkdrop-folder:{path}")))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(tokens::SPACE_XS)
-                            .pl(tokens::SPACE_SM + px(*depth as f32 * PRESET_INDENT))
-                            .pr(tokens::SPACE_SM)
-                            .py(px(2.))
-                            .rounded(tokens::RADIUS)
-                            .text_xs()
-                            .hover(|row| row.bg(palette::bg_control()))
-                            .child(
-                                Icon::default()
-                                    .path(if *open && *has_children {
-                                        icons::CHEVRON_DOWN
-                                    } else {
-                                        icons::CHEVRON_RIGHT
-                                    })
-                                    .xsmall()
-                                    .text_color(palette::text_muted()),
-                            )
-                            .child(div().min_w_0().child(label.clone()))
-                            .child(
-                                div()
-                                    .text_color(palette::text_muted())
-                                    .child(matched.to_string()),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.toggle_folder(toggle.clone(), cx)
-                            }))
-                    }
-                    PresetRow::Preset { entry, depth } => {
-                        let entry = &self.tree.entries[*entry];
-                        let picked = current.as_ref() == Some(&entry.path);
-                        let starred = favorites.contains(&entry.path);
-                        let target = entry.path.clone();
-                        let star = entry.path.clone();
-                        div()
-                            .id(SharedString::from(format!(
-                                "milkdrop-preset:{}",
-                                entry.path.display()
-                            )))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(tokens::SPACE_XS)
-                            .pl(tokens::SPACE_SM + px(*depth as f32 * PRESET_INDENT))
-                            .pr(tokens::SPACE_SM)
-                            .py(px(2.))
-                            .rounded(tokens::RADIUS)
-                            .text_xs()
-                            .when(picked, |row| {
-                                row.bg(palette::bg_control()).text_color(palette::text())
-                            })
-                            .hover(|row| row.bg(palette::bg_control()))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(entry.label.clone()),
-                            )
-                            // The star takes the press before the row's click
-                            // sees it, so starring a preset doesn't also load
-                            // it: the list is for browsing, and a click that
-                            // swaps the visual out from under you to mark a
-                            // favorite would make people stop marking them.
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .cursor_pointer()
-                                    .child(
-                                        Icon::default()
-                                            .path(if starred {
-                                                icons::STAR_FILLED
-                                            } else {
-                                                icons::STAR
-                                            })
-                                            .xsmall()
-                                            .text_color(if starred {
-                                                palette::accent()
-                                            } else {
-                                                palette::text_muted()
-                                            }),
-                                    )
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.toggle_favorite(star.clone(), cx);
-                                        }),
-                                    ),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.load_preset(target.clone(), cx)
-                            }))
-                    }
-                });
-        }
-
-        let total = self.tree.entries.len();
-        let count = rox_i18n::t!(
-            "milkdrop-preset-count",
-            count = listed.matched.to_string(),
-            total = total.to_string()
-        );
-        // The cap is about rows, not about reach, and the line says so
-        // rather than leaving a search looking like it missed something.
-        let capped = (listed.shown < listed.matched).then(|| {
-            rox_i18n::t!(
-                "milkdrop-preset-capped",
-                shown = listed.shown.to_string(),
-                count = listed.matched.to_string()
-            )
-        });
         let locked = self.config.locked;
 
         // The rotation options: everything, then every folder that holds
         // presets of its own, named relative to the root it was found in.
-        let scanned_roots = self.library().roots().to_vec();
-        let folders = self.library().folders();
         let mut rotations: Vec<(RotationChoice, SharedString)> = vec![
             (RotationChoice::All, rox_i18n::t!("milkdrop-rotation-all")),
             (
@@ -1807,10 +1485,7 @@ impl MilkdropPanel {
                 ),
             ),
         ];
-        rotations.extend(folders.into_iter().map(|folder| {
-            let label = SharedString::from(folder_label(&folder, &scanned_roots));
-            (RotationChoice::Folder(folder), label)
-        }));
+        rotations.extend(self.folder_options.iter().cloned());
         let rotation = panel::picker(
             "milkdrop-rotation",
             self.rotation_choice(),
@@ -1863,6 +1538,19 @@ impl MilkdropPanel {
                 icons::EXTERNAL_LINK,
                 !has_current,
                 cx.listener(|this, _, _, cx| this.reveal_preset(cx)),
+            ))
+            // The list itself is the picker window's: a settings page
+            // is no place for a hundred thousand rows.
+            .child(crate::settings::ui::small_button(
+                rox_i18n::t!("milkdrop-choose"),
+                icons::SEARCH,
+                false,
+                cx.listener(|_, _, _, cx| {
+                    rox_panel_api::openers::milkdrop_picker(
+                        Box::new(PanelHost(cx.entity().downgrade())),
+                        cx,
+                    );
+                }),
             ));
 
         // 1 to 120 seconds, the span a switch is worth having. Linear: the
@@ -1923,20 +1611,6 @@ impl MilkdropPanel {
                     .text_color(palette::text_muted())
                     .child(line)
             }))
-            .child(Input::new(&filter).small())
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(palette::text_muted())
-                    .child(count),
-            )
-            .children(capped.map(|line| {
-                div()
-                    .text_xs()
-                    .text_color(palette::text_muted())
-                    .child(line)
-            }))
-            .child(list)
         };
 
         let rescan = crate::settings::ui::small_button(
@@ -2004,77 +1678,26 @@ impl MilkdropPanel {
             )
     }
 
-    /// The filter box, built on the first visit because an input needs a
-    /// window to make its focus handle in.
-    fn filter_input(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::Entity<InputState> {
-        if let Some(filter) = self.filter.clone() {
-            return filter;
-        }
-        let filter = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(rox_i18n::t!("milkdrop-filter-presets"))
-        });
-        self._filter_events = Some(cx.subscribe(&filter, |_, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                cx.notify();
-            }
-        }));
-        self.filter = Some(filter.clone());
-        filter
-    }
+    fn tuning_page(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let config = self.config.clone();
 
-    /// The frame-rate field. Typing is free; the value only reaches the
-    /// worker on Enter or on leaving the field, so a half-typed "2" on the
-    /// way to "24" never restarts the render loop at 2 frames a second.
-    ///
-    /// Anything unparseable falls back to what's already set, and the field
-    /// is rewritten with whatever it settled on, so a clamp shows rather
-    /// than leaving the box saying 500 while the worker runs at 240.
-    fn fps_input(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::Entity<InputState> {
-        if let Some(input) = self.fps_input.clone() {
-            return input;
-        }
-        let current = self.config.fps.to_string();
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
-        self._fps_events = Some(cx.subscribe_in(
-            &input,
-            window,
-            |this: &mut Self, input, event: &InputEvent, window, cx| {
-                if !matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                    return;
-                }
-                let typed = input.read(cx).value().trim().to_string();
-                let fps = typed
-                    .parse::<u32>()
-                    .unwrap_or(this.config.fps)
-                    .clamp(FPS_MIN, FPS_MAX);
+        // The same strip the Appearance page's backdrop rate uses, so the
+        // two visuals tune alike.
+        let fps = crate::settings::ui::scalar(
+            &self.fps_scrub,
+            &self.value_edit,
+            config.fps as f32,
+            crate::settings::ui::span(FPS_MIN as f32, FPS_MAX as f32, " fps").hard(),
+            |this: &mut Self, fps, cx| {
+                let fps = (fps.round() as u32).clamp(FPS_MIN, FPS_MAX);
                 if this.config.fps != fps {
                     this.config.fps = fps;
                     this.send(Command::SetFps(fps));
                 }
-                let settled = fps.to_string();
-                if typed != settled {
-                    input.update(cx, |input, cx| input.set_value(settled, window, cx));
-                }
                 cx.notify();
             },
-        ));
-        self.fps_input = Some(input.clone());
-        input
-    }
-
-    /// The Tuning page: the knobs projectM takes, and the two that decide
-    /// what the readback costs.
-    fn tuning_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let config = self.config.clone();
-        let fps = self.fps_input(window, cx);
+            cx,
+        );
 
         let sensitivity = panel::value_slider_edit(
             &self.sensitivity_scrub,
@@ -2196,7 +1819,7 @@ impl MilkdropPanel {
                 .child(setting_row(
                     rox_i18n::t!("milkdrop-fps"),
                     Some(rox_i18n::t!("milkdrop-fps.description")),
-                    div().w(px(72.)).child(Input::new(&fps).small()),
+                    fps,
                 ))
                 .child(setting_row(
                     rox_i18n::t!("milkdrop-scale"),
@@ -2293,7 +1916,7 @@ impl MilkdropPanel {
                 ))
                 .child(setting_row(
                     rox_i18n::t!("milkdrop-flip-horizontal"),
-                    None,
+                    Some(rox_i18n::t!("milkdrop-flip-horizontal.description")),
                     toggle(
                         config.flip_horizontal,
                         |this: &mut Self, on, cx| {
@@ -2305,7 +1928,7 @@ impl MilkdropPanel {
                 ))
                 .child(setting_row(
                     rox_i18n::t!("milkdrop-flip-vertical"),
-                    None,
+                    Some(rox_i18n::t!("milkdrop-flip-vertical.description")),
                     toggle(
                         config.flip_vertical,
                         |this: &mut Self, on, cx| {
@@ -2404,6 +2027,7 @@ impl Panel for MilkdropPanel {
         let next = panel.downgrade();
         let previous = panel.downgrade();
         let random = panel.downgrade();
+        let choose = panel.downgrade();
         let reveal = panel.downgrade();
         let folder = rox_core::settings::milkdrop_dir().join("presets");
 
@@ -2435,6 +2059,16 @@ impl Panel for MilkdropPanel {
                         if let Some(panel) = random.upgrade() {
                             panel.read(cx).send(Command::NextPreset { smooth: false });
                         }
+                    }),
+            )
+            .item(
+                PopupMenuItem::new(rox_i18n::t!("milkdrop-choose"))
+                    .icon(Icon::default().path(icons::SEARCH))
+                    .on_click(move |_, _, cx| {
+                        rox_panel_api::openers::milkdrop_picker(
+                            Box::new(PanelHost(choose.clone())),
+                            cx,
+                        );
                     }),
             )
             .item(panel::check_row(
@@ -3039,160 +2673,6 @@ mod tests {
         assert_eq!(render_size(0.0, -10.0, 1.0, 1.0), (MIN_SIDE, MIN_SIDE));
     }
 
-    fn preset_paths(paths: &[&str]) -> Vec<PathBuf> {
-        paths.iter().map(PathBuf::from).collect()
-    }
-
-    fn folder_rows(rows: &[PresetRow]) -> Vec<(String, u32, usize, bool)> {
-        rows.iter()
-            .filter_map(|row| match row {
-                PresetRow::Folder {
-                    label,
-                    matched,
-                    depth,
-                    open,
-                    ..
-                } => Some((label.to_string(), *matched, *depth, *open)),
-                PresetRow::Preset { .. } => None,
-            })
-            .collect()
-    }
-
-    fn preset_labels(tree: &PresetTree, rows: &[PresetRow]) -> Vec<String> {
-        rows.iter()
-            .filter_map(|row| match row {
-                PresetRow::Preset { entry, .. } => Some(tree.entries[*entry].label.to_string()),
-                PresetRow::Folder { .. } => None,
-            })
-            .collect()
-    }
-
-    /// A closed tree is folders only, and each one counts its whole
-    /// subtree rather than the files sitting directly in it.
-    #[test]
-    fn the_tree_groups_presets_under_their_folders() {
-        let mut tree = PresetTree::build(&preset_paths(&[
-            "/packs/cream/Fractal/Aderrasi.milk",
-            "/packs/cream/Fractal/Geiss.milk",
-            "/packs/cream/Waveform/Rovastar.milk",
-        ]));
-
-        let listed = tree.rows("", &HashSet::new(), PRESET_ROWS);
-        // The chain above the pack collapses, so the one top row is the
-        // pack itself and not four rows of empty parents.
-        assert_eq!(
-            folder_rows(&listed.rows),
-            vec![("cream".into(), 3, 0, false)]
-        );
-        assert!(
-            preset_labels(&tree, &listed.rows).is_empty(),
-            "nothing open"
-        );
-        assert_eq!(listed.matched, 3);
-        assert_eq!(listed.shown, 0);
-
-        let open: HashSet<String> = ["/packs/cream".to_string()].into_iter().collect();
-        let listed = tree.rows("", &open, PRESET_ROWS);
-        assert_eq!(
-            folder_rows(&listed.rows),
-            vec![
-                ("cream".into(), 3, 0, true),
-                ("Fractal".into(), 2, 1, false),
-                ("Waveform".into(), 1, 1, false),
-            ]
-        );
-    }
-
-    /// The complaint this exists for: a query reaches every preset in the
-    /// library, not just the ones a folder happened to be showing.
-    #[test]
-    fn a_query_reaches_presets_inside_closed_folders() {
-        let mut tree = PresetTree::build(&preset_paths(&[
-            "/packs/cream/Fractal/Aderrasi - Spiral.milk",
-            "/packs/cream/Fractal/Geiss - Bloom.milk",
-            "/packs/cream/Waveform/Rovastar - Spiral Cage.milk",
-        ]));
-
-        // Nothing open, and the search still finds both spirals and opens
-        // the folders they're in.
-        let listed = tree.rows("spiral", &HashSet::new(), PRESET_ROWS);
-        assert_eq!(listed.matched, 2);
-        assert_eq!(listed.shown, 2);
-        assert_eq!(
-            preset_labels(&tree, &listed.rows),
-            vec!["Aderrasi - Spiral", "Rovastar - Spiral Cage"]
-        );
-        assert_eq!(
-            folder_rows(&listed.rows),
-            vec![
-                ("cream".into(), 2, 0, true),
-                ("Fractal".into(), 1, 1, true),
-                ("Waveform".into(), 1, 1, true),
-            ],
-            "the counts read the matches, and a search opens what it left"
-        );
-
-        // A folder with nothing left drops out entirely rather than
-        // sitting there at zero.
-        let listed = tree.rows("bloom", &HashSet::new(), PRESET_ROWS);
-        assert_eq!(
-            folder_rows(&listed.rows),
-            vec![("cream".into(), 1, 0, true), ("Fractal".into(), 1, 1, true)]
-        );
-
-        // The labels are folded at index time, so a mixed-case preset
-        // still matches the folded query the box hands down.
-        assert_eq!(
-            tree.rows("bloom", &HashSet::new(), PRESET_ROWS).matched,
-            1,
-            "Bloom was indexed with a capital"
-        );
-
-        // A miss is an empty page rather than the whole library.
-        let listed = tree.rows("nothing here", &HashSet::new(), PRESET_ROWS);
-        assert_eq!(listed.matched, 0);
-        assert!(listed.rows.is_empty());
-    }
-
-    /// The cap is a limit on rows drawn, never on rows searched. What it
-    /// cuts, the count line is told about.
-    #[test]
-    fn the_row_cap_limits_the_drawing_and_not_the_search() {
-        let paths: Vec<String> = (0..50)
-            .map(|n| format!("/packs/cream/Fractal/preset {n:02}.milk"))
-            .collect();
-        let mut tree = PresetTree::build(&paths.iter().map(PathBuf::from).collect::<Vec<_>>());
-
-        let listed = tree.rows("preset", &HashSet::new(), 10);
-        assert_eq!(listed.matched, 50, "every preset was tested");
-        assert_eq!(listed.shown, 10, "ten of them got a row");
-        assert_eq!(preset_labels(&tree, &listed.rows).len(), 10);
-
-        // Under the cap, shown and matched agree, which is what silences
-        // the extra line on the page.
-        let listed = tree.rows("preset 0", &HashSet::new(), 10);
-        assert_eq!(listed.matched, 10);
-        assert_eq!(listed.shown, 10);
-    }
-
-    /// Two roots that share nothing both come out as top rows.
-    #[test]
-    fn separate_roots_each_get_a_top_row() {
-        let mut tree = PresetTree::build(&preset_paths(&[
-            "/packs/cream/Fractal/one.milk",
-            "/other/drive/pack/two.milk",
-        ]));
-        let listed = tree.rows("", &HashSet::new(), PRESET_ROWS);
-        assert_eq!(
-            folder_rows(&listed.rows),
-            vec![
-                ("Fractal".into(), 1, 0, false),
-                ("pack".into(), 1, 0, false)
-            ]
-        );
-        assert_eq!(listed.matched, 2);
-    }
-
     /// The relative form is what travels: under its root, forward
     /// slashes, and the shortest when roots overlap.
     #[test]
@@ -3267,16 +2747,5 @@ mod tests {
             find_folder_by_relative(&folders, &roots, "cream/Nope"),
             None
         );
-    }
-
-    #[test]
-    fn a_preset_is_named_by_its_file_stem() {
-        assert_eq!(
-            preset_label(Path::new("/packs/cream/Geiss - Spiral Artifact.milk")),
-            "Geiss - Spiral Artifact"
-        );
-        // A path with nothing to take a stem from reads as itself rather
-        // than as an empty row.
-        assert_eq!(preset_label(Path::new("/packs/cream/")), "cream");
     }
 }

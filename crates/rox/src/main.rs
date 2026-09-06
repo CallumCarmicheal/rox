@@ -29,6 +29,7 @@ mod keymap;
 mod lastfm;
 mod lyrics;
 mod matching;
+mod milkdrop_picker;
 mod panel_catalog;
 mod panel_presets;
 mod panel_settings;
@@ -246,6 +247,7 @@ fn install_openers() {
         health_window: health_window::open,
         signals_window: signals_window::open,
         shader_editor: shader_editor::open,
+        milkdrop_picker: milkdrop_picker::open,
         console_notice: console_window::notice,
         lyrics_watch: watch_lyrics_panel,
         lyrics_edit: lyrics::edit::open,

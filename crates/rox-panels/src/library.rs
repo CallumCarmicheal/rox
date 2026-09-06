@@ -24,7 +24,7 @@ use rox_dock::{Panel, PanelEvent, PanelInfo, PanelState, TabPanel};
 use rox_panel_api::actions::{TypeAheadNext, TypeAheadPrev};
 
 use rox_core::fmt::{fmt_ago, fmt_ms, fmt_num};
-use rox_core::QUEUE_CAP;
+use rox_core::{QUEUE_CAP, SHUFFLE_SEED};
 use rox_library::cue::TrackKey;
 use rox_library::projection::{Projection, QueryField, QUERY_FIELDS};
 use rox_library::view::{self, Group, Grouping, Row, ViewSpec};
@@ -171,6 +171,24 @@ fn play_window(view: &[Row], ix: usize, cap: usize) -> Option<(Vec<usize>, usize
     behind.push(ix);
     behind.extend(ahead);
     Some((behind, start))
+}
+
+/// The rows a shuffle-on click seeds the session with: the clicked track
+/// first, then `count` track rows drawn uniformly from the rest of the view.
+/// A header row pins nothing and the draw is the whole seed.
+///
+/// A sample rather than a window: the old draw took the view's leading rows
+/// up to the queue cap, so shuffle on a big library only ever mixed the
+/// first few artists in it, and the rest of the view arrived in browse
+/// order behind them. One pass over the view and never more than the seed
+/// in hand, the same reason [`play_window`] walks out from the click.
+fn shuffle_seed(view: &[Row], ix: usize, count: usize) -> Vec<usize> {
+    let head = matches!(view.get(ix), Some(Row::Track(_))).then_some(ix);
+    let rest = (0..view.len()).filter(|&i| Some(i) != head && matches!(view[i], Row::Track(_)));
+    let mut rows = Vec::with_capacity(count + 1);
+    rows.extend(head);
+    rows.extend(rox_playback::engine::reservoir(rest, count));
+    rows
 }
 
 /// Swap a finished pass into the table, unless a newer one was scheduled
@@ -3478,27 +3496,12 @@ impl LibraryPanel {
     /// queue so the pinned head plays before the shuffled rest. "Play Shuffled"
     /// on a single row and a shuffle-on double click both come through here.
     ///
-    /// The draw is the clicked row plus the view's leading rows up to the
-    /// cap, which is what the whole-view build came to anyway once
-    /// [`Self::play_shuffled`] truncated it; taking only that many out of
-    /// the view keeps a click on a million-row list from listing the whole
-    /// thing to throw all but a thousand of it away.
+    /// The draw is the clicked row plus [`SHUFFLE_SEED`] rows sampled across
+    /// the whole view (see [`shuffle_seed`]). Continuation draws the rest
+    /// of the view and then the library at random behind it (ADR 17), so
+    /// the seed only has to be enough to start on.
     fn play_shuffled_from(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let rows = {
-            let delegate = self.table.read(cx).delegate();
-            let mut tracks = Vec::with_capacity(QUEUE_CAP.min(delegate.view.len()));
-            // A press on a header row plays its view from the front, the
-            // way it always did; only a track row heads the queue.
-            if delegate.track_at(ix).is_some() {
-                tracks.push(ix);
-            }
-            tracks.extend(
-                (0..delegate.view.len())
-                    .filter(|&i| i != ix && delegate.track_at(i).is_some())
-                    .take(QUEUE_CAP - tracks.len()),
-            );
-            tracks
-        };
+        let rows = shuffle_seed(&self.table.read(cx).delegate().view, ix, SHUFFLE_SEED);
         self.play_shuffled(rows, cx);
     }
 
@@ -4970,6 +4973,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The shuffle seed pins the clicked track and samples the rest of the
+    /// view: never a header, never the click twice, never more than asked,
+    /// and across the whole list rather than off its top.
+    #[test]
+    fn the_shuffle_seed_samples_the_whole_view() {
+        let view = view_with_heads(400, 10);
+        let ix = (0..view.len())
+            .find(|&i| matches!(view[i], Row::Track(_)))
+            .expect("a track row");
+        let mut landed = std::collections::HashSet::new();
+        for _ in 0..20 {
+            let rows = shuffle_seed(&view, ix, 30);
+            assert_eq!(rows[0], ix);
+            assert_eq!(rows.len(), 31);
+            let distinct: std::collections::HashSet<usize> = rows.iter().copied().collect();
+            assert_eq!(distinct.len(), rows.len(), "a row came back twice");
+            assert!(rows.iter().all(|&i| matches!(view[i], Row::Track(_))));
+            landed.extend(rows.iter().copied());
+        }
+        assert!(
+            landed.iter().any(|&i| i > view.len() / 2),
+            "the draw never left the top of the view"
+        );
+        // A header row pins nothing; a small view comes back whole.
+        assert!(!shuffle_seed(&view, 0, 5).contains(&0));
+        let small = view_with_heads(4, 2);
+        assert_eq!(shuffle_seed(&small, 1, 100).len(), 4);
     }
 
     /// A press on a header row or past the end plays nothing.

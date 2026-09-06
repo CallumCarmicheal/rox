@@ -1861,6 +1861,41 @@ pub fn shuffle_slice<T>(slice: &mut [T]) {
     }
 }
 
+/// `count` items drawn uniformly from `items`, in one pass and without
+/// holding more than the draw: reservoir sampling, xorshift64 off the same
+/// per-process keys [`shuffle_slice`] uses.
+///
+/// For the draws that would otherwise list a whole pool to keep a hundred
+/// of it: a shuffle-on click across a million-row view, a continuation batch
+/// out of everything the session hasn't played. The output keeps no
+/// particular order, which every caller either shuffles again or doesn't
+/// care about.
+pub fn reservoir<T>(items: impl IntoIterator<Item = T>, count: usize) -> Vec<T> {
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = Vec::with_capacity(count);
+    if count == 0 {
+        return out;
+    }
+    let mut state = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
+        | 1;
+    for (seen, item) in items.into_iter().enumerate() {
+        if out.len() < count {
+            out.push(item);
+            continue;
+        }
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let j = (state % (seen as u64 + 1)) as usize;
+        if j < count {
+            out[j] = item;
+        }
+    }
+    out
+}
+
 /// Shuffle the first `width` of a slice among themselves, leaving the rest
 /// in place. The radio's band: what comes next is drawn from the nearest
 /// `width` entries, and everything behind them keeps its ranking.

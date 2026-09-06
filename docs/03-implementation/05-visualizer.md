@@ -275,11 +275,14 @@ the panel, sends `Resume`.
 creates it; the packs are the user's download, and the settings page names the three
 worth having. `PresetLibrary::scan` walks the roots for `*.milk` case-insensitively and
 sorts them, reading nothing inside the files: only libprojectM's parser can tell a
-broken preset from a working one, and that answer arrives as `PresetFailed`. The
-directory layout is the one structure it keeps, since the packs organise themselves by
-category folder, and a `Rotation` narrows what Next, Previous and the timed switch walk
-to one folder or to the favourites list. With no presets found projectM's built-in idle
-preset renders, so the panel is never blank.
+broken preset from a working one, and that answer arrives as `PresetFailed`. The same
+walk collects every `textures/` directory it passes, and the worker hands projectM the
+app's own `textures/` folder first and then those, because libprojectM searches only
+the paths it's given and never beside the preset file, and the big packs ship their
+images inside the pack. The directory layout is the one structure it keeps, since the
+packs organise themselves by category folder, and a `Rotation` narrows what Next,
+Previous and the timed switch walk to one folder or to the favourites list. With no
+presets found projectM's built-in idle preset renders, so the panel is never blank.
 
 **What it costs.** `cargo run -p rox-milkdrop --release --example headless -- <presets>`
 runs the engine for ten seconds with no UI and prints the baseline the zero-copy

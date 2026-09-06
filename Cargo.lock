@@ -7231,6 +7231,7 @@ version = "1.25.0-rc.1"
 dependencies = [
  "crossbeam-channel",
  "glutin",
+ "image",
  "log",
  "raw-window-handle",
  "rox-milkdrop-sys",

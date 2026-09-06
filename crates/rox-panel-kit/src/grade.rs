@@ -25,14 +25,27 @@
 //! background to its accent, interpolated in Oklab so the midpoints
 //! don't go grey. Black lands on the background and white on the accent,
 //! which is the app's own colours in the preset's shape, and it follows
-//! the cover for free when song theming drives the accent. `Cover` is the
-//! same ramp topped with the playing cover's dominant colour, for the
-//! cover's colour with song theming off; the accent stands in while
-//! there's no cover to take it from. The cover colour lends its hue and
-//! chroma only: its lightness is replaced by the accent's, which the
-//! palette already set against the background. A dark cover taken as-is
-//! made a ramp from near-black to dark brown, and a frame with no
-//! contrast in it is a frame nobody can see.
+//! the cover for free when song theming drives the accent.
+//!
+//! `Cover` paints the frame in the playing cover's dominant colour, for
+//! the cover's colour with song theming off; the accent stands in while
+//! there's no cover to take it from. It's a three-stop ramp rather than
+//! Palette's two: the background, the cover's colour at full chroma
+//! halfway up, and the cover's hue at the accent's lightness on top. A
+//! straight line from a grey background to a colour has half its chroma
+//! in the mid-tones, and the top stop loses chroma again to the gamut
+//! fit at the accent's lightness, so the two-stop version of this read as
+//! a tint over a grey frame. The cover colour lends its hue and chroma
+//! only: its lightness is replaced by the ramp's, which the palette
+//! already set against the background. A dark cover taken as-is made a
+//! ramp from near-black to dark brown, and a frame with no contrast in it
+//! is a frame nobody can see.
+//!
+//! The ramp alone is still a duotone, and two preset pixels at the same
+//! lightness in different colours would come out the same. So the frame's
+//! own colour survives the remap: a pixel keeps its chroma where that's
+//! more than the ramp's, and its hue lands a spread either side of the
+//! cover's, folded from the full circle. Grey pixels take the ramp as is.
 //!
 //! Both run in linear light: the frame is sampled from an sRGB texture
 //! that decodes on read, and Oklab is defined from linear sRGB. The theme
@@ -51,6 +64,8 @@ pub const SLOT_MODE: usize = 3;
 pub const SLOT_BG: usize = 4;
 pub const SLOT_LIGHT: usize = 7;
 pub const SLOT_ACCENT: usize = 8;
+/// Two slots: the cover's Oklab hue in radians, then its chroma. Slot 13
+/// is free.
 pub const SLOT_COVER: usize = 11;
 
 /// How the frame's colours meet the theme. Mirrors rox-core's
@@ -78,10 +93,10 @@ pub struct Grade {
     pub light: bool,
     pub bg: [f32; 3],
     pub accent: [f32; 3],
-    /// The cover ramp's top stop: the cover's hue and chroma at the
-    /// accent's lightness, or the accent again while there's no cover
-    /// with colour in it.
-    pub cover: [f32; 3],
+    /// The cover ramp's colour as Oklab hue in radians and chroma. The
+    /// lightness is the ramp's own, so it isn't carried. The accent's
+    /// while there's no cover with colour in it.
+    pub cover: (f32, f32),
 }
 
 impl Grade {
@@ -95,7 +110,7 @@ impl Grade {
             light,
             bg: linear(bg),
             accent: linear(accent),
-            cover: linear(cover.map_or(accent, |cover| cover_top(cover, accent))),
+            cover: cover_stop(cover.unwrap_or(accent)),
         }
     }
 
@@ -129,24 +144,24 @@ impl Grade {
         signals[SLOT_BG..SLOT_BG + 3].copy_from_slice(&self.bg);
         signals[SLOT_LIGHT] = if self.light { 1.0 } else { 0.0 };
         signals[SLOT_ACCENT..SLOT_ACCENT + 3].copy_from_slice(&self.accent);
-        signals[SLOT_COVER..SLOT_COVER + 3].copy_from_slice(&self.cover);
+        signals[SLOT_COVER] = self.cover.0;
+        signals[SLOT_COVER + 1] = self.cover.1;
     }
 }
 
-/// The least chroma the cover ramp tops out at. A cover whose dominant
-/// colour is a muted tan still has a hue worth showing, and at the
-/// accent's lightness that hue needs some chroma behind it to read as a
-/// colour rather than a warm grey.
+/// The least chroma the cover ramp peaks at. A cover whose dominant
+/// colour is a muted tan still has a hue worth showing, and that hue
+/// needs some chroma behind it to read as a colour rather than a warm
+/// grey.
 const COVER_CHROMA_FLOOR: f32 = 0.1;
 
-/// The cover ramp's top stop: the cover's hue, its chroma or the floor,
-/// and the accent's lightness. The lightness swap is the whole point: the
-/// ramp's contrast is the distance between its ends, and the palette
-/// already put the accent that distance from the background.
-pub fn cover_top(cover: Rgba, accent: Rgba) -> Rgba {
-    let (lightness, _, _) = palette::rgba_to_oklch(accent);
+/// The cover ramp's colour: the cover's hue in radians and its chroma or
+/// the floor. The lightness is dropped on purpose; the ramp's contrast is
+/// the distance between its ends, and the palette already put the accent
+/// that distance from the background.
+pub fn cover_stop(cover: Rgba) -> (f32, f32) {
     let (_, chroma, hue) = palette::rgba_to_oklch(cover);
-    palette::oklch_to_rgba(lightness, chroma.max(COVER_CHROMA_FLOOR), hue, 1.0)
+    (hue, chroma.max(COVER_CHROMA_FLOOR))
 }
 
 /// Whether a background reads as light: past the midpoint of Oklab
@@ -243,24 +258,58 @@ fn turn_hue(rgb: vec3<f32>, hue: f32, amount: f32) -> vec3<f32> {
     // The short way around: fold the difference into a half turn either
     // side, so a red frame against a magenta cover goes the near way and
     // not the long way through green.
-    let apart = hue - start;
-    let delta = apart - 6.28318530718 * round(apart / 6.28318530718);
-    let turned = start + delta * amount;
+    let turned = start + fold_hue(hue - start) * amount;
     return fit_gamut(vec3<f32>(lab.x, vec2<f32>(cos(turned), sin(turned)) * chroma));
 }
 
+fn oklch(lightness: f32, chroma: f32, hue: f32) -> vec3<f32> {
+    return vec3<f32>(lightness, chroma * cos(hue), chroma * sin(hue));
+}
+
+// The nearest way round the hue circle, in the range of a half turn
+// either side.
+fn fold_hue(apart: f32) -> f32 {
+    return apart - 6.28318530718 * round(apart / 6.28318530718);
+}
+
+// The cover remap. `hue` and `chroma` are the cover's; the ramp climbs
+// from the background to the cover at full chroma halfway up, then on to
+// the cover's hue at the accent's lightness, where the gamut fit pales
+// it. On top of the ramp the frame's own colour: its chroma where that
+// beats the ramp's, and its hue folded into a quarter turn either side
+// of the cover's, fading in with the chroma so grey pixels get the ramp
+// exactly. Chroma at the fold's edge is the gamut fit's problem.
+fn cover_grade(lab: vec3<f32>, floor: vec3<f32>, top_l: f32, hue: f32, chroma: f32) -> vec3<f32> {
+    let t = clamp(lab.x, 0.0, 1.0);
+    let peak = oklch(mix(floor.x, top_l, 0.5), chroma, hue);
+    let top = oklch(top_l, chroma, hue);
+    let ramp = select(
+        mix(peak, top, t * 2.0 - 1.0),
+        mix(floor, peak, t * 2.0),
+        t < 0.5,
+    );
+    let own = length(lab.yz);
+    let spread = 0.25 * smoothstep(0.0, 0.05, own);
+    let turned = hue + fold_hue(atan2(lab.z, lab.y) - hue) * spread;
+    return fit_gamut(oklch(ramp.x, max(length(ramp.yz), own), turned));
+}
+
 // Slot 3 is the mode, 4-6 the theme's root background, 7 the light flag,
-// 8-10 the accent, 11-13 the cover's colour; 1 and 2 are the album
-// tint's hue and amount.
+// 8-10 the accent, 11 and 12 the cover's hue and chroma; 1 and 2 are the
+// album tint's hue and amount.
 fn grade(rgb: vec3<f32>) -> vec3<f32> {
     let mode = params.signals[0].w;
     let light = params.signals[1].w;
     var out = rgb;
-    if (mode >= 1.5) {
+    if (mode >= 2.5) {
         let lab = linear_to_oklab(rgb);
         let floor = linear_to_oklab(params.signals[1].xyz);
-        let cover = vec3<f32>(params.signals[2].w, params.signals[3].x, params.signals[3].y);
-        let ceiling = linear_to_oklab(select(params.signals[2].xyz, cover, mode >= 2.5));
+        let accent = linear_to_oklab(params.signals[2].xyz);
+        out = cover_grade(lab, floor, accent.x, params.signals[2].w, params.signals[3].x);
+    } else if (mode >= 1.5) {
+        let lab = linear_to_oklab(rgb);
+        let floor = linear_to_oklab(params.signals[1].xyz);
+        let ceiling = linear_to_oklab(params.signals[2].xyz);
         out = fit_gamut(mix(floor, ceiling, clamp(lab.x, 0.0, 1.0)));
     } else if (mode >= 0.5 && light > 0.5) {
         let lab = linear_to_oklab(rgb);
@@ -296,11 +345,14 @@ mod tests {
         assert_eq!(signals[SLOT_BG], signals[SLOT_BG + 1]);
         assert!(signals[SLOT_ACCENT] > 0.99, "full red decodes to one");
         assert!(signals[SLOT_ACCENT + 2] < 0.01, "no blue decodes to none");
-        assert!(
-            signals[SLOT_COVER + 2] > 0.99,
-            "the cover's blue lands in its slot"
+        let (_, blue_c, blue_h) = palette::rgba_to_oklch(gpui::rgb(0x0000ff));
+        assert_eq!(
+            signals[SLOT_COVER], blue_h,
+            "the cover's hue lands in its slot"
         );
-        assert_eq!(signals[14], 0.5, "the slots past the cover are untouched");
+        assert_eq!(signals[SLOT_COVER + 1], blue_c, "then its chroma");
+        assert_eq!(signals[13], 0.5, "the slot past the cover is untouched");
+        assert_eq!(signals[14], 0.5, "and so are the callers'");
     }
 
     #[test]
@@ -314,30 +366,26 @@ mod tests {
         assert!(!Grade::new(GradeMode::Cover, false, bg, accent, None).tints());
     }
 
-    /// A dark cover colour keeps its hue and takes the accent's
-    /// lightness, so the ramp still spans the same contrast Palette's
-    /// does.
+    /// A dark, muted cover colour keeps its hue and has its chroma
+    /// floored; its lightness never reaches the ramp.
     #[test]
-    fn a_dark_cover_is_lifted_to_the_accents_lightness() {
-        let accent = gpui::rgb(0xffb300);
+    fn a_dark_cover_keeps_its_hue_and_is_floored() {
         let cover = gpui::rgb(0x3a2410);
-        let top = cover_top(cover, accent);
-        let (want_l, _, _) = palette::rgba_to_oklch(accent);
-        let (cover_l, _, cover_h) = palette::rgba_to_oklch(cover);
-        let (got_l, got_c, got_h) = palette::rgba_to_oklch(top);
+        let (cover_l, cover_c, cover_h) = palette::rgba_to_oklch(cover);
+        let (got_h, got_c) = cover_stop(cover);
         assert!(cover_l < 0.4, "the cover really is dark: {cover_l}");
-        assert!(
-            (got_l - want_l).abs() < 0.05,
-            "lifted to {got_l}, wanted {want_l}"
-        );
-        assert!(
-            (got_h - cover_h).abs() < 0.2,
-            "hue kept: {got_h} vs {cover_h}"
-        );
-        assert!(
-            got_c >= COVER_CHROMA_FLOOR - 0.03,
-            "chroma floored: {got_c}"
-        );
+        assert!(cover_c < COVER_CHROMA_FLOOR, "and muted: {cover_c}");
+        assert_eq!(got_h, cover_h, "hue kept");
+        assert_eq!(got_c, COVER_CHROMA_FLOOR, "chroma floored");
+    }
+
+    /// A vivid cover colour goes through untouched, floor or not.
+    #[test]
+    fn a_vivid_cover_keeps_its_chroma() {
+        let cover = gpui::rgb(0xff0000);
+        let (_, cover_c, cover_h) = palette::rgba_to_oklch(cover);
+        assert!(cover_c > COVER_CHROMA_FLOOR);
+        assert_eq!(cover_stop(cover), (cover_h, cover_c));
     }
 
     /// No cover means the cover ramp tops out at the accent, so the mode
@@ -351,7 +399,7 @@ mod tests {
             gpui::rgb(0xffb300),
             None,
         );
-        assert_eq!(grade.cover, grade.accent);
+        assert_eq!(grade.cover, cover_stop(gpui::rgb(0xffb300)));
     }
 
     #[test]

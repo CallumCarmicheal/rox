@@ -35,11 +35,12 @@ use crate::workspace::{
     AbRepeat, AnalyzeTempo, BuildAcoustic, ClosePanelAction, CloseWindow, CycleLoop,
     DecreaseFontSize, FillSortNames, FindDuplicates, FocusSearch, ImportWorkspace,
     IncreaseFontSize, MeasureReplayGain, NewEmptyWindow, NewWindow, NextTrack, OpenAbout,
-    OpenConsole, OpenEqualizer, OpenHealth, OpenPowerSearch, OpenQuickPlay, OpenSettings,
-    OpenSignals, OpenStats, OpenTasks, OpenWelcome, PlayRandom, PreviousTrack, Quit, RescanLibrary,
-    ResetFontSize, RomanizeLibrary, StopPlayback, TagGenres, ToggleArtTheming, ToggleDecorations,
-    ToggleDesignMode, ToggleMenubar, ToggleMute, TogglePostShader, ToggleQuitToTray,
-    ToggleResizeLock, ToggleShuffle, ToggleStopAfter, ToggleTheme, VolumeDown, VolumeUp,
+    OpenConsole, OpenEqualizer, OpenHealth, OpenPowerSearch, OpenPresetPicker, OpenQuickPlay,
+    OpenSettings, OpenSignals, OpenStats, OpenTasks, OpenWelcome, PlayRandom, PreviousTrack, Quit,
+    RescanLibrary, ResetFontSize, RomanizeLibrary, StopPlayback, TagGenres, ToggleArtTheming,
+    ToggleDecorations, ToggleDesignMode, ToggleMenubar, ToggleMute, TogglePostShader,
+    ToggleQuitToTray, ToggleResizeLock, ToggleShuffle, ToggleStopAfter, ToggleTheme, VolumeDown,
+    VolumeUp,
 };
 
 /// Bindings match key contexts along the focus path, so this scope holds
@@ -231,6 +232,7 @@ mod defaults {
     pub const NEW_WINDOW: &[&str] = &["cmd-n"];
     pub const TASKS: &[&str] = &["cmd-j"];
     pub const EQUALIZER: &[&str] = &["cmd-e"];
+    pub const PRESET_PICKER: &[&str] = &["cmd-shift-v"];
     pub const NEXT_TRACK: &[&str] = &["cmd-right"];
     pub const PREVIOUS_TRACK: &[&str] = &["cmd-left"];
     pub const STOP: &[&str] = &["cmd-."];
@@ -259,6 +261,7 @@ mod defaults {
     pub const NEW_WINDOW: &[&str] = &["ctrl-n"];
     pub const TASKS: &[&str] = &["ctrl-j"];
     pub const EQUALIZER: &[&str] = &["ctrl-e"];
+    pub const PRESET_PICKER: &[&str] = &["ctrl-shift-v"];
     pub const NEXT_TRACK: &[&str] = &["ctrl-right"];
     pub const PREVIOUS_TRACK: &[&str] = &["ctrl-left"];
     pub const STOP: &[&str] = &["ctrl-."];
@@ -587,6 +590,15 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             defaults::EQUALIZER,
             OpenEqualizer,
             rox_i18n::t_static("keymap-open-equalizer.description")
+        ),
+        command!(
+            "open_preset_picker",
+            rox_i18n::t_static("keymap-open-preset-picker"),
+            Group::Windows,
+            WORKSPACE,
+            defaults::PRESET_PICKER,
+            OpenPresetPicker,
+            rox_i18n::t_static("keymap-open-preset-picker.description")
         ),
         command!(
             "open_console",

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use rox_library::rusqlite::Connection;
 use rox_library::{embeddings, listens, song, store};
 
-use crate::engine::{shuffle_head, shuffle_slice};
+use crate::engine::{reservoir, shuffle_head, shuffle_slice};
 
 /// How many tracks a batch asks for. Big enough that a slow provider gets
 /// asked once an album rather than once a track, small enough that what
@@ -176,23 +176,43 @@ pub trait Provider: Send {
     fn next(&self, conn: &Connection, seed: &Seed) -> Vec<Pick>;
 }
 
+/// How the queue is ordered when a refill is asked for. The player reads it
+/// off the shuffle flag and mode on the tick that asks, and the landing
+/// checks it again, because a batch drawn for one order is the wrong twenty
+/// tracks for a queue that has since changed to another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Order {
+    /// Shuffle off: the queue plays in the order it was built.
+    Browse,
+    /// Shuffle on, in the Random mode: the upcoming portion is a permutation.
+    Random,
+    /// Shuffle on, in the Similar mode: the upcoming portion is ranked by
+    /// how much it sounds like the playing track.
+    Similar,
+}
+
 /// The strategy behind a mode's pick, None while continuation is off. Built
 /// on the background executor, at the point of use, so a mode switched during
 /// a query can't leave a live provider behind.
 ///
-/// `similar` is whether the queue is currently ordered by sound (shuffle on,
-/// in the Similar mode), and it takes the draw over whatever mode is picked.
-/// Radio isn't a strategy the listener chooses any more: a queue ordered by
-/// what sounds alike and then refilled from browse order would answer two
-/// different questions in one session, so the refill follows the order.
-/// Turning on Similar shuffle is turning on radio, which is what it looked
-/// like it did anyway.
-pub fn provider(mode: Mode, similar: bool) -> Option<Box<dyn Provider>> {
-    match mode {
-        Mode::Off => None,
-        _ if similar => Some(Box::new(Radio)),
-        Mode::Continue => Some(Box::new(Browse)),
-        Mode::Weighted => Some(Box::new(Weighted)),
+/// `order` is how the queue is being ordered, and it takes the draw over
+/// whatever mode is picked. Radio isn't a strategy the listener chooses any
+/// more: a queue ordered by what sounds alike and then refilled from browse
+/// order would answer two different questions in one session, so the refill
+/// follows the order. Turning on Similar shuffle is turning on radio, which
+/// is what it looked like it did anyway.
+///
+/// Random shuffle under Continue is the same call: the listener shuffled a
+/// list, and what plays on when it runs out is a shuffle of the rest, not
+/// the next album down the browse order with its tracks scrambled. Weighted
+/// is left alone, since its draw is already a shuffle over history.
+pub fn provider(mode: Mode, order: Order) -> Option<Box<dyn Provider>> {
+    match (mode, order) {
+        (Mode::Off, _) => None,
+        (_, Order::Similar) => Some(Box::new(Radio)),
+        (Mode::Continue, Order::Random) => Some(Box::new(Shuffled)),
+        (Mode::Continue, Order::Browse) => Some(Box::new(Browse)),
+        (Mode::Weighted, _) => Some(Box::new(Weighted)),
     }
 }
 
@@ -251,6 +271,48 @@ impl Provider for Browse {
         // this is what exhausted looks like on a twelve-track library.
         if out.is_empty() {
             out.extend(all.into_iter().take(seed.count));
+        }
+        out.into_iter().map(Pick::ungrouped).collect()
+    }
+}
+
+/// The browse order's shuffled twin: what Random shuffle plays on into once
+/// the shuffled seed runs out. Draws at random from what the view still has
+/// unplayed, then from the rest of the library, and nothing already heard
+/// comes back until both are exhausted.
+///
+/// The view goes first for the same reason Browse resumes it: a shuffle-on
+/// click in a filtered view seeds a sample of that list, and the rest of that
+/// list is what the listener asked to hear before the library at large is.
+/// Within each pool the draw is uniform, which is what makes this a library
+/// shuffle rather than a browse walk in twenty-track chunks.
+struct Shuffled;
+
+impl Provider for Shuffled {
+    fn next(&self, conn: &Connection, seed: &Seed) -> Vec<Pick> {
+        let mut seen = seed.seen();
+        let mut out = Vec::new();
+        if let Scope::View(order) = &seed.scope {
+            out = reservoir(
+                order.iter().copied().filter(|id| !seen.contains(id)),
+                seed.count,
+            );
+        }
+        if out.len() >= seed.count {
+            return out.into_iter().map(Pick::ungrouped).collect();
+        }
+        let Ok(all) = store::all_ids(conn) else {
+            return out.into_iter().map(Pick::ungrouped).collect();
+        };
+        seen.extend(out.iter().copied());
+        out.extend(reservoir(
+            all.iter().copied().filter(|id| !seen.contains(id)),
+            seed.count - out.len(),
+        ));
+        // Everything has been heard. Go round again the way Browse does,
+        // shuffled, rather than fall silent.
+        if out.is_empty() {
+            out = reservoir(all, seed.count);
         }
         out.into_iter().map(Pick::ungrouped).collect()
     }
@@ -783,7 +845,7 @@ mod tests {
             serde_json::from_str::<Mode>(r#""radio""#).unwrap(),
             Mode::default()
         );
-        assert!(provider(Mode::Off, true).is_none());
+        assert!(provider(Mode::Off, Order::Similar).is_none());
 
         // The same mode, the same seed, the two orders: browse carries on
         // down the view, radio leaves it. An unanalyzed library gives radio
@@ -793,16 +855,55 @@ mod tests {
         let all = ids(&conn);
         let view = Arc::new(all.clone());
         let played = all[2..6].to_vec();
-        let ordered = provider(Mode::Continue, false)
+        let ordered = provider(Mode::Continue, Order::Browse)
             .expect("continuation is on")
             .next(&conn, &seed(Scope::View(view.clone()), played.clone(), 3));
         assert_eq!(picked(ordered), all[6..9].to_vec(), "the browse resume");
-        let by_sound = provider(Mode::Continue, true)
+        let by_sound = provider(Mode::Continue, Order::Similar)
             .expect("continuation is on")
             .next(&conn, &seed(Scope::View(view), played.clone(), 3));
         for id in picked(by_sound) {
             assert!(!played.contains(&id), "radio replayed the session");
         }
+    }
+
+    /// Random shuffle refills from everything unheard rather than walking on
+    /// down the browse order: the view's remainder first, then the library,
+    /// and nothing the session already held until both run out.
+    #[test]
+    fn random_shuffle_draws_from_everything_unheard() {
+        let conn = library(12);
+        let all = ids(&conn);
+        let view = Arc::new(all[..6].to_vec());
+        let played = all[..4].to_vec();
+        let shuffled = provider(Mode::Continue, Order::Random).expect("continuation is on");
+        // Two unheard in the view, so those two come first and the library
+        // fills the rest, with no repeats of the view's picks or the plays.
+        let batch =
+            picked(shuffled.next(&conn, &seed(Scope::View(view.clone()), played.clone(), 5)));
+        assert_eq!(batch.len(), 5);
+        assert!(
+            batch.contains(&all[4]) && batch.contains(&all[5]),
+            "the view's remainder"
+        );
+        for id in &batch {
+            assert!(!played.contains(id), "replayed the session");
+        }
+        let distinct: HashSet<i64> = batch.iter().copied().collect();
+        assert_eq!(distinct.len(), batch.len(), "a pick came back twice");
+        // A view still holding plenty stays inside it. Asked often enough
+        // the draw lands on more than the next rows down, which is the
+        // whole difference from the browse resume.
+        let mut landed: HashSet<i64> = HashSet::new();
+        for _ in 0..64 {
+            landed.extend(picked(
+                shuffled.next(&conn, &seed(Scope::View(view.clone()), played.clone(), 1)),
+            ));
+        }
+        assert_eq!(landed, [all[4], all[5]].into_iter().collect());
+        // Everything heard: the library goes round again instead of ending.
+        let again = picked(shuffled.next(&conn, &seed(Scope::Library, all.clone(), 3)));
+        assert_eq!(again.len(), 3);
     }
 
     /// Resuming past the session's position is the whole of the browse
