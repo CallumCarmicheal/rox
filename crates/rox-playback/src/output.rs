@@ -431,7 +431,16 @@ pub(crate) fn fill<T>(
         return;
     }
 
-    if !shared.playing.load(Ordering::Relaxed) {
+    // A step taken while paused plays a blip this long through the pause.
+    // The pause itself never lifts: `playing` stays false the whole time, so
+    // nothing reading it (the transport, the skip fade, a panel that dims
+    // while paused) sees anything happen. Only frames that actually leave
+    // here count against it, so a dry ring waiting on the seek's refill
+    // doesn't eat the blip before it's audible.
+    let mut blip = shared.audition_left.load(Ordering::Relaxed);
+    let auditioning = blip > 0;
+
+    if !shared.playing.load(Ordering::Relaxed) && !auditioning {
         data.fill(T::from_sample(0.0f32));
         return;
     }
@@ -441,6 +450,11 @@ pub(crate) fn fill<T>(
 
     let mut frames = data.chunks_exact_mut(device_channels);
     for frame in frames.by_ref() {
+        // The blip has played out; the rest of this buffer is silence.
+        if auditioning && blip == 0 {
+            frame.fill(T::from_sample(0.0f32));
+            continue;
+        }
         // The ring holds whole stereo frames; only pop when both
         // samples are there so interleaving can't slip. Dry ring means
         // underrun (or end of queue): emit silence, don't count it.
@@ -482,6 +496,7 @@ pub(crate) fn fill<T>(
             }
         }
         frames_out += 1;
+        blip = blip.saturating_sub(1);
     }
     // A tail too short to be a frame gets silence, not a popped sample it
     // has no partner for.
@@ -491,6 +506,9 @@ pub(crate) fn fill<T>(
         shared
             .frames_consumed
             .fetch_add(frames_out, Ordering::Relaxed);
+    }
+    if auditioning {
+        shared.audition_left.store(blip, Ordering::Relaxed);
     }
 }
 
@@ -550,6 +568,59 @@ mod tests {
         assert_eq!(data, [0.0, 0.0]);
         assert_eq!(ring.slots(), 2);
         assert_eq!(shared.frames_consumed.load(Ordering::Relaxed), 0);
+    }
+
+    /// A step while paused: the blip plays its own length through the pause
+    /// and no more, and the pause flag never moves for it.
+    #[test]
+    fn an_audition_blip_plays_its_length_through_the_pause() {
+        let (shared, mut ring, mut tap_tx, _tap) = primed(4);
+        shared.playing.store(false, Ordering::Relaxed);
+        shared.audition_left.store(2, Ordering::Relaxed);
+        let mut data = [9.0f32; 8];
+        fill(&mut data, 2, &shared, &mut ring, &mut tap_tx);
+        // Two frames of audio, then silence for the rest of the buffer.
+        assert_eq!(data, [1.0, -1.0, 2.0, -2.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(shared.frames_consumed.load(Ordering::Relaxed), 2);
+        assert_eq!(shared.audition_left.load(Ordering::Relaxed), 0);
+        assert!(!shared.playing.load(Ordering::Relaxed), "still paused");
+        // What the blip didn't use stays in the ring for the resume.
+        assert_eq!(ring.slots(), 4);
+        // Spent, the callback is back to plain paused silence.
+        let mut data = [9.0f32; 2];
+        fill(&mut data, 2, &shared, &mut ring, &mut tap_tx);
+        assert_eq!(data, [0.0, 0.0]);
+        assert_eq!(ring.slots(), 4);
+    }
+
+    /// A blip longer than one callback carries across buffers rather than
+    /// stopping at the first boundary it meets.
+    #[test]
+    fn a_long_audition_carries_across_callbacks() {
+        let (shared, mut ring, mut tap_tx, _tap) = primed(4);
+        shared.playing.store(false, Ordering::Relaxed);
+        shared.audition_left.store(3, Ordering::Relaxed);
+        let mut data = [9.0f32; 4];
+        fill(&mut data, 2, &shared, &mut ring, &mut tap_tx);
+        assert_eq!(shared.audition_left.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.frames_consumed.load(Ordering::Relaxed), 2);
+        fill(&mut data, 2, &shared, &mut ring, &mut tap_tx);
+        assert_eq!(data, [3.0, -3.0, 0.0, 0.0]);
+        assert_eq!(shared.audition_left.load(Ordering::Relaxed), 0);
+    }
+
+    /// A dry ring is the seek's refill still in flight, not the blip
+    /// playing: silence there would otherwise spend the whole length
+    /// before a sample of the new position ever reached the device.
+    #[test]
+    fn an_underrun_doesnt_spend_the_blip() {
+        let (shared, mut ring, mut tap_tx, _tap) = primed(0);
+        shared.playing.store(false, Ordering::Relaxed);
+        shared.audition_left.store(2, Ordering::Relaxed);
+        let mut data = [9.0f32; 4];
+        fill(&mut data, 2, &shared, &mut ring, &mut tap_tx);
+        assert_eq!(data, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(shared.audition_left.load(Ordering::Relaxed), 2);
     }
 
     #[test]

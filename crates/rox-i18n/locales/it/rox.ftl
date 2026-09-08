@@ -350,6 +350,21 @@ shader-blurb-cube = Un cubo a fil di ferro che ruzzola in finto 3D, disegnato co
 shader-blurb-bloom = Sfere alla deriva sfumate da un secondo passaggio a metà dimensione, la catena in miniatura.
 shader-blurb-tube = Ripropone il pannello sottostante attraverso uno schermo CRT curvo, scanline comprese.
 
+## Go-to window
+
+goto-window-title = rox - Vai al tempo
+goto-time = Tempo
+goto-placeholder = 1:23, 83 o 1:02:03
+goto-now-of = Ora { $time } di { $duration }
+goto-now = Ora { $time }
+goto-nothing-playing = Non sta suonando niente
+goto-target = Vai a { $time }
+goto-unreadable = Non è un tempo
+goto-go = Vai
+goto-hint-before = Premi
+goto-hint-key = Invio
+goto-hint-after = per andare
+
 ## Transport strip pieces
 seek-item-elapsed = Trascorso
 seek-item-strip = Barra
@@ -923,6 +938,11 @@ settings-playback-restore-last-session = Ripristina l'ultima sessione
     .description = Parti con la coda di riproduzione come l'hai lasciata, in pausa sulla traccia che suonava e nel punto in cui era. Le tracce in coda fuori dalle cartelle della tua libreria non si possono ripristinare ed escono dall'ordine
 settings-playback-section-queue = Coda
 settings-playback-section-ratings = Valutazioni
+settings-playback-section-stepping = Passo
+settings-playback-step = Dimensione del passo
+    .description = Di quanto una pressione di un tasto passo sposta la testina
+settings-playback-step-preview = Anteprima del passo
+    .description = Per quanto suona un passo in pausa, così senti dove è finito
 settings-playback-section-startup = Avvio
 settings-playback-shuffle-random = Casuale
     .description = Il casuale che tutti intendono con la parola. Quello che arriva suona senza un ordine particolare
@@ -1117,6 +1137,7 @@ menu-exit = Esci
 menu-fill-sort-names = Riempi i nomi per l'ordinamento...
 menu-romanize-library = Romanizza la libreria...
 menu-find-duplicates = Trova i duplicati...
+menu-go-to-time = Vai al tempo...
 menu-tag-genres = Assegna i generi...
 menu-health = Stato della libreria
 menu-power-search = Ricerca avanzata
@@ -1579,6 +1600,12 @@ keymap-decrease-font-size = Riduci la dimensione del testo
     .description = Abbassa di un passo la dimensione del testo in tutta l'app
 keymap-focus-search = Vai alla ricerca
     .description = Mette il cursore nel campo di ricerca della libreria
+keymap-go-to-time = Vai al tempo
+    .description = Digitare un istante e saltarci
+keymap-step-backward = Passo indietro
+    .description = Spostare la testina indietro di un passo
+keymap-step-forward = Passo avanti
+    .description = Spostare la testina avanti di un passo
 keymap-group-browsing = Navigazione
 keymap-group-editing = Modifica
 keymap-group-library = Libreria

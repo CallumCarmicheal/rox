@@ -349,6 +349,21 @@ shader-blurb-cube = Um cubo em wireframe cambaleando num 3D falso, desenhado com
 shader-blurb-bloom = Orbes à deriva com bloom por um segundo passe pela metade do tamanho, a cadeia em miniatura.
 shader-blurb-tube = Reproduz o painel abaixo através de uma tela curva de CRT, scanlines e tudo.
 
+## Go-to window
+
+goto-window-title = rox - Ir para um tempo
+goto-time = Tempo
+goto-placeholder = 1:23, 83 ou 1:02:03
+goto-now-of = Agora { $time } de { $duration }
+goto-now = Agora { $time }
+goto-nothing-playing = Nada está tocando
+goto-target = Ir para { $time }
+goto-unreadable = Não é um tempo
+goto-go = Ir
+goto-hint-before = Pressione
+goto-hint-key = Enter
+goto-hint-after = para ir
+
 ## Transport strip pieces
 seek-item-elapsed = Decorrido
 seek-item-strip = Barra
@@ -916,6 +931,11 @@ settings-playback-restore-last-session = Restaurar a última sessão
     .description = Iniciar com a fila como você deixou, pausada na faixa que estava tocando e no ponto onde parou. Faixas enfileiradas fora das pastas da sua biblioteca não podem ser restauradas e caem da ordem
 settings-playback-section-queue = Fila
 settings-playback-section-ratings = Avaliações
+settings-playback-section-stepping = Avanço em passos
+settings-playback-step = Tamanho do passo
+    .description = O quanto um toque em uma tecla de passo move o cursor de reprodução
+settings-playback-step-preview = Prévia do passo
+    .description = Por quanto tempo um passo toca enquanto pausado, para você ouvir onde caiu
 settings-playback-section-startup = Início
 settings-playback-shuffle-random = Aleatória
     .description = O embaralhar que todo mundo quer dizer com a palavra. O que vem toca em nenhuma ordem específica
@@ -1111,6 +1131,7 @@ menu-exit = Sair
 menu-fill-sort-names = Preencher os nomes de ordenação...
 menu-romanize-library = Romanizar a biblioteca...
 menu-find-duplicates = Localizar duplicatas...
+menu-go-to-time = Ir para um tempo...
 menu-tag-genres = Marcar gêneros...
 menu-health = Saúde da biblioteca
 menu-power-search = Busca avançada
@@ -1568,6 +1589,12 @@ keymap-decrease-font-size = Diminuir o texto
     .description = Baixar um passo o tamanho do texto de todo o aplicativo
 keymap-focus-search = Focar a busca
     .description = Colocar o cursor no campo de busca da biblioteca
+keymap-go-to-time = Ir para um tempo
+    .description = Digitar um horário e pular para ele
+keymap-step-backward = Passo atrás
+    .description = Recuar o cursor de reprodução em um passo
+keymap-step-forward = Passo à frente
+    .description = Avançar o cursor de reprodução em um passo
 keymap-group-browsing = Navegação
 keymap-group-editing = Edição
 keymap-group-library = Biblioteca

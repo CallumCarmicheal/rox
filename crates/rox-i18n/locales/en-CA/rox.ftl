@@ -365,6 +365,21 @@ shader-blurb-cube = A wireframe cube tumbling in fake 3D, drawn as added light.
 shader-blurb-bloom = Drifting orbs bloomed through a half-size second pass, the chain in miniature.
 shader-blurb-tube = Replays the panel under it through a curved CRT face, scanlines and all.
 
+## Go-to window
+
+goto-window-title = rox - Go to Time
+goto-time = Time
+goto-placeholder = 1:23, 83, or 1:02:03
+goto-now-of = Now { $time } of { $duration }
+goto-now = Now { $time }
+goto-nothing-playing = Nothing is playing
+goto-target = Go to { $time }
+goto-unreadable = Not a time
+goto-go = Go
+goto-hint-before = Press
+goto-hint-key = Enter
+goto-hint-after = to go
+
 ## Transport strip pieces
 
 seek-item-elapsed = Elapsed
@@ -963,6 +978,11 @@ settings-playback-restore-last-session = Restore Last Session
     .description = Launch with the play queue as you left it, paused on the track that was playing and where it left off. Queued tracks outside your library folders can't be restored and drop from the order
 settings-playback-section-queue = Queue
 settings-playback-section-ratings = Ratings
+settings-playback-section-stepping = Stepping
+settings-playback-step = Step Size
+    .description = How far one press of a step key moves the playhead
+settings-playback-step-preview = Step Preview
+    .description = How long a step plays for while paused, so you hear where it landed
 settings-playback-section-startup = Startup
 settings-playback-shuffle-random = Random
     .description = The shuffle everyone means by the word. What's coming plays in no particular order
@@ -1167,6 +1187,7 @@ menu-exit = Exit
 menu-fill-sort-names = Fill Sort Names...
 menu-romanize-library = Romanize Library...
 menu-find-duplicates = Find Duplicates...
+menu-go-to-time = Go to Time...
 menu-tag-genres = Tag Genres...
 menu-health = Library Health
 menu-power-search = Power Search
@@ -1641,6 +1662,12 @@ keymap-decrease-font-size = Decrease Text Size
     .description = Step the app-wide text size down
 keymap-focus-search = Focus Search
     .description = Put the cursor in the library search box
+keymap-go-to-time = Go to Time
+    .description = Type a timestamp and jump to it
+keymap-step-backward = Step Back
+    .description = Nudge the playhead back by the step size
+keymap-step-forward = Step Forward
+    .description = Nudge the playhead forward by the step size
 keymap-group-browsing = Browsing
 keymap-group-editing = Editing
 keymap-group-library = Library

@@ -107,10 +107,28 @@ generation it speaks, and every other method is refused until then:
 
     > {"id": 1, "method": "hello", "params": {"protocol": 1}}
     < {"jsonrpc": "2.0", "id": 1,
-       "result": {"name": "rox", "version": "1.21.0", "protocol": 1}}
+       "result": {"name": "rox", "version": "1.26.1", "protocol": 1}}
 
 The protocol number moves only on breaking changes. New methods and new
 response fields arrive without a bump, so ignore fields you don't know.
+
+A connection can also ask to be pushed to. subscribe (no params)
+answers {"subscribed": true}, and from then on the server writes event
+frames onto that connection whenever something moves. An event frame is
+a JSON-RPC notification, method and params without an id, and it lands
+between responses, so a reader has to route by id rather than assume
+the next line answers its last call:
+
+  event.track      The track's full tags when playback turns over; null
+                   when it stops.
+  event.playback   The player status when play state, volume, mute, or
+                   the A-B section changes.
+  event.queue      {"queue_rev": n} when the queue changes; fetch
+                   queue.list for the contents.
+
+A subscriber that stops reading is disconnected instead of buffered,
+since a consumer that fell behind holds a stale picture anyway.
+Reconnect and subscribe again for a fresh one.
 
 Methods. Transport verbs return the full player status, so a caller sees
 what its command did without a second round trip:
@@ -139,16 +157,16 @@ what its command did without a second round trip:
   library.rescan         Scan the library folders again; {"started": true},
                          or an error while busy or without folders.
   tasks.status           The analysis passes (acoustic, ReplayGain,
-                         tempo): switch state, tracks to do, progress
-                         while one runs.
-  tasks.start            {"pass": "acoustic"/"replaygain"/"tempo"};
-                         answers with count, workers, estimate, and save
-                         mode.
+                         tempo, sort names, romanize): switch state,
+                         tracks to do, progress while one runs.
+  tasks.start            {"pass": "acoustic"/"replaygain"/"tempo"/
+                         "sortnames"/"romanize"}; answers with count,
+                         workers, estimate, and save mode.
   tasks.stop             {"pass": ..}; the pass stops at the next file,
                          keeping what's done.
   ai.status              {"enabled", "mcp"}, the toggles rox-mcp checks.
-  debug.settings         The settings as saved.
-  debug.panels           The frontmost workspace's panel tree.
+  debug.*                Diagnostics for working on rox itself; the
+                         repository documents them.
 
 Queue entry ids are stable handles: queue.list returns them, and remove,
 move, and jump name entries by them, so an edit can't hit the wrong row
@@ -159,8 +177,10 @@ behind what's queued, next right after the playing track, now splices and
 plays.
 
 Search uses the panels' query language: free terms match title, artist,
-album, and genre, while artist:name, album:name, genre:name, and
-year:1990 pin one field. limit defaults to 50 and caps at 500.
+album, and genre, while a field: prefix pins one, as in artist:name or
+year:1990. The fields are title, artist, albumartist, album, genre,
+year, folder, codec, rating, plays, and added. limit defaults to 50 and
+caps at 500.
 
 Failures come back as JSON-RPC error objects, standard codes where they
 apply and the -32000 range for rox's own:
@@ -183,7 +203,8 @@ access means proxying the socket yourself.
 
 roxctl, the reference client, doesn't ship with releases; build it from
 the repository with cargo build --release --package rox-cli. It has a
-verb for each method above, and its raw command covers the rest:
+verb for each method above, watch follows the event stream, and its raw
+command covers the rest:
 
     roxctl raw queue.move '{"id": 3, "after": 7}'
 
@@ -194,8 +215,8 @@ MCP
 rox-mcp is in this folder. It's a stdio MCP server that proxies a running
 rox, so an MCP client can ask what's playing, search the library, work the
 playback/transport, read the queue, and kick off library scans and the
-long analysis passes. Every tool is a straight proxy of
-one socket method (see IPC above).
+long analysis passes. Every tool is a straight proxy of one socket
+method (see IPC above).
 
 Two switches gate it, both off by default:
 
@@ -243,15 +264,18 @@ The tools:
   get_queue        The play order with each entry's stable id and the one
                    playing.
   rescan_library   Starts a background rescan of the library folders.
-  get_tasks        The analysis passes: switch state, tracks to do,
+  get_tasks        The analysis passes (acoustic, ReplayGain, tempo,
+                   sort names, romanize): switch state, tracks to do,
                    progress while one runs.
-  start_task       pass: acoustic, replaygain, or tempo. Starts the pass;
-                   answers with count, workers, estimate, and save mode.
-  stop_task        pass: acoustic, replaygain, or tempo. Stops the pass
-                   at the next file, keeping what's done.
+  start_task       pass: acoustic, replaygain, tempo, sortnames, or
+                   romanize. Starts the pass; answers with count,
+                   workers, estimate, and save mode.
+  stop_task        pass: acoustic, replaygain, tempo, sortnames, or
+                   romanize. Stops the pass at the next file, keeping
+                   what's done.
 
 The socket does everything the tools do and more. Queue edits, seeking,
-volume, artwork, and the debug scope are socket-only.
+volume, artwork, and the event stream are socket-only.
 
 
 License

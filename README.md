@@ -34,7 +34,7 @@ start in under a second, it isn't rox.
 | Playlists | Favourites, drag reorder across playlists, m3u import and export, smart playlists that stay a query with their own sort and limit, entries that persist when their files leave and come back                            |
 | Sharing   | Discord rich presence with optional Last.fm and YouTube buttons, and an Icecast source client that pushes what rox plays out as MP3, connecting outward only so an unreachable server never touches local playback |
 | Language  | Nine translations besides the English source (German, French, Italian, Spanish, Brazilian Portuguese, Russian, Ukrainian, Japanese, Simplified Chinese), following the OS by default, with numbers, dates, and plurals rendered per locale |
-| Control   | A JSON-RPC socket keyed to the data directory, with a `rox-mcp` proxy beside the app so an MCP client can ask what's playing, search the library, and work the transport. It stays off until you turn AI features on, and every tool call rechecks the toggle |
+| Control   | A JSON-RPC socket keyed to the data directory that reads the library, drives the transport and queue, and pushes playback, track, and queue events, with a `rox-mcp` proxy beside the app so an MCP client can ask what's playing, search the library, work the transport, read the queue, and start scans and analysis passes. The proxy stays off until you turn AI features on, and every tool call rechecks the toggle |
 | System    | Tray with quit-to-tray, one instance per data directory, portable mode, a self-updater that checksum-verifies the release and stages it beside the running build (notify-only where the install folder isn't writable), a keymap where every shortcut rebinds, chords included, and a tasks window for the long library jobs with time estimates measured on your own machine |
 
 </details>
@@ -185,18 +185,27 @@ On a Mac you also need Xcode installed, nix or not: gpui compiles Metal shaders 
 build time and nix can't ship Apple's Metal toolchain. On Xcode 26 that toolchain is
 a separate one-time download: `xcodebuild -downloadComponent MetalToolchain`.
 
-Without Nix you need stable Rust and gpui's system libraries from your distro (Wayland,
-X11, Vulkan, xkbcommon, fontconfig, alsa); every Rust dependency comes from crates.io.
-On Debian or Ubuntu that's:
+Without Nix you need stable Rust, cmake, and gpui's system libraries from your distro
+(Wayland, X11, Vulkan, xkbcommon, fontconfig, alsa); every Rust dependency comes from
+crates.io. cmake is there because the milkdrop visualizer builds libprojectM from
+source. On Debian or Ubuntu that's:
 
 ```sh
 sudo apt-get install -y pkg-config libasound2-dev libfontconfig1-dev \
   libwayland-dev libxkbcommon-x11-dev libx11-dev libxcb1-dev libvulkan-dev \
-  libssl-dev
+  libssl-dev cmake
 ```
 
-Run `./scripts/vendor-gpui.sh` once before building: it fetches gpui and gpui-component
-and applies the small patches under `patches/` (the nix shell does this on entry).
+Run both vendor scripts once before building (the nix shell does this on entry):
+
+```sh
+./scripts/vendor-gpui.sh      # gpui and gpui-component, plus the patches under patches/
+./scripts/vendor-projectm.sh  # the pinned libprojectM that rox-milkdrop-sys compiles
+```
+
+Neither tree is checked in, and both are hard requirements: `[patch.crates-io]` points at
+`vendor/gpui`, so cargo won't even resolve without it, and rox-milkdrop-sys's build script
+refuses to run without `vendor/projectm`.
 
 Copy `.env.template` to `.env` to bake service identities into the binary at
 compile time: `LASTFM_API_KEY` and `LASTFM_API_SECRET` for one-click scrobbler

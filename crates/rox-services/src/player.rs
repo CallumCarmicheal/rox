@@ -2733,6 +2733,83 @@ impl Player {
         }
     }
 
+    /// Walk the playhead one step, `back` for the other direction. The
+    /// fine counterpart to [`Player::seek_by`]'s five seconds, at the size
+    /// the settings hold.
+    ///
+    /// Paused, the step also plays what it landed on, for the preview
+    /// length. A 25 ms move is too small to see on a strip and too small to
+    /// leave a mark, so without the blip stepping through a track by ear
+    /// would mean pressing play after every press. The blip runs through
+    /// the pause on the audio thread; the pump notices the clock moving
+    /// and repaints the readouts, the same way it does for a paused seek.
+    pub fn step_by(&self, back: bool) {
+        let step = self.step_ms() as f64 / 1000.0;
+        self.seek_by(if back { -step } else { step });
+        if !self.is_playing() {
+            self.send(Cmd::Audition(self.step_preview_ms() as f64 / 1000.0));
+        }
+    }
+
+    /// The step size in milliseconds, what the settings row scrubs.
+    pub fn step_ms(&self) -> f32 {
+        Self::in_range(
+            self.settings.step_ms,
+            rox_core::settings::STEP_MS_MIN,
+            rox_core::settings::STEP_MS_MAX,
+            rox_core::settings::DEFAULT_STEP_MS,
+        )
+    }
+
+    /// How long a paused step plays for, in milliseconds.
+    pub fn step_preview_ms(&self) -> f32 {
+        Self::in_range(
+            self.settings.step_preview_ms,
+            rox_core::settings::STEP_PREVIEW_MS_MIN,
+            rox_core::settings::STEP_PREVIEW_MS_MAX,
+            rox_core::settings::DEFAULT_STEP_PREVIEW_MS,
+        )
+    }
+
+    /// A stored knob read back inside its range, or the stock value where
+    /// the file holds something that isn't a number.
+    fn in_range(value: f32, min: f32, max: f32, stock: f32) -> f32 {
+        if value.is_finite() {
+            value.clamp(min, max)
+        } else {
+            stock
+        }
+    }
+
+    /// Set the step size and persist it. Nothing to send: the size is read
+    /// at each press, so a change applies to the next one.
+    pub fn set_step_ms(&mut self, ms: f32, cx: &mut Context<Self>) {
+        let ms = ms.clamp(
+            rox_core::settings::STEP_MS_MIN,
+            rox_core::settings::STEP_MS_MAX,
+        );
+        if self.settings.step_ms == ms {
+            return;
+        }
+        self.settings.step_ms = ms;
+        self.persist_playback_soon(cx);
+        cx.notify();
+    }
+
+    /// Set the preview length and persist it, the same way.
+    pub fn set_step_preview_ms(&mut self, ms: f32, cx: &mut Context<Self>) {
+        let ms = ms.clamp(
+            rox_core::settings::STEP_PREVIEW_MS_MIN,
+            rox_core::settings::STEP_PREVIEW_MS_MAX,
+        );
+        if self.settings.step_preview_ms == ms {
+            return;
+        }
+        self.settings.step_preview_ms = ms;
+        self.persist_playback_soon(cx);
+        cx.notify();
+    }
+
     /// Set the volume and persist it; dragging the slider calls this.
     /// Setting a level always unmutes: reaching for the slider means
     /// wanting to hear something.
@@ -2768,7 +2845,7 @@ impl Player {
             // A later tick bumped the gen past this capture, so only the last
             // edit in a burst writes. Read the values at write time, not
             // capture time, so a mute toggled during the wait persists as is.
-            let Ok((latest, volume, muted, crossfade, restore, replay_gain)) =
+            let Ok((latest, volume, muted, crossfade, restore, step, replay_gain)) =
                 this.update(cx, |this, _| {
                     (
                         this.persist_gen,
@@ -2776,6 +2853,7 @@ impl Player {
                         this.settings.session.muted,
                         this.settings.crossfade_secs,
                         this.settings.crossfade_restore_secs,
+                        (this.settings.step_ms, this.settings.step_preview_ms),
                         this.settings.replay_gain,
                     )
                 })
@@ -2788,6 +2866,7 @@ impl Player {
                     s.session.muted = muted;
                     s.crossfade_secs = crossfade;
                     s.crossfade_restore_secs = restore;
+                    (s.step_ms, s.step_preview_ms) = step;
                     s.replay_gain = replay_gain;
                 });
             }

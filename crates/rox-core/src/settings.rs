@@ -546,6 +546,14 @@ pub struct Settings {
     /// into track was made that way, and fading it is a change to the
     /// record rather than a smoothing of it.
     pub crossfade_albums: bool,
+    /// How far one step key moves the playhead, in milliseconds. The fine
+    /// counterpart to the seek keys' five seconds: comma and dot walk the
+    /// track at this size.
+    pub step_ms: f32,
+    /// How long a step taken while paused plays for, in milliseconds, so
+    /// the step can be heard as well as read. Its own number rather than
+    /// the step's: a 25 ms move is a useful step and an inaudible preview.
+    pub step_preview_ms: f32,
     /// How tagged loudness is levelled, the Audio page's ReplayGain
     /// section.
     pub replay_gain: ReplayGainSettings,
@@ -1561,6 +1569,27 @@ pub fn set_app_font(font: Option<String>, cx: &mut App) {
 /// been set: long enough to hear as an overlap rather than a click, short
 /// enough that it doesn't eat the end of a song.
 pub const DEFAULT_CROSSFADE_SECS: f32 = 4.0;
+
+/// The step keys' stock size. Small enough to land on a transient rather
+/// than near it, and short enough that holding the key walks rather than
+/// scrubs.
+pub const DEFAULT_STEP_MS: f32 = 25.0;
+
+/// The range the step size scrubs. The floor is a millisecond because
+/// anything under it stops being a step; the ceiling meets the seek keys'
+/// five seconds, past which stepping is just seeking.
+pub const STEP_MS_MIN: f32 = 1.0;
+pub const STEP_MS_MAX: f32 = 5000.0;
+
+/// How long a paused step plays for out of the box: long enough to hear a
+/// transient as a sound rather than a click, short enough that holding the
+/// key still reads as stepping.
+pub const DEFAULT_STEP_PREVIEW_MS: f32 = 100.0;
+
+/// The preview's range. It shares the step's ceiling, and its floor is the
+/// shortest blip that's more than a pop.
+pub const STEP_PREVIEW_MS_MIN: f32 = 10.0;
+pub const STEP_PREVIEW_MS_MAX: f32 = STEP_MS_MAX;
 
 /// The frame knobs' ceilings, in px: every knob runs from 0 (off) up to
 /// its own. Shared by the app defaults' clamp and both settings windows'
@@ -3856,6 +3885,8 @@ impl Default for Settings {
             eq: EqSettings::default(),
             crossfade_secs: 0.0,
             crossfade_restore_secs: DEFAULT_CROSSFADE_SECS,
+            step_ms: DEFAULT_STEP_MS,
+            step_preview_ms: DEFAULT_STEP_PREVIEW_MS,
             crossfade_albums: false,
             replay_gain: ReplayGainSettings::default(),
             output: OutputSettings::default(),

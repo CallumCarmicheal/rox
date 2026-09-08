@@ -355,6 +355,21 @@ shader-blurb-cube = Каркасный куб, кувыркающийся в п�
 shader-blurb-bloom = Плывущие шары, засвеченные через второй проход половинного размера, вся цепочка в миниатюре.
 shader-blurb-tube = Проигрывает панель под собой заново через изогнутое стекло ЭЛТ, со строчными полосами и всем прочим.
 
+## Go-to window
+
+goto-window-title = rox - Перейти к времени
+goto-time = Время
+goto-placeholder = 1:23, 83 или 1:02:03
+goto-now-of = Сейчас { $time } из { $duration }
+goto-now = Сейчас { $time }
+goto-nothing-playing = Ничего не играет
+goto-target = Перейти к { $time }
+goto-unreadable = Не время
+goto-go = Перейти
+goto-hint-before = Нажми
+goto-hint-key = Enter
+goto-hint-after = чтобы перейти
+
 ## Transport strip pieces
 seek-item-elapsed = Прошло
 seek-item-strip = Полоса
@@ -918,6 +933,11 @@ settings-playback-restore-last-session = Восстанавливать прош
     .description = Запускаться с той очередью, которую вы оставили, на паузе на игравшем треке и на том месте, где он остановился. Треки из очереди вне папок медиатеки восстановить нельзя, и они выпадают из порядка
 settings-playback-section-queue = Очередь
 settings-playback-section-ratings = Оценки
+settings-playback-section-stepping = Шаг
+settings-playback-step = Размер шага
+    .description = Насколько одно нажатие клавиши шага двигает позицию
+settings-playback-step-preview = Прослушивание шага
+    .description = Сколько шаг звучит на паузе, чтобы было слышно, куда он попал
 settings-playback-section-startup = Запуск
 settings-playback-shuffle-random = Случайный
     .description = То самое перемешивание, которое все и имеют в виду. Дальше играет без всякого порядка
@@ -1109,6 +1129,7 @@ menu-exit = Выход
 menu-fill-sort-names = Заполнить имена для сортировки...
 menu-romanize-library = Романизировать медиатеку...
 menu-find-duplicates = Найти дубликаты...
+menu-go-to-time = Перейти к времени...
 menu-tag-genres = Проставить жанры...
 menu-health = Состояние библиотеки
 menu-power-search = Расширенный поиск
@@ -1567,6 +1588,12 @@ keymap-decrease-font-size = Уменьшить размер текста
     .description = Шаг вниз по размеру текста для всего приложения
 keymap-focus-search = Фокус на поиск
     .description = Поставить курсор в поле поиска медиатеки
+keymap-go-to-time = Перейти к времени
+    .description = Ввести время и перейти к нему
+keymap-step-backward = Шаг назад
+    .description = Сдвинуть позицию назад на один шаг
+keymap-step-forward = Шаг вперёд
+    .description = Сдвинуть позицию вперёд на один шаг
 keymap-group-browsing = Навигация
 keymap-group-editing = Правка
 keymap-group-library = Медиатека

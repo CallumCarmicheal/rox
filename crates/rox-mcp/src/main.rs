@@ -183,8 +183,10 @@ fn base_tools() -> Value {
         {
             "name": "search_library",
             "description": "Search the music library. Free terms match title, artist, \
-                            album, and genre; pins like artist:name, album:name, \
-                            genre:name, year:1990 narrow to one field.",
+                            album, and genre; a field: prefix narrows to one, as in \
+                            artist:name or year:1990. Fields: title, artist, \
+                            albumartist, album, genre, year, folder, codec, rating, \
+                            plays, added.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

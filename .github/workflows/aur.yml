@@ -8,9 +8,18 @@
 # package is pushed, so a missing system dep or a vendor script break stops
 # here instead of on every AUR user's machine.
 #
+# A release candidate can't push either package: rox-player tracks stable and
+# a pkgver won't hold the hyphen in 1.25.0-rc.1. It still test-builds, which is
+# the point of cutting one. rox-player-git is the package that fits there,
+# since its source is the git tree and pointing it at the candidate tag needs
+# no version rewrite, and its prepare() and build() are the same recipe
+# rox-player runs on the tarball. So a missing vendor script or system dep
+# fails on the candidate, days before the stable tag reaches AUR users.
+#
 # Runs as a job of the Release workflow (see the note there on why a
 # `release: published` trigger can't work). The manual dispatch is for
-# re-pushing a version when a run failed after the release itself shipped.
+# re-pushing a version when a run failed after the release itself shipped, and
+# always takes the push path: `candidate` is a workflow_call input only.
 #
 # Needs one secret, AUR_SSH_PRIVATE_KEY: a private key whose public half is
 # registered on an AUR account with co-maintainer access to both packages.
@@ -24,6 +33,11 @@ on:
         description: Release version, without the leading v
         required: true
         type: string
+      candidate:
+        description: Test-build the packaging without touching the AUR
+        required: false
+        default: false
+        type: boolean
     secrets:
       AUR_SSH_PRIVATE_KEY:
         required: false
@@ -44,16 +58,25 @@ jobs:
       VERSION: ${{ inputs.version }}
     steps:
       # `if:` can't read secrets on a step, so gate through a step output.
-      - name: Check for the AUR key
+      # Two answers, not one: `build` is whether there's anything to do at all,
+      # `push` is whether it may reach the AUR. A candidate builds without the
+      # key; a stable run with no key has nothing left worth the container time.
+      - name: Decide what this run does
         id: gate
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          CANDIDATE: ${{ inputs.candidate }}
         run: |
-          if [ -n "$AUR_SSH_PRIVATE_KEY" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          if [ "$CANDIDATE" = "true" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          elif [ -n "$AUR_SSH_PRIVATE_KEY" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "push=true" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::AUR_SSH_PRIVATE_KEY not set, skipping the AUR update"
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "push=false" >> "$GITHUB_OUTPUT"
           fi
 
       # makepkg refuses to run as root, so the build side goes through a
@@ -61,7 +84,7 @@ jobs:
       # pacman). Root keeps the git side; safe.directory covers the mixed
       # ownership that leaves behind.
       - name: Set up container
-        if: steps.gate.outputs.enabled == 'true'
+        if: steps.gate.outputs.build == 'true'
         run: |
           pacman -Syu --noconfirm git openssh
           useradd -m builder
@@ -71,7 +94,7 @@ jobs:
           git config --global user.email andrew@zealsprince.com
 
       - name: Set up SSH
-        if: steps.gate.outputs.enabled == 'true'
+        if: steps.gate.outputs.push == 'true'
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         # Everything goes through GIT_SSH_COMMAND with explicit paths. In a
@@ -96,7 +119,7 @@ jobs:
       # trust model updpkgsums uses. The download keeps makepkg's expected
       # filename so the test build reuses it instead of fetching again.
       - name: Update rox-player
-        if: steps.gate.outputs.enabled == 'true'
+        if: steps.gate.outputs.push == 'true'
         run: |
           git clone ssh://aur@aur.archlinux.org/rox-player.git
           cd rox-player
@@ -112,16 +135,29 @@ jobs:
           sudo -Hu builder makepkg --printsrcinfo > .SRCINFO
 
       - name: Test build rox-player
-        if: steps.gate.outputs.enabled == 'true'
+        if: steps.gate.outputs.push == 'true'
         run: |
           cd rox-player
+          sudo -Hu builder makepkg -s --noconfirm
+
+      # The candidate half of the same check, over https because nothing here
+      # needs the key. The source is pinned to the tag rather than left on the
+      # default branch: main can move while this runs, and the point is to
+      # build the commit that was just released.
+      - name: Test build rox-player-git
+        if: inputs.candidate
+        run: |
+          git clone https://aur.archlinux.org/rox-player-git.git
+          cd rox-player-git
+          sed -i "s|git+\$url.git|&#tag=v$VERSION|" PKGBUILD
+          chown -R builder .
           sudo -Hu builder makepkg -s --noconfirm
 
       # The repo's pkgver is only what the AUR page displays (pkgver() computes
       # the real one at install time), but left stale it reads abandoned, so
       # mirror pkgver()'s transform on the fresh tag.
       - name: Update rox-player-git
-        if: steps.gate.outputs.enabled == 'true'
+        if: steps.gate.outputs.push == 'true'
         run: |
           git clone ssh://aur@aur.archlinux.org/rox-player-git.git
           git clone --filter=blob:none --no-checkout \
@@ -139,7 +175,7 @@ jobs:
       # Explicit adds so makepkg leftovers (src/, pkg/, the tarball) never
       # ride along. Skipping a no-op diff keeps dispatch re-runs idempotent.
       - name: Push
-        if: steps.gate.outputs.enabled == 'true'
+        if: steps.gate.outputs.push == 'true'
         run: |
           for pkg in rox-player rox-player-git; do
             git -C "$pkg" add PKGBUILD .SRCINFO

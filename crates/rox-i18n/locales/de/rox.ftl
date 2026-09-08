@@ -343,6 +343,21 @@ shader-blurb-cube = Ein Drahtgitterwürfel, der in falschem 3D taumelt, als addi
 shader-blurb-bloom = Treibende Kugeln, durch einen halb so großen zweiten Durchgang gebloomt, die Kette im Kleinen.
 shader-blurb-tube = Spielt das Panel darunter über eine gewölbte Röhrenfront ab, samt Scanlines.
 
+## Go-to window
+
+goto-window-title = rox - Zeit anspringen
+goto-time = Zeit
+goto-placeholder = 1:23, 83 oder 1:02:03
+goto-now-of = Jetzt { $time } von { $duration }
+goto-now = Jetzt { $time }
+goto-nothing-playing = Es läuft nichts
+goto-target = Springe zu { $time }
+goto-unreadable = Keine Zeitangabe
+goto-go = Springen
+goto-hint-before = Drücke
+goto-hint-key = Enter
+goto-hint-after = zum Springen
+
 ## Transport strip pieces
 seek-item-elapsed = Verstrichen
 seek-item-strip = Leiste
@@ -910,6 +925,11 @@ settings-playback-restore-last-session = Letzte Sitzung wiederherstellen
     .description = Mit der Warteschlange starten, wie du sie verlassen hast, pausiert auf dem Titel, der lief, und an der Stelle, wo er stand. Eingereihte Titel außerhalb deiner Bibliotheksordner lassen sich nicht wiederherstellen und fallen aus der Reihenfolge
 settings-playback-section-queue = Warteschlange
 settings-playback-section-ratings = Bewertungen
+settings-playback-section-stepping = Schrittweite
+settings-playback-step = Schrittgröße
+    .description = Wie weit ein Druck auf eine Schritttaste den Abspielkopf bewegt
+settings-playback-step-preview = Schrittvorschau
+    .description = Wie lange ein Schritt in der Pause abgespielt wird, damit du hörst, wo er gelandet ist
 settings-playback-section-startup = Start
 settings-playback-shuffle-random = Zufällig
     .description = Der Zufall, den jeder mit dem Wort meint. Was kommt, läuft in keiner bestimmten Reihenfolge
@@ -1101,6 +1121,7 @@ menu-exit = Beenden
 menu-fill-sort-names = Sortiernamen füllen...
 menu-romanize-library = Bibliothek romanisieren...
 menu-find-duplicates = Duplikate finden...
+menu-go-to-time = Zeit anspringen...
 menu-tag-genres = Genres taggen...
 menu-health = Bibliothekszustand
 menu-power-search = Erweiterte Suche
@@ -1559,6 +1580,12 @@ keymap-decrease-font-size = Textgröße verkleinern
     .description = Die appweite Textgröße eine Stufe runter
 keymap-focus-search = Suche fokussieren
     .description = Den Cursor ins Suchfeld der Bibliothek setzen
+keymap-go-to-time = Zeit anspringen
+    .description = Einen Zeitstempel eintippen und dorthin springen
+keymap-step-backward = Schritt zurück
+    .description = Den Abspielkopf um die Schrittgröße zurücksetzen
+keymap-step-forward = Schritt vor
+    .description = Den Abspielkopf um die Schrittgröße vorsetzen
 keymap-group-browsing = Navigation
 keymap-group-editing = Bearbeiten
 keymap-group-library = Bibliothek

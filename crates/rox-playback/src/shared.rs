@@ -68,6 +68,14 @@ pub struct Shared {
     /// False = paused. The callback outputs silence and stops consuming, so
     /// the position freezes sample-accurately.
     pub playing: AtomicBool,
+    /// Device frames left in an audition blip, zero when nothing is
+    /// auditioning. A step taken while paused arms this: the callback plays
+    /// that many frames through the pause without `playing` ever moving, so
+    /// nothing reading the pause flag reacts and a step landing mid-blip
+    /// can't strand the transport running. Counted here rather than timed
+    /// from the UI thread, where a short blip would be mostly buffer
+    /// latency.
+    pub audition_left: AtomicU64,
     /// The flush epoch, bumped by the decode thread on a seek or a skip.
     /// A backend that sees a number it hasn't handled discards the whole
     /// ring exactly once and echoes it back in `flush_ack`. An epoch rather
@@ -132,6 +140,7 @@ impl Shared {
     pub fn new(queue_len: usize) -> Self {
         Shared {
             playing: AtomicBool::new(true),
+            audition_left: AtomicU64::new(0),
             flush_seq: AtomicU64::new(0),
             flush_ack: AtomicU64::new(0),
             fade_at: AtomicU64::new(0),

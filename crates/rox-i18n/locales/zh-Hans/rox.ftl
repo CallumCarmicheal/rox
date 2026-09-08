@@ -338,6 +338,21 @@ shader-blurb-cube = 一个在伪 3D 里翻滚的线框立方体，按加色光�
 shader-blurb-bloom = 流动的光球经过半分辨率的第二遍泛光，整条链的缩微版。
 shader-blurb-tube = 把下面的面板放在弯曲的 CRT 屏面上重放，扫描线一应俱全。
 
+## Go-to window
+
+goto-window-title = rox - 跳到时间
+goto-time = 时间
+goto-placeholder = 1:23、83 或 1:02:03
+goto-now-of = 当前 { $time }，共 { $duration }
+goto-now = 当前 { $time }
+goto-nothing-playing = 当前没有播放
+goto-target = 跳到 { $time }
+goto-unreadable = 不是时间
+goto-go = 跳转
+goto-hint-before = 按
+goto-hint-key = Enter
+goto-hint-after = 跳转
+
 ## Transport strip pieces
 seek-item-elapsed = 已播
 seek-item-strip = 进度条
@@ -898,6 +913,11 @@ settings-playback-restore-last-session = 恢复上次会话
     .description = 启动时带上你离开时的播放队列，暂停在当时那首曲目和那个位置。媒体库文件夹之外的入队曲目恢复不了，会从顺序里掉出去
 settings-playback-section-queue = 队列
 settings-playback-section-ratings = 评分
+settings-playback-section-stepping = 步进
+settings-playback-step = 步长
+    .description = 按一次步进键移动播放位置的距离
+settings-playback-step-preview = 步进试听
+    .description = 暂停时每一步试听多长时间，听清落在哪里
 settings-playback-section-startup = 启动
 settings-playback-shuffle-random = 随机
     .description = 大家说随机时想的就是这个。接下来的曲目没有特定顺序
@@ -1089,6 +1109,7 @@ menu-exit = 退出
 menu-fill-sort-names = 填充排序名称…
 menu-romanize-library = 罗马化媒体库…
 menu-find-duplicates = 查找重复曲目…
+menu-go-to-time = 跳到时间...
 menu-tag-genres = 标记流派…
 menu-health = 媒体库健康
 menu-power-search = 高级搜索
@@ -1528,6 +1549,12 @@ keymap-decrease-font-size = 减小文字
     .description = 把全应用的文字调小一档
 keymap-focus-search = 聚焦搜索
     .description = 把光标放进媒体库搜索框
+keymap-go-to-time = 跳到时间
+    .description = 输入时间戳并跳到那里
+keymap-step-backward = 后退一步
+    .description = 按步长把播放位置往回挪
+keymap-step-forward = 前进一步
+    .description = 按步长把播放位置往前挪
 keymap-group-browsing = 浏览
 keymap-group-editing = 编辑
 keymap-group-library = 媒体库

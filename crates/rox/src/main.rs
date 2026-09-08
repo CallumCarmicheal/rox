@@ -24,6 +24,7 @@ mod duplicates;
 mod embeddings;
 mod eq_window;
 mod genre_tagger;
+mod goto_dialog;
 mod health_window;
 mod integrations;
 mod keymap;
@@ -418,6 +419,7 @@ fn main() {
         smart_playlist::init(cx);
         playlist_create::init(cx);
         bookmark_dialog::init(cx);
+        goto_dialog::init(cx);
         bake_dialog::init(cx);
         convert_dialog::init(cx);
         lyrics::edit::init(cx);

@@ -357,6 +357,21 @@ shader-blurb-cube = Un cubo de alambre dando vueltas en 3D falso, dibujado como 
 shader-blurb-bloom = Orbes a la deriva con bloom a través de una segunda pasada a media resolución, la cadena en miniatura.
 shader-blurb-tube = Repite el panel de debajo a través de una pantalla CRT curva, con líneas de barrido incluidas.
 
+## Go-to window
+
+goto-window-title = rox - Ir a un tiempo
+goto-time = Tiempo
+goto-placeholder = 1:23, 83 o 1:02:03
+goto-now-of = Ahora { $time } de { $duration }
+goto-now = Ahora { $time }
+goto-nothing-playing = No se está reproduciendo nada
+goto-target = Ir a { $time }
+goto-unreadable = No es un tiempo
+goto-go = Ir
+goto-hint-before = Pulsa
+goto-hint-key = Intro
+goto-hint-after = para ir
+
 ## Transport strip pieces
 seek-item-elapsed = Transcurrido
 seek-item-strip = Barra
@@ -939,6 +954,11 @@ settings-playback-restore-last-session = Restaurar la última sesión
     .description = Arranca con la cola tal como la dejaste, en pausa sobre la pista que sonaba y por donde se quedó. Las pistas encoladas fuera de tus carpetas de biblioteca no se pueden restaurar y caen del orden
 settings-playback-section-queue = Cola
 settings-playback-section-ratings = Valoraciones
+settings-playback-section-stepping = Avance por pasos
+settings-playback-step = Tamaño del paso
+    .description = Cuánto mueve la cabeza de reproducción cada pulsación de una tecla de paso
+settings-playback-step-preview = Vista previa del paso
+    .description = Cuánto suena un paso en pausa, para que oigas dónde cayó
 settings-playback-section-startup = Arranque
 settings-playback-shuffle-random = Al azar
     .description = El aleatorio que todo el mundo quiere decir con la palabra. Lo que viene suena sin ningún orden concreto
@@ -1133,6 +1153,7 @@ menu-exit = Salir
 menu-fill-sort-names = Rellenar los nombres de ordenación...
 menu-romanize-library = Romanizar la biblioteca...
 menu-find-duplicates = Buscar duplicados...
+menu-go-to-time = Ir a un tiempo...
 menu-tag-genres = Etiquetar géneros...
 menu-health = Salud de la biblioteca
 menu-power-search = Búsqueda avanzada
@@ -1610,6 +1631,12 @@ keymap-decrease-font-size = Reducir el tamaño del texto
     .description = Baja un paso el tamaño del texto de toda la aplicación
 keymap-focus-search = Enfocar la búsqueda
     .description = Pon el cursor en el campo de búsqueda de la biblioteca
+keymap-go-to-time = Ir a un tiempo
+    .description = Escribir una marca de tiempo y saltar a ella
+keymap-step-backward = Paso atrás
+    .description = Retroceder la cabeza de reproducción el tamaño del paso
+keymap-step-forward = Paso adelante
+    .description = Adelantar la cabeza de reproducción el tamaño del paso
 keymap-group-browsing = Navegación
 keymap-group-editing = Edición
 keymap-group-library = Biblioteca

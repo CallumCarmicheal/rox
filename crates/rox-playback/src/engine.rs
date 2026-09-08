@@ -39,6 +39,13 @@ use crate::shared::{QueueEntry, QueueSnapshot, Segment, Shared, TrackInfo};
 pub enum Cmd {
     TogglePause,
     Seek(f64),
+    /// Play this many seconds through the pause, for a step taken while
+    /// paused: hearing where the step landed is the point of stepping by
+    /// milliseconds, and a silent one is just a number moving. Sent right
+    /// after the Seek, so the blip starts on the first sample the seek's
+    /// refill delivers rather than on the flushed audio before it. Another
+    /// step re-arms it from the new position; nothing while playing.
+    Audition(f64),
     Next,
     Prev,
     Volume(f32),
@@ -462,6 +469,13 @@ impl Engine {
         }
     }
 
+    /// Drop any audition blip still counting down. Every command that moves
+    /// the transport calls this, so a step's blip can never outlive the
+    /// position it was taken at and pause a track someone has since started.
+    fn cancel_audition(&self) {
+        self.shared.audition_left.store(0, Ordering::Relaxed);
+    }
+
     pub fn run(mut self) {
         // Stream open: the chain learns the device rate before any sample
         // passes through it. It resets again on every flush, never at the
@@ -501,6 +515,7 @@ impl Engine {
                         // nav path, which clears ended on the way. Without this
                         // the flag flips under a source that isn't there and
                         // the transport stays dead once the queue plays out.
+                        self.cancel_audition();
                         if source.is_none() && self.shared.ended.load(Ordering::Relaxed) {
                             self.shared.playing.store(true, Ordering::Relaxed);
                             nav_pos = Some(self.audible_pos());
@@ -510,6 +525,17 @@ impl Engine {
                             self.shared.playing.store(!now, Ordering::Relaxed);
                         }
                     }
+                    Cmd::Audition(secs) => {
+                        // Only through a pause with something open: playing
+                        // already hears the step, and nothing open has
+                        // nothing to hear.
+                        if source.is_some() && !self.shared.playing.load(Ordering::Relaxed) {
+                            let frames = (secs.max(0.0) * self.device_rate as f64).round() as u64;
+                            self.shared
+                                .audition_left
+                                .store(frames.max(1), Ordering::Relaxed);
+                        }
+                    }
                     Cmd::Volume(v) => {
                         let v = v.clamp(0.0, 2.0);
                         self.shared
@@ -517,11 +543,16 @@ impl Engine {
                             .store(v.to_bits(), Ordering::Relaxed);
                     }
                     Cmd::Seek(secs) => {
+                        // Any blip still counting belongs to the position
+                        // this seek is leaving. An Audition sent right
+                        // behind this one re-arms it for the new one.
+                        self.cancel_audition();
                         flush_to = Some(FlushAction::Seek(secs.max(0.0)));
                         nav_pos = None;
                         nav_at = None;
                     }
                     Cmd::Next => {
+                        self.cancel_audition();
                         // Off the audible track, not the decode cursor, which
                         // has run a track ahead for the gapless boundary; from
                         // there Next would skip two near the end of a track.
@@ -536,6 +567,7 @@ impl Engine {
                         flush_to = None;
                     }
                     Cmd::Prev => {
+                        self.cancel_audition();
                         let from = nav_pos.unwrap_or_else(|| self.audible_pos());
                         let target = if from == 0 && self.loop_mode == LoopMode::All {
                             self.order.len().saturating_sub(1)
@@ -640,6 +672,7 @@ impl Engine {
                     // Reuse the nav path: setting the target flushes and opens
                     // it just like a Next would.
                     Cmd::Jump { id } => {
+                        self.cancel_audition();
                         if let Some(p) = self.find(id) {
                             nav_pos = Some(p);
                         }

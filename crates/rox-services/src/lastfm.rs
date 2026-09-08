@@ -858,9 +858,7 @@ impl Scrobbler {
                 watch.duration = now.duration_secs;
             }
             let delta = now.position_secs - watch.last_pos;
-            if delta > 0.0 && delta <= 1.0 {
-                // A tick's worth of playback; anything bigger is a seek
-                // and doesn't count as listening.
+            if counts_as_listening(playing, delta) {
                 watch.played += delta;
             } else if delta < -5.0 && watch.listened && now.position_secs < 5.0 {
                 // Back to the top after a counted listen (a loop restart
@@ -1096,6 +1094,16 @@ impl Scrobbler {
     }
 }
 
+/// Whether one tick's position change is listening: a tick's worth of
+/// playback while audio is moving. Anything bigger is a seek, and anything
+/// while paused is too, however small: a step taken through a pause moves
+/// the clock and plays a blip of what it landed on, and neither is hearing
+/// the track. Counting them would let the step keys walk a track up to its
+/// scrobble line without anyone listening to it.
+fn counts_as_listening(playing: bool, delta: f64) -> bool {
+    playing && delta > 0.0 && delta <= 1.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1119,6 +1127,23 @@ mod tests {
             scrobbled: false,
             scrobble_at: None,
         }
+    }
+
+    #[test]
+    fn a_tick_of_playback_counts_and_a_seek_doesnt() {
+        assert!(counts_as_listening(true, 0.016));
+        assert!(counts_as_listening(true, 1.0));
+        assert!(!counts_as_listening(true, 5.0), "a seek forward");
+        assert!(!counts_as_listening(true, -0.5), "a seek back");
+        assert!(!counts_as_listening(true, 0.0), "nothing moved");
+    }
+
+    /// A paused step moves the clock by the step and then by its preview
+    /// blip, both small enough to pass for playback. Neither is.
+    #[test]
+    fn a_paused_step_and_its_blip_dont_count() {
+        assert!(!counts_as_listening(false, 0.025));
+        assert!(!counts_as_listening(false, 0.1));
     }
 
     #[test]

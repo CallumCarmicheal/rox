@@ -338,6 +338,21 @@ shader-blurb-cube = 疑似 3D で転がるワイヤーフレームの立方体�
 shader-blurb-bloom = 半分のサイズの second pass でブルームをかけた流れる球。チェーンの縮小版。
 shader-blurb-tube = 下のパネルを湾曲した CRT 面に映し直す。走査線付き。
 
+## Go-to window
+
+goto-window-title = rox - 時間へ移動
+goto-time = 時間
+goto-placeholder = 1:23、83、1:02:03 など
+goto-now-of = 現在 { $duration } 中 { $time }
+goto-now = 現在 { $time }
+goto-nothing-playing = 再生中の曲がありません
+goto-target = { $time } へ移動
+goto-unreadable = 時間として読めません
+goto-go = 移動
+goto-hint-before = 移動は
+goto-hint-key = Enter
+goto-hint-after = キー
+
 ## Transport strip pieces
 seek-item-elapsed = 経過
 seek-item-strip = バー
@@ -898,6 +913,11 @@ settings-playback-restore-last-session = 前回のセッションを復元
     .description = 終了時のままの再生キューで起動し、再生していた曲のその位置で一時停止する。ライブラリのフォルダーの外にあるキューの曲は復元できず、順序から外れる
 settings-playback-section-queue = キュー
 settings-playback-section-ratings = レーティング
+settings-playback-section-stepping = ステップ
+settings-playback-step = ステップ幅
+    .description = ステップキーを1回押したときに再生位置が動く幅
+settings-playback-step-preview = ステップの試聴
+    .description = 一時停止中にステップを鳴らす長さ。どこへ移ったか耳で確かめられます
 settings-playback-section-startup = 起動
 settings-playback-shuffle-random = ランダム
     .description = 誰もがシャッフルと呼ぶあれ。この先は順不同で流れる
@@ -1089,6 +1109,7 @@ menu-exit = 終了
 menu-fill-sort-names = ソート名を取得...
 menu-romanize-library = ライブラリをローマ字化...
 menu-find-duplicates = 重複を検索...
+menu-go-to-time = 時間へ移動...
 menu-tag-genres = ジャンルを付ける...
 menu-health = ライブラリの健全性
 menu-power-search = パワーサーチ
@@ -1528,6 +1549,12 @@ keymap-decrease-font-size = 文字を小さく
     .description = アプリ全体の文字サイズを一段下げる
 keymap-focus-search = 検索にフォーカス
     .description = ライブラリの検索ボックスにカーソルを置く
+keymap-go-to-time = 時間へ移動
+    .description = 時間を入力してそこへ飛ぶ
+keymap-step-backward = 1ステップ戻る
+    .description = 再生位置をステップ幅だけ戻す
+keymap-step-forward = 1ステップ進む
+    .description = 再生位置をステップ幅だけ進める
 keymap-group-browsing = ナビゲーション
 keymap-group-editing = 編集
 keymap-group-library = ライブラリ

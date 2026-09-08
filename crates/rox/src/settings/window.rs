@@ -513,6 +513,10 @@ struct SettingsWindow {
     playback: Entity<Player>,
     /// The crossfade length slider's scrub, the Playback section.
     crossfade_scrub: ScrubState,
+    /// The step size and preview length sliders' scrubs, the Playback
+    /// page's Stepping section.
+    step_scrub: ScrubState,
+    step_preview_scrub: ScrubState,
     /// The two ReplayGain dB sliders' scrubs, the Leveling section.
     preamp_scrub: ScrubState,
     fallback_scrub: ScrubState,
@@ -1251,6 +1255,8 @@ impl SettingsWindow {
             backdrop: WindowBackdrop::default(),
             player,
             crossfade_scrub: ScrubState::default(),
+            step_scrub: ScrubState::default(),
+            step_preview_scrub: ScrubState::default(),
             preamp_scrub: ScrubState::default(),
             fallback_scrub: ScrubState::default(),
             output_exclusive,
@@ -4997,6 +5003,22 @@ impl SettingsWindow {
             .section(self.playback_behavior_section(q, cx))
             .section(Section::new(
                 q,
+                icons::MOVE_HORIZONTAL,
+                rox_i18n::t!("settings-playback-section-stepping"),
+                None,
+                |rows| {
+                    rows.custom(
+                        &["step", "frame", "nudge", "comma", "dot", "fine", "seek"],
+                        || self.step_row(cx).into_any_element(),
+                    )
+                    .custom(
+                        &["step", "preview", "audition", "blip", "hear", "paused"],
+                        || self.step_preview_row(cx).into_any_element(),
+                    )
+                },
+            ))
+            .section(Section::new(
+                q,
                 icons::PLAY,
                 rox_i18n::t!("settings-playback-section-startup"),
                 None,
@@ -5040,6 +5062,58 @@ impl SettingsWindow {
                     )
                 },
             ))
+    }
+
+    /// How far one step key moves the playhead.
+    fn step_row(&self, cx: &mut Context<Self>) -> Div {
+        panel::setting_row(
+            rox_i18n::t!("settings-playback-step"),
+            Some(rox_i18n::t!("settings-playback-step.description")),
+            settings_ui::scalar(
+                &self.step_scrub,
+                &self.value_edit,
+                self.playback.read(cx).step_ms(),
+                settings_ui::span(
+                    rox_core::settings::STEP_MS_MIN,
+                    rox_core::settings::STEP_MS_MAX,
+                    " ms",
+                )
+                .decimals(0)
+                .hard(),
+                |this: &mut Self, ms, cx| {
+                    this.playback
+                        .update(cx, |player, cx| player.set_step_ms(ms, cx));
+                    cx.notify();
+                },
+                cx,
+            ),
+        )
+    }
+
+    /// How long a step taken while paused plays for.
+    fn step_preview_row(&self, cx: &mut Context<Self>) -> Div {
+        panel::setting_row(
+            rox_i18n::t!("settings-playback-step-preview"),
+            Some(rox_i18n::t!("settings-playback-step-preview.description")),
+            settings_ui::scalar(
+                &self.step_preview_scrub,
+                &self.value_edit,
+                self.playback.read(cx).step_preview_ms(),
+                settings_ui::span(
+                    rox_core::settings::STEP_PREVIEW_MS_MIN,
+                    rox_core::settings::STEP_PREVIEW_MS_MAX,
+                    " ms",
+                )
+                .decimals(0)
+                .hard(),
+                |this: &mut Self, ms, cx| {
+                    this.playback
+                        .update(cx, |player, cx| player.set_step_preview_ms(ms, cx));
+                    cx.notify();
+                },
+                cx,
+            ),
+        )
     }
 
     /// What the transport's shuffle and continue buttons are doing when

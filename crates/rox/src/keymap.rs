@@ -35,12 +35,12 @@ use crate::workspace::{
     AbRepeat, AddBookmark, AddNamedBookmark, AnalyzeTempo, BuildAcoustic, ClosePanelAction,
     CloseWindow, CycleLoop, DecreaseFontSize, FillSortNames, FindDuplicates, FocusSearch,
     ImportWorkspace, IncreaseFontSize, MeasureReplayGain, NewEmptyWindow, NewWindow, NextBookmark,
-    NextTrack, OpenAbout, OpenConsole, OpenEqualizer, OpenHealth, OpenPowerSearch,
+    NextTrack, OpenAbout, OpenConsole, OpenEqualizer, OpenGoTo, OpenHealth, OpenPowerSearch,
     OpenPresetPicker, OpenQuickPlay, OpenSettings, OpenSignals, OpenStats, OpenTasks, OpenWelcome,
     PlayRandom, PrevBookmark, PreviousTrack, Quit, RescanLibrary, ResetFontSize, RomanizeLibrary,
-    StopPlayback, TagGenres, ToggleArtTheming, ToggleDecorations, ToggleDesignMode, ToggleMenubar,
-    ToggleMute, TogglePostShader, ToggleQuitToTray, ToggleResizeLock, ToggleShuffle,
-    ToggleStopAfter, ToggleTheme, VolumeDown, VolumeUp,
+    StepBackward, StepForward, StopPlayback, TagGenres, ToggleArtTheming, ToggleDecorations,
+    ToggleDesignMode, ToggleMenubar, ToggleMute, TogglePostShader, ToggleQuitToTray,
+    ToggleResizeLock, ToggleShuffle, ToggleStopAfter, ToggleTheme, VolumeDown, VolumeUp,
 };
 
 /// Bindings match key contexts along the focus path, so this scope holds
@@ -236,6 +236,7 @@ mod defaults {
     pub const NEXT_TRACK: &[&str] = &["cmd-right"];
     pub const PREVIOUS_TRACK: &[&str] = &["cmd-left"];
     pub const STOP: &[&str] = &["cmd-."];
+    pub const GO_TO_TIME: &[&str] = &["cmd-g"];
     pub const AB_REPEAT: &[&str] = &["l", "cmd-shift-l"];
     pub const BOOKMARK: &[&str] = &["m"];
     pub const BOOKMARK_NAMED: &[&str] = &["shift-m"];
@@ -269,6 +270,7 @@ mod defaults {
     pub const NEXT_TRACK: &[&str] = &["ctrl-right"];
     pub const PREVIOUS_TRACK: &[&str] = &["ctrl-left"];
     pub const STOP: &[&str] = &["ctrl-."];
+    pub const GO_TO_TIME: &[&str] = &["ctrl-g"];
     pub const AB_REPEAT: &[&str] = &["l", "ctrl-shift-l"];
     pub const BOOKMARK: &[&str] = &["m"];
     pub const BOOKMARK_NAMED: &[&str] = &["shift-m"];
@@ -317,6 +319,38 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             &["right"],
             SeekForward,
             rox_i18n::t_static("keymap-seek-forward.description")
+        ),
+        // Comma and dot, the video editor's frame keys, at the size the
+        // Playback settings hold. Bare like the seek pair, and on the same
+        // narrowed scope so a tile wall's own arrows stay its own; these two
+        // don't collide there, but the pair reads as one control and a
+        // rebind onto arrows shouldn't split it.
+        command!(
+            "step_backward",
+            rox_i18n::t_static("keymap-step-backward"),
+            Group::Playback,
+            SEEK,
+            &[","],
+            StepBackward,
+            rox_i18n::t_static("keymap-step-backward.description")
+        ),
+        command!(
+            "step_forward",
+            rox_i18n::t_static("keymap-step-forward"),
+            Group::Playback,
+            SEEK,
+            &["."],
+            StepForward,
+            rox_i18n::t_static("keymap-step-forward.description")
+        ),
+        command!(
+            "go_to_time",
+            rox_i18n::t_static("keymap-go-to-time"),
+            Group::Playback,
+            WORKSPACE,
+            defaults::GO_TO_TIME,
+            OpenGoTo,
+            rox_i18n::t_static("keymap-go-to-time.description")
         ),
         command!(
             "stop_playback",

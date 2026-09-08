@@ -1193,6 +1193,9 @@ actions!(
         NextTrack,
         PreviousTrack,
         StopPlayback,
+        StepBackward,
+        StepForward,
+        OpenGoTo,
         AbRepeat,
         AddBookmark,
         AddNamedBookmark,
@@ -1763,6 +1766,8 @@ pub(crate) enum MenuAction {
     /// Step the A-B cycle: mark A, mark B, clear. The row's label says
     /// which of the three a pick would do.
     AbRepeat,
+    /// Open the go-to modal: type a timestamp and land on it.
+    GoToTime,
     /// Set or cancel the sleep timer. Five rows, one action: the timer
     /// arms the stop-after that already exists, so the track playing when
     /// it fires plays out and the next one cues paused.
@@ -1870,6 +1875,7 @@ impl MenuAction {
             MenuAction::EmptyWindow => "empty-window".into(),
             MenuAction::Stop => "stop".into(),
             MenuAction::AbRepeat => "ab-repeat".into(),
+            MenuAction::GoToTime => "go-to-time".into(),
             MenuAction::Sleep(pick) => format!("sleep:{}", pick.id()),
             MenuAction::Next => "next".into(),
             MenuAction::Previous => "previous".into(),
@@ -1926,6 +1932,7 @@ impl MenuAction {
             "empty-window" => MenuAction::EmptyWindow,
             "stop" => MenuAction::Stop,
             "ab-repeat" => MenuAction::AbRepeat,
+            "go-to-time" => MenuAction::GoToTime,
             "next" => MenuAction::Next,
             "previous" => MenuAction::Previous,
             "health" => MenuAction::OpenHealth,
@@ -2313,6 +2320,13 @@ pub(crate) const MENUS: &[Menu] = &[
                 icon: icons::MOVE_HORIZONTAL,
                 action: MenuAction::AbRepeat,
             }),
+            // Beside A-B rather than with Next and Previous: both are about
+            // a place inside the track, where those two leave it.
+            MenuEntry::Item(MenuItem {
+                label: "menu-go-to-time",
+                icon: icons::CLOCK,
+                action: MenuAction::GoToTime,
+            }),
             // Fixed durations and a cancel row. The timer arms the stop
             // above rather than ending playback on the minute: a track cut
             // off mid-phrase is the one thing nobody falling asleep wants.
@@ -2578,6 +2592,7 @@ fn keymap_command(action: MenuAction) -> Option<&'static str> {
         MenuAction::TogglePlayback => "toggle_playback",
         MenuAction::Stop => "stop_playback",
         MenuAction::AbRepeat => "ab_repeat",
+        MenuAction::GoToTime => "go_to_time",
         MenuAction::Next => "next_track",
         MenuAction::Previous => "previous_track",
         MenuAction::NewWindow => "new_window",
@@ -5742,6 +5757,15 @@ impl Render for Workspace {
                     this.state
                         .player
                         .update(cx, |player, _| player.seek_by(5.0));
+                }))
+                .on_action(cx.listener(|this, _: &StepBackward, _, cx| {
+                    this.state.player.read(cx).step_by(true);
+                }))
+                .on_action(cx.listener(|this, _: &StepForward, _, cx| {
+                    this.state.player.read(cx).step_by(false);
+                }))
+                .on_action(cx.listener(|this, _: &OpenGoTo, _, cx| {
+                    crate::goto_dialog::open(this.state.clone(), cx);
                 }))
                 .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                     crate::settings::window::open(

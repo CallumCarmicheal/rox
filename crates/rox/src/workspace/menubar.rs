@@ -67,6 +67,7 @@ impl Workspace {
                     .player
                     .update(cx, |player, cx| player.ab_mark(cx));
             }
+            MenuAction::GoToTime => crate::goto_dialog::open(self.state.clone(), cx),
             MenuAction::Sleep(pick) => {
                 let after = pick.minutes().map(|m| Duration::from_secs(m * 60));
                 self.state

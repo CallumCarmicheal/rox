@@ -360,6 +360,21 @@ shader-blurb-cube = Каркасний куб, що перевертається
 shader-blurb-bloom = Пливучі кулі, розмиті другим проходом удвічі меншого розміру, увесь ланцюг у мініатюрі.
 shader-blurb-tube = Переграє панель під собою крізь вигнутий екран ЕПТ, разом зі рядками розгортки.
 
+## Go-to window
+
+goto-window-title = rox - Перейти до часу
+goto-time = Час
+goto-placeholder = 1:23, 83 або 1:02:03
+goto-now-of = Зараз { $time } з { $duration }
+goto-now = Зараз { $time }
+goto-nothing-playing = Нічого не грає
+goto-target = Перейти до { $time }
+goto-unreadable = Не час
+goto-go = Перейти
+goto-hint-before = Натисни
+goto-hint-key = Enter
+goto-hint-after = щоб перейти
+
 ## Transport strip pieces
 seek-item-elapsed = Минуло
 seek-item-strip = Смуга
@@ -923,6 +938,11 @@ settings-playback-restore-last-session = Відновлювати останні
     .description = Запускатися з чергою в тому вигляді, в якому ви її лишили, на паузі на треку, що грав, і там, де він спинився. Треки з черги поза теками вашої медіатеки відновити не вийде, і вони випадають із порядку
 settings-playback-section-queue = Черга
 settings-playback-section-ratings = Оцінки
+settings-playback-section-stepping = Крок
+settings-playback-step = Розмір кроку
+    .description = Наскільки одне натискання клавіші кроку рухає позицію
+settings-playback-step-preview = Прослуховування кроку
+    .description = Скільки крок звучить на паузі, щоб було чути, куди він потрапив
 settings-playback-section-startup = Запуск
 settings-playback-shuffle-random = Випадково
     .description = Те перемішування, яке всі й мають на увазі. Те, що попереду, грає без жодного порядку
@@ -1119,6 +1139,7 @@ menu-exit = Вийти
 menu-fill-sort-names = Заповнити імена для сортування...
 menu-romanize-library = Романізувати медіатеку...
 menu-find-duplicates = Знайти дублікати...
+menu-go-to-time = Перейти до часу...
 menu-tag-genres = Проставити жанри...
 menu-health = Стан бібліотеки
 menu-power-search = Розширений пошук
@@ -1582,6 +1603,12 @@ keymap-decrease-font-size = Зменшити розмір тексту
     .description = Зсунути розмір тексту всього застосунку на крок вниз
 keymap-focus-search = Фокус на пошук
     .description = Поставити курсор у поле пошуку медіатеки
+keymap-go-to-time = Перейти до часу
+    .description = Ввести час і перейти до нього
+keymap-step-backward = Крок назад
+    .description = Зсунути позицію назад на один крок
+keymap-step-forward = Крок вперед
+    .description = Зсунути позицію вперед на один крок
 keymap-group-browsing = Навігація
 keymap-group-editing = Редагування
 keymap-group-library = Медіатека
