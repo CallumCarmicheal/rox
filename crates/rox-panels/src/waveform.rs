@@ -23,11 +23,15 @@ use gpui::{
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_dock::{Panel, PanelEvent, TabPanel};
+use rox_library::bookmarks::Bookmark;
+use rox_library::cue::TrackKey;
 use serde::{Deserialize, Serialize};
 
 use rox_playback::engine;
 
 use crate::assets::icons;
+use crate::bookmark_ui;
+use crate::catalog::LibraryEvent;
 use crate::design::{palette, tokens};
 use crate::panel::{self, setting_row, toggle, AppState, PanelChrome, PanelSettings, ScrubState};
 use crate::panel_settings;
@@ -69,6 +73,9 @@ pub struct WaveformConfig {
     /// counts as listened for Last.fm. Only draws while scrobbling is
     /// connected and on.
     pub scrobble_marker: bool,
+    /// The playing track's bookmarks as chevrons along the bottom edge,
+    /// each one a seek and a right-click menu, the seek strip's own.
+    pub bookmarks: bool,
 }
 
 impl Default for WaveformConfig {
@@ -80,6 +87,7 @@ impl Default for WaveformConfig {
             outline: false,
             split_channels: false,
             scrobble_marker: false,
+            bookmarks: true,
         }
     }
 }
@@ -184,14 +192,34 @@ pub struct WaveformPanel {
     focus: FocusHandle,
     /// The tab panel that currently hosts this panel, for duplicate and pop-out.
     tab_panel: Option<WeakEntity<TabPanel>>,
+    /// The playing track's bookmarks and which track they were read for,
+    /// re-read on a track change and on a bookmark edit rather than on
+    /// every tick the strip repaints on.
+    marks: Vec<Bookmark>,
+    marks_key: Option<TrackKey>,
+    /// The bookmark chevron the pointer is on, for its readout.
+    hover_mark: Option<i64>,
     /// Wakes the panel when a session starts, so an idle window notices the
     /// new track without the player bar's frame pump.
     _player_changed: Subscription,
+    _library_changed: Subscription,
 }
 
 impl WaveformPanel {
     pub fn new(state: AppState, config: WaveformConfig, cx: &mut Context<Self>) -> Self {
         let _player_changed = cx.observe(&state.player, |_, _, cx| cx.notify());
+        let _library_changed = cx.subscribe(
+            &state.library,
+            |this: &mut Self, _, event: &LibraryEvent, cx| {
+                if matches!(
+                    event,
+                    LibraryEvent::BookmarksChanged | LibraryEvent::Updated
+                ) {
+                    this.marks_key = None;
+                    cx.notify();
+                }
+            },
+        );
         WaveformPanel {
             state,
             config,
@@ -208,8 +236,23 @@ impl WaveformPanel {
             epoch: Instant::now(),
             focus: cx.focus_handle().tab_stop(true),
             tab_panel: None,
+            marks: Vec::new(),
+            marks_key: None,
+            hover_mark: None,
             _player_changed,
+            _library_changed,
         }
+    }
+
+    /// The playing track's bookmarks, read once per track (and again after
+    /// an edit), so the per-tick repaint never touches the database.
+    fn marks_for(&mut self, key: &TrackKey, cx: &App) -> &[Bookmark] {
+        if self.marks_key.as_ref() != Some(key) {
+            self.marks = self.state.library.read(cx).bookmarks_for(key);
+            self.marks_key = Some(key.clone());
+            self.hover_mark = None;
+        }
+        &self.marks
     }
 
     /// The playing track changed: fetch its peaks off the UI thread (the
@@ -282,7 +325,12 @@ impl WaveformPanel {
         cx.notify();
     }
 
-    fn strip(&self, marker: Option<f32>, ab: Option<(f32, Option<f32>)>) -> impl IntoElement {
+    fn strip(
+        &self,
+        marker: Option<f32>,
+        ab: Option<(f32, Option<f32>)>,
+        marks: Vec<bookmark_ui::Mark>,
+    ) -> impl IntoElement {
         let scrub = self.scrub.clone();
         let player = self.state.player.clone();
         let from = self.from.clone();
@@ -296,7 +344,9 @@ impl WaveformPanel {
                 move |bounds, _, _| scrub.set_bounds(bounds)
             },
             move |bounds, _, window, _| {
-                paint_morph(&from, &to, u, t, marker, ab, &config, bounds, window);
+                paint_morph(
+                    &from, &to, u, t, marker, ab, &marks, &config, bounds, window,
+                );
                 panel::scrub_on_paint(&scrub, window, {
                     let player = player.clone();
                     move |fraction, cx| panel::seek_fraction(&player, fraction, cx)
@@ -425,6 +475,7 @@ fn paint_morph(
     t: f32,
     marker: Option<f32>,
     ab: Option<(f32, Option<f32>)>,
+    marks: &[bookmark_ui::Mark],
     config: &WaveformConfig,
     bounds: Bounds<Pixels>,
     window: &mut Window,
@@ -533,6 +584,7 @@ fn paint_morph(
             }
         }
         panel::paint_ab(ab, weight, bounds, window);
+        bookmark_ui::paint_marks(marks, weight, bounds, window);
         let alpha = (0xd9 as f32 * weight) as u8;
         if alpha == 0 {
             continue;
@@ -640,6 +692,18 @@ impl PanelSettings for WaveformPanel {
                     self.config.scrobble_marker,
                     |this: &mut Self, on, cx| {
                         this.config.scrobble_marker = on;
+                        cx.notify();
+                    },
+                    cx,
+                ),
+            ))
+            .child(setting_row(
+                rox_i18n::t!("waveform-bookmarks"),
+                Some(rox_i18n::t!("waveform-bookmarks.description")),
+                toggle(
+                    self.config.bookmarks,
+                    |this: &mut Self, on, cx| {
+                        this.config.bookmarks = on;
                         cx.notify();
                     },
                     cx,
@@ -755,6 +819,18 @@ impl Panel for WaveformPanel {
                     });
                 }),
         );
+        let weak = cx.entity().downgrade();
+        let menu = menu.item(
+            PopupMenuItem::new(rox_i18n::t!("waveform-bookmarks"))
+                .checked(self.config.bookmarks)
+                .on_click(move |_, _, cx| {
+                    let Some(this) = weak.upgrade() else { return };
+                    this.update(cx, |this, cx| {
+                        this.config.bookmarks = !this.config.bookmarks;
+                        cx.notify();
+                    });
+                }),
+        );
         let menu =
             panel_settings::rename_item(menu, &cx.entity(), self.tab_panel.clone(), window, cx);
         let menu = panel_settings::settings_item(menu, &cx.entity(), cx);
@@ -825,6 +901,17 @@ impl WaveformPanel {
         let ab = now
             .as_ref()
             .and_then(|now| panel::ab_fractions(ab_state, now.duration_secs));
+        // The track's bookmarks, placed along the strip. Kept through the
+        // between-tracks blink so the marks don't flash off with the shape.
+        let marks = match (&now, self.config.bookmarks) {
+            (Some(now), true) => {
+                let key = now.key.clone();
+                let duration = now.duration_secs;
+                bookmark_ui::marks(self.marks_for(&key, cx), duration)
+            }
+            _ => Vec::new(),
+        };
+        let hover_mark = self.hover_mark;
 
         // The seek preview only shows on real peaks: the placeholder and
         // the unavailable message have no track shape to point along.
@@ -833,7 +920,7 @@ impl WaveformPanel {
             // Hold the strip through the blink: whatever it shows stays up,
             // and the next track's shape morphs from it instead of popping
             // in from blank.
-            (None, _) if between_tracks => self.strip(marker, ab).into_any_element(),
+            (None, _) if between_tracks => self.strip(marker, ab, marks.clone()).into_any_element(),
             (None, _) | (Some(_), Peaks::None) => {
                 // Nothing on screen to morph from later; snap the strip
                 // empty so the next track fades in from blank.
@@ -853,7 +940,7 @@ impl WaveformPanel {
             }
             (Some(_), Peaks::Decoding) => {
                 self.retarget(Shape::Placeholder);
-                self.strip(marker, ab).into_any_element()
+                self.strip(marker, ab, marks.clone()).into_any_element()
             }
             (Some(now), Peaks::Ready(peaks)) => {
                 let progress = now
@@ -867,7 +954,7 @@ impl WaveformPanel {
                     self.config.split_channels,
                     progress,
                 ));
-                self.strip(marker, ab).into_any_element()
+                self.strip(marker, ab, marks.clone()).into_any_element()
             }
         };
 
@@ -904,5 +991,23 @@ impl WaveformPanel {
             .when_some(hover_duration, |d, duration| {
                 d.child(panel::seek_hover(&self.scrub, duration, cx))
             })
+            // The chevrons' hit layer goes over the seek readout's, so a
+            // pointer on a mark reads the mark. Only over real peaks, where
+            // the seek readout shows too: the placeholder has no length.
+            .when_some(
+                now.as_ref()
+                    .filter(|_| hover_duration.is_some() && !marks.is_empty()),
+                |d, now| {
+                    d.child(bookmark_ui::overlay(
+                        &self.state,
+                        &now.key,
+                        &marks,
+                        hover_mark,
+                        &self.scrub,
+                        |this: &mut Self, id, _| this.hover_mark = id,
+                        cx,
+                    ))
+                },
+            )
     }
 }

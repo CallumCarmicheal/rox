@@ -230,6 +230,7 @@ pub fn scan(
     // costs next to nothing.
     crate::playlists::reattach(conn)?;
     crate::listens::reattach(conn)?;
+    crate::bookmarks::reattach(conn)?;
     Ok(summary)
 }
 
@@ -311,6 +312,7 @@ pub fn reindex(conn: &mut Connection, paths: &[PathBuf]) -> rusqlite::Result<usi
         // same reattach a full scan runs.
         crate::playlists::reattach(conn)?;
         crate::listens::reattach(conn)?;
+        crate::bookmarks::reattach(conn)?;
     }
     Ok(rows.len())
 }

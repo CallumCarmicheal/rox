@@ -43,43 +43,64 @@ headline use, not a hypothetical. Chains are capped at eight passes, the same
 pragmatism as sixteen slots: past that, the design being expressed needs a render
 graph, which is refused below, not given a bigger cap.
 
-Assets are data, not code, and the approval gate is about code, so assets don't gate.
-The program text hashes and gates exactly as today, one fingerprint over the trimmed
-text; an image the approved code samples can misrender a look but can't execute, and
-gating it would train people to click through the dialog that matters. Assets travel
-inside the bundle as encoded bytes next to the shader pool, for the same reason
-shader source travels inline: a path-only reference imports as a dead look on the
-next machine. Eject writes them as real files beside the ejected WGSL and the watch
-reloads both, so the authoring loop stays an external editor plus a save. Bundles
-with plates stay small in practice because the aesthetic that calls for plates is
-1-bit imagery, which compresses to almost nothing; a soft size warning at export
-beats a hard cap that a legitimate look would hit.
+Assets don't go through the approval gate, because the gate exists to stop untrusted
+code from running and an asset isn't code. The program text still hashes and gates
+exactly as it does today, one fingerprint over the trimmed source. An image that
+approved code samples can make a look render wrong, but it can't execute anything, and
+adding a second dialog for it would teach people to click through the dialog that
+actually matters.
 
-One asset value is reserved rather than being a file: `// @asset art: @cover` binds
-the playing track's cover under the declared name. The bytes come off the window's
-player at registration and the program re-registers when the track turns over, one
-split and one compile per switch, nothing per frame. A track without art binds a
-flat dark plate, so the binding always samples something, and a shader that arrived
-inline still resolves it, since the art belongs to the player rather than to a
-folder. Registered covers are downscaled to a 512 cap on the long edge because the
-renderer never evicts textures within a window's life; eviction is the follow-up
-this trades against, not a redesign.
+Assets travel inside the bundle as encoded bytes, sitting next to the shader pool, for
+the same reason shader source travels inline rather than as a path: a bundle that only
+references a file on the author's disk imports as a dead look on anyone else's machine.
+Eject writes them back out as real files beside the ejected WGSL, and the watch picks up
+changes to both, so the authoring loop stays what it was, an external editor and a save.
 
-ShaderToy's multi-buffer model (BufferA through BufferD feeding an Image pass) is
-the same shape and confirms the semantics; ours differs in letting the author name
-the passes and in keeping one file. A node-graph compositor was considered and
-refused. The product question underneath it is rox's performance ambition:
-VJ-lite, live control and look-switching over surfaces it already has, where the
-rendering ceiling that direction needs is chains under a fixed compositor (an A/B
-blend between two chains, when that gets built), never user-authored topologies.
-Everything else on the VJ-lite path is control-plane work over this contract:
-hand-set slots and routes are the performance knobs, ADR 22's socket is where a
-MIDI or OSC bridge would go, and a popped-out Shader panel is the projector output.
-User-authored topology is TouchDesigner's product, and even gig-grade VJ software
-is layers of linear chains under a fixed compositor, which is how far the chain
-model demonstrably goes. Passes with named inputs and outputs remain node-shaped
-regardless, so if this read is ever revisited a chain lifts into a graph without
-breaking a bundle. Compute passes are the right answer for large sorts and were
+Bundle size stays reasonable in practice without a cap, because the aesthetic that wants
+image plates is 1-bit imagery, which compresses to almost nothing. Export shows a soft
+size warning instead, since a hard limit would eventually block a legitimate look for
+being large.
+
+One asset value is reserved instead of naming a file. `// @asset art: @cover` binds the
+playing track's cover art under the declared name. The bytes are read off the window's
+player when the program registers, and the program re-registers when the track changes,
+so the cost is one split and one compile per track switch and nothing per frame. A track
+with no art binds a flat dark plate rather than nothing, so the binding always has
+something to sample and a shader never has to handle the empty case. Because the art
+comes from the player rather than from a folder, a shader that arrived inline in a bundle
+resolves it just as well as one ejected to disk.
+
+Registered covers are downscaled to a 512-pixel cap on the long edge. That's a direct
+consequence of the renderer never evicting textures within a window's lifetime: every
+cover bound during a session stays resident, so an uncapped size would accumulate
+full-resolution art for as long as the window is open. Eviction is the follow-up that
+would remove the cap rather than a redesign of any of this.
+
+ShaderToy's multi-buffer model, where BufferA through BufferD feed an Image pass, is the
+same shape as this one and is useful confirmation that the semantics work. The two
+differences here are that the author names the passes rather than picking from fixed slot
+names, and that everything stays in one file.
+
+A node-graph compositor was considered and refused, and the reason is a product question
+rather than a rendering one. What rox is aiming at is VJ-lite: live control and
+look-switching over the surfaces it already has. The rendering ceiling that ambition
+actually needs is chains running under a fixed compositor, with an A/B blend between two
+chains as the most complex form of it, and that's reachable without user-authored
+topologies at all.
+
+Everything else on the VJ-lite path is control-plane work sitting on top of this
+contract. Hand-set slots and routes are the performance knobs. [ADR 22](22-adr-control-surface.md)'s
+socket is where a MIDI or OSC bridge would attach. A popped-out Shader panel is the
+projector output. None of those need a graph.
+
+Authoring topology is a different product, and TouchDesigner is already it. Even
+gig-grade VJ software is layers of linear chains under a fixed compositor, which is
+evidence about how far the chain model goes rather than an argument from taste. And the
+refusal isn't a one-way door: passes with named inputs and outputs are node-shaped
+whether or not there's a graph over them, so if this read is ever revisited, a chain
+lifts into a graph without breaking any bundle already written.
+
+Compute passes are the right answer for large sorts and were
 deferred on capability grounds, since the gpui patches build on blade's render
 pipelines and a compute stage is a different tier of surgery; a fragment chain covers the
 visible aesthetic, and the pass contract here is likewise the one a compute stage would

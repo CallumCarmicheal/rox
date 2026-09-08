@@ -16,8 +16,8 @@ use gpui::{
     actions, canvas, deferred, div, overlay_phase, prelude::*, px, svg, AnyElement,
     AnyWindowHandle, App, Axis, Bounds, Context, DismissEvent, Div, Entity, ExternalPaths,
     FocusHandle, Focusable as _, FontFeatures, Global, KeyDownEvent, Modifiers,
-    ModifiersChangedEvent, MouseButton, PathPromptOptions, Pixels, Point, SharedString,
-    Subscription, Task, WeakEntity, Window, WindowBounds,
+    ModifiersChangedEvent, MouseButton, PathPromptOptions, Pixels, Point, ScrollHandle,
+    SharedString, Subscription, Task, WeakEntity, Window, WindowBounds,
 };
 use rox_dock::{
     register_panel, DockArea, DockAreaState, DockEvent, DockItem, Panel as _, PanelInfo, PanelView,
@@ -58,6 +58,7 @@ use rox_panel_kit::ui::{chord, kbd_line, Seg};
 use rox_panels::art::{ArtConfig, ArtPanel};
 use rox_panels::artist_grid::{ArtistGridConfig, ArtistGridPanel};
 use rox_panels::biography::BiographyPanel;
+use rox_panels::bookmarks::BookmarksPanel;
 use rox_panels::cover::CoverArtPanel;
 use rox_panels::drag_anchor::DragAnchorPanel;
 use rox_panels::eq_widget::EqWidgetPanel;
@@ -1193,6 +1194,10 @@ actions!(
         PreviousTrack,
         StopPlayback,
         AbRepeat,
+        AddBookmark,
+        AddNamedBookmark,
+        PrevBookmark,
+        NextBookmark,
         PlayRandom,
         ToggleMute,
         ToggleShuffle,
@@ -1363,6 +1368,29 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &AbRepeat, cx| {
         with_front_workspace(cx, |ws, _, cx| {
             ws.state.player.update(cx, |player, cx| player.ab_mark(cx));
+        });
+    });
+    // A bookmark at the playing position: M drops one silently, Shift+M
+    // asks for a name first, with the position taken at the press.
+    cx.on_action(|_: &AddBookmark, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            crate::bookmark_dialog::drop_here(ws.state.clone(), false, cx);
+        });
+    });
+    cx.on_action(|_: &AddNamedBookmark, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            crate::bookmark_dialog::drop_here(ws.state.clone(), true, cx);
+        });
+    });
+    // Step the playing track between its bookmarks.
+    cx.on_action(|_: &PrevBookmark, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            rox_panel_api::bookmark_ui::step(&ws.state, false, cx);
+        });
+    });
+    cx.on_action(|_: &NextBookmark, cx| {
+        with_front_workspace(cx, |ws, _, cx| {
+            rox_panel_api::bookmark_ui::step(&ws.state, true, cx);
         });
     });
     // The plain draw, the transport panel's dice button without its per-panel
@@ -1553,6 +1581,7 @@ fn register_panels(state: &AppState, workspace: WeakEntity<Workspace>, cx: &mut 
     configured!("biography", BiographyPanel);
     configured!("output", OutputPanel);
     configured_windowed!("history", HistoryPanel);
+    configured!("bookmarks", BookmarksPanel);
     configured_windowed!("queue", QueuePanel);
     configured!("queue widget", QueueWidgetPanel);
     configured!("eq widget", EqWidgetPanel);
@@ -2680,6 +2709,15 @@ pub struct Workspace {
     /// The window width at the last menu paint, the other half of the
     /// side decision.
     menu_viewport_w: Pixels,
+    /// The window height at the last menubar or menu paint, what caps a
+    /// surface's rows so they scroll rather than run off the bottom. See
+    /// [`Self::menu_fit`].
+    menu_viewport_h: Pixels,
+    /// One scroll position per menu surface level, the dropdown's and its
+    /// flyouts', root first. A collapsed bar's root list takes [0] and
+    /// shifts the rest along by one, the same as [`Self::menu_surfaces`].
+    /// Reset as each level closes, so a reopened list starts at its top.
+    menu_scrolls: [ScrollHandle; 4],
     /// The popup off the menubar's status side, the sleep dropdown or the
     /// right-click button toggles, pinned where the press landed, with the
     /// dismiss subscription that clears it.
@@ -3278,6 +3316,8 @@ impl Workspace {
             menubar_bounds: None,
             menu_root: false,
             menu_viewport_w: Pixels::ZERO,
+            menu_viewport_h: Pixels::ZERO,
+            menu_scrolls: std::array::from_fn(|_| ScrollHandle::new()),
             status_menu: None,
             pointer_down: false,
             alt_tap: menubar::AltTap::default(),

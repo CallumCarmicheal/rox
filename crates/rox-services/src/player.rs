@@ -1300,7 +1300,23 @@ impl Player {
             self.play(keys, cx);
             return;
         }
-        self.splice(after, keys, None, true, and_play, cx);
+        self.splice(after, keys, None, true, and_play, None, cx);
+    }
+
+    /// Play `key` now, opened `secs` into it, the play-from-bookmark move:
+    /// spliced after the playing track like [`play_now`](Self::play_now),
+    /// or started fresh when nothing is loaded. The offset rides the same
+    /// command as the insert, so the track's head is never heard; a fresh
+    /// session takes the seek ahead of its first decode the way the launch
+    /// restore does.
+    pub fn play_now_at(&mut self, key: TrackKey, secs: f64, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            self.play(vec![key], cx);
+            self.seek_to(secs);
+            return;
+        }
+        let after = self.playing_after();
+        self.splice(after, vec![key], None, true, true, Some(secs.max(0.0)), cx);
     }
 
     /// The insert both the hand-queued keys and a delivered continuation batch
@@ -1320,6 +1336,7 @@ impl Player {
         groups: Option<Vec<Option<u64>>>,
         explicit: bool,
         and_play: bool,
+        start_secs: Option<f64>,
         cx: &mut Context<Self>,
     ) {
         // Nothing to mirror the growth onto, so bail before anything grows:
@@ -1353,6 +1370,7 @@ impl Player {
             spans: meta.spans,
             explicit,
             and_play,
+            start_secs,
         });
         cx.notify();
     }
@@ -1803,7 +1821,7 @@ impl Player {
         // the way they do for the context that seeded the session. Visible in
         // the timeline and removable all the same, which is the whole answer
         // to "rox is playing things I didn't pick".
-        self.splice(None, keys, Some(groups), false, false, cx);
+        self.splice(None, keys, Some(groups), false, false, None, cx);
         // Similar ranks the whole upcoming portion against the playing track,
         // which is what the mode already does on every skip, so the fold is
         // just asking it again now the batch has arrived. Nothing to pin

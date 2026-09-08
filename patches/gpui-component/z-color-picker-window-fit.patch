@@ -1,0 +1,105 @@
+--- a/src/color_picker.rs	2026-09-07 14:19:11.826582578 -0600
++++ b/src/color_picker.rs	2026-09-07 14:20:16.070916366 -0600
+@@ -1,7 +1,7 @@
+ use gpui::{
+     App, AppContext, Bounds, ClickEvent, Context, Corner, Div, ElementId, Entity, EventEmitter,
+     FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
+-    ParentElement, Pixels, Point, Render, RenderOnce, SharedString, Stateful,
++    ParentElement, Pixels, Point, Render, RenderOnce, ScrollHandle, SharedString, Stateful,
+     StatefulInteractiveElement as _, StyleRefinement, Styled, Subscription, Window, anchored,
+     canvas, deferred, div, prelude::FluentBuilder as _, px, relative,
+ };
+@@ -14,10 +14,15 @@
+     divider::Divider,
+     h_flex,
+     input::{Input, InputEvent, InputState},
++    scroll::ScrollableElement as _,
+     tooltip::Tooltip,
+     v_flex,
+ };
+ 
++/// rox patch: the room the picker keeps from the window edge, the same
++/// margin its `anchored` snaps against.
++const WINDOW_MARGIN: Pixels = px(8.);
++
+ const CONTEXT: &'static str = "ColorPicker";
+ pub fn init(cx: &mut App) {
+     cx.bind_keys([KeyBinding::new("escape", Cancel, Some(CONTEXT))])
+@@ -65,6 +70,8 @@
+     state: Entity<InputState>,
+     open: bool,
+     bounds: Bounds<Pixels>,
++    /// rox patch: the palette's scroll position, for windows shorter than it.
++    scroll_handle: ScrollHandle,
+     _subscriptions: Vec<Subscription>,
+ }
+ 
+@@ -101,6 +108,7 @@
+             state,
+             open: false,
+             bounds: Bounds::default(),
++            scroll_handle: ScrollHandle::default(),
+             _subscriptions,
+         }
+     }
+@@ -396,6 +404,7 @@
+     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+         let state = self.state.read(cx);
+         let bounds = state.bounds;
++        let scroll_handle = state.scroll_handle.clone();
+         let display_title: SharedString = if let Some(value) = state.value {
+             value.to_hex()
+         } else {
+@@ -471,11 +480,20 @@
+                     ),
+             )
+             .when(state.open, |this| {
++                // rox patch: the palette is capped at the window and scrolls
++                // past it. Upstream let it run to its full height, and in a
++                // window shorter than that (a small dialog) anchored pinned
++                // its top to the margin and the bottom rows clipped off. The
++                // cap leaves the snap margin either side plus the gap the
++                // popover keeps from its trigger.
++                let inset = window.client_inset().unwrap_or_default();
++                let max_height =
++                    window.viewport_size().height - (WINDOW_MARGIN + inset) * 2. - px(6.);
+                 this.child(
+                     deferred(
+                         anchored()
+                             .anchor(self.anchor)
+-                            .snap_to_window_with_margin(px(8.))
++                            .snap_to_window_with_margin(WINDOW_MARGIN)
+                             .position(self.resolved_corner(bounds))
+                             .child(
+                                 div()
+@@ -484,16 +502,28 @@
+                                         Corner::TopLeft | Corner::TopRight => this.mt_1p5(),
+                                         Corner::BottomLeft | Corner::BottomRight => this.mb_1p5(),
+                                     })
++                                    .relative()
++                                    .flex()
++                                    .flex_col()
+                                     .w_72()
++                                    .max_h(max_height)
+                                     .overflow_hidden()
+                                     .rounded(cx.theme().radius)
+-                                    .p_3()
+                                     .border_1()
+                                     .border_color(cx.theme().border)
+                                     .shadow_lg()
+                                     .bg(cx.theme().popover)
+                                     .text_color(cx.theme().popover_foreground)
+-                                    .child(self.render_colors(window, cx))
++                                    .child(
++                                        div()
++                                            .id("colors")
++                                            .p_3()
++                                            .min_h_0()
++                                            .overflow_y_scroll()
++                                            .track_scroll(&scroll_handle)
++                                            .child(self.render_colors(window, cx)),
++                                    )
++                                    .vertical_scrollbar(&scroll_handle)
+                                     .on_mouse_up_out(
+                                         MouseButton::Left,
+                                         window.listener_for(&self.state, |state, _, window, cx| {

@@ -2,25 +2,27 @@
 
 Can rox keep playing with no windows open and come back through a tray icon?
 This entry surveys what gpui 0.2.2 and the crate ecosystem offer, and records
-what the prototype (`crates/rox-prototype-tray`) found on the Plasma 6 Wayland
-daily driver. Short version: the ksni side all works, but stock gpui 0.2.2
-kills the Linux event loop when the last window closes, so windowless
-residency waits on the QuitMode policy upstream has already merged.
+what the prototype found on the Plasma 6 Wayland daily driver. The answer was
+yes on every question except one: stock gpui 0.2.2 kills the Linux event loop
+when the last window closes. [What shipped](#what-shipped) records how that
+was resolved.
 
-## Where the lifecycle stands
+The prototype was in `crates/rox-prototype-tray` (git history).
 
-The app has two exits and they disagree. Quit (menu, cmd-q) persists and calls
+## Where the lifecycle stood
+
+The app had two exits and they disagreed. Quit (menu, cmd-q) persists and calls
 `cx.quit()`, tearing down every window (`workspace.rs`). Closing the main
-window's X only removes that window: the `on_window_should_close` hook persists
-the layout and returns true, and nothing checks what's left. gpui's Linux event
+window's X only removed that window: the `on_window_should_close` hook persists
+the layout and returns true, and nothing checked what was left. gpui's Linux event
 loop only exits on an explicit quit, so a settings window, popout, or customize
-window keeps a headless process alive with no way back to a workspace. That's
-today's bug, and it's worth fixing on its own before any tray work: when the
-last workspace window closes and quit-to-tray is off, quit.
+window kept a headless process alive with no way back to a workspace. That was a
+bug worth fixing on its own before any tray work: when the last workspace window
+closes and quit-to-tray is off, quit.
 
-The same loop behavior is what background residency needs. The process already
-survives with zero windows; what's missing is on purpose instead of by
-accident, plus a handle back in.
+That same loop behavior is the one background residency needs. The process already
+survived with zero windows; what was missing was making that a choice rather than
+an accident, plus a handle back in.
 
 ## What gpui gives us
 
@@ -106,10 +108,10 @@ properly: zed PR #42391 (merged 2025-11-10, three weeks after 0.2.2's
 publish) moved the decision to an app-level policy,
 `Application::with_quit_mode`, where `QuitMode::Explicit` is exactly what
 rox wants since the workspace already counts windows and quits itself. No
-crates.io release carries it yet. The implementation therefore waits on a
-gpui bump, or ships with the backend check patched out (two lines per
-backend); the prototype's windowless runs used exactly that patch against
-the 0.2.2 source and nothing else.
+crates.io release carried it at the time, leaving two routes: wait for a gpui
+bump, or patch the backend check out, two lines per backend. The prototype's
+windowless runs used exactly that patch against the 0.2.2 source and nothing
+else.
 
 With the patch in, every question came back yes:
 
@@ -156,22 +158,45 @@ click. Upstream's `QuitMode` keeps Explicit as the mac default, so nothing
 changes on a bump. Quit-to-tray there is just close_workspace_window not
 calling `cx.quit` when the toggle is on; the dock is the tray, no crate
 involved. The mac backend's `status_item.rs` turns out to be dead gpui1-era
-code - it imports `geometry::rect`, which no longer exists, and isn't in the
-module tree - so a menu bar status item would be hand-rolled NSStatusItem
+code. It imports `geometry::rect`, which no longer exists, and isn't in the
+module tree, so a menu bar status item would be hand-rolled NSStatusItem
 via objc, or tray-icon on the main thread (gpui's main thread is the running
 NSApp loop it wants). Still additive polish, not the mechanism.
 
 Windows has the same 0.2.2 disease as Linux: `WM_gpui_CLOSE_ONE_WINDOW`
 posts `WM_QUIT` once the window list empties
 (`platform/windows/platform.rs:718`), and upstream removed that in the same
-QuitMode work, so the one gpui bump unlocks all three platforms. For the
-icon, tray-icon is the lean there, opposite of Linux: no GTK anywhere on
+QuitMode work, so one fix unlocks all three platforms. For the icon,
+tray-icon is the lean there, opposite of Linux: no GTK anywhere on
 Windows, just a thin wrapper over `Shell_NotifyIcon`, and its docs
 explicitly support a dedicated thread running its own win32 message pump.
-That is the ksni architecture again - tray thread, non-blocking sends into a
-channel, drained on the foreground executor - so the marshalling layer from
+That's the ksni architecture again, a tray thread doing non-blocking sends into
+a channel drained on the foreground executor, so the marshalling layer from
 the prototype carries over unchanged. Hand-rolling over the `windows` crate
 gpui already pulls in stays the fallback if tray-icon's menu stack
 (muda) fights the win32 loop. souvlaki's SMTC also wants the window handle
 wired up (`media_controls.rs` notes it) before the media widget works there;
 that stays a separate ticket either way.
+
+## What shipped
+
+The event-loop blocker was resolved by patching the vendored gpui rather than
+waiting for a release, the same custody the shader work already needs:
+`patches/gpui/quit-keep-event-loop.patch` drops the last-window loop stop from
+the Wayland, X11, and Windows backends, with a note to delete the patch once a
+crates.io gpui ships `with_quit_mode`. rox already quits itself from
+`close_workspace_window`, so removing the auto-stop is the whole change.
+
+The tray itself is `crates/rox/src/integrations/tray.rs`, and it took the
+survey's lean on every platform: ksni on Linux, tray-icon on Windows, and
+nothing on macOS beyond the kept state, since the dock is the tray there. The
+marshalling matches `media_controls`, callbacks on the tray's own thread
+sending over a channel that a foreground-executor task drains.
+
+Two things the prototype didn't cover came up in the build. Closing the last
+window hands the live `AppState` to a hold rather than dropping it, so the
+player and its engine keep running with no window attached and the tray's Open
+adopts that state into a fresh one. And residency is checked, not assumed: on
+Linux the close path only goes windowless if the icon actually made it onto the
+bus, so a desktop with no SNI host quits instead of stranding a headless
+process.

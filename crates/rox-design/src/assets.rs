@@ -94,6 +94,8 @@ pub mod icons {
     pub const UPLOAD: &str = "icons/upload.svg";
     pub const TRASH: &str = "icons/trash-2.svg";
     pub const PENCIL: &str = "icons/pencil.svg";
+    /// The bookmarks panel and the bookmark commands.
+    pub const BOOKMARK: &str = "icons/bookmark.svg";
     /// The rating stars: the same outline both ways, the filled one with a
     /// solid fill so the pair reads set/unset at cell size.
     pub const STAR: &str = "icons/star.svg";

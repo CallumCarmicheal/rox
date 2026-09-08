@@ -2,55 +2,75 @@
 
 **Status:** Decided
 
-Decision: a panel can have its own look as a `PanelTheme`, a sparse map of
-palette-role overrides plus an optional surface opacity and the frame knobs
-(margin off the panel's cell with the backdrop in the gap, padding inside the
-panel's own surface, corner rounding, a border width), stored on the panel's
-config and persisted through the layout dump like every other per-view
-knob. Margin, padding, and border each have a value per side, written as
-one number while the four match, so the everyday case is still one slider
-and a config that never split a knob reads exactly as it did before. The
-frame knobs are geometry, not colors, so the wrapper element applies them
-straight to the panel body instead of through the scope; the border draws
-in the border role's color, which the override map already covers. The read
-path stays the plain accessors of ADR 10: while a panel renders, a
-thread-local scope stack holds its resolved theme, and each
-accessor returns the scope's value for an overridden role before
-falling through to the process-global palette. A wrapper element pushes the
-scope for the render build and re-enters it for layout, prepaint, and paint,
-which is when hover styles and canvas paint closures actually read, so
-panel code keeps calling `palette::accent()` with no context threading. An
-overridden role reads exactly as written: song theming and palette easing
-pass it by, while every role the panel leaves alone keeps following the app
-palette, edits and tinting included. Editing happens in a per-panel settings
-window with the app settings window's sidebar-and-pages shape; the panel's
-old customize rows become its own pages and a shared Appearance page edits
-the override, both drawing from one extracted chrome module. A panel can
-append its own section to the Appearance page for look knobs stored on its
-config rather than the theme, like the grid's cover rounding.
+Decision: a panel can carry its own look as a `PanelTheme`. That's a sparse map of
+palette-role overrides, an optional surface opacity, and the frame knobs: a margin
+between the panel and its cell with the backdrop showing through the gap, padding inside
+the panel's own surface, corner rounding, and a border width. It's stored on the panel's
+config and persisted through the layout dump like every other per-view setting.
 
-Alternatives: threading a palette handle through every accessor call site;
-a full palette per panel instead of a sparse diff; running per-panel
-overrides through the derivation and easing pipeline for full song-theming
-parity; per-panel token (size, radius, pace) overrides in the same stroke.
+Margin, padding, and border each hold a value per side, but a knob whose four sides
+agree is written as a single number. So the everyday case is still one slider, and a
+config saved before per-side values existed reads back exactly as it did before.
 
-Trade: the scope is invisible in signatures, so a paint that escapes the
-wrapped subtree (a deferred overlay, a menu) silently reads the global
-palette. That's accepted because overlays are app chrome, not panel content.
-A sparse diff keeps an override tracking global edits for everything it
-doesn't pin, where a full copy would freeze the panel against them; the cost
-is that a theme isn't a standalone palette file. Overridden roles winning over
-song theming is the point (a pinned role stays put while the app moves),
-and skipping derivation for them keeps the scope a read-time lookup instead
-of a second derivation pipeline. gpui-component widget chrome (table
-striping, tab bars) projects from the global theme only, so a panel override
-recolors the panel's own drawing, not the widget skeleton under it. The
-border's old per-side on/off mask folded into the widths themselves: a side
-at zero draws nothing, so one control says what two used to. Configs that
-still have a mask still load, and the mask folds over whichever width wins
-until the border is next edited. Rounding styles the body's own background
-quad because gpui content masks stay rectangular: content pressed hard into
-a corner still paints square, which small radii keep unnoticeable. Covers
-are the exception, since they run edge to edge, so the art surfaces round
-their images directly. Tokens stay ADR 12 consts; the frame knobs shape the
-panel's edge, not the spacing and radii inside it.
+The frame knobs are geometry rather than color, so the wrapper element applies them
+directly to the panel body instead of routing them through the theme scope below. The
+one exception is the border, which draws in the border role's color, and that role is
+already in the override map like any other.
+
+**How a panel's colors reach its drawing.** The read path stays the plain accessors of
+[ADR 10](10-adr-theming.md), with no signature changes anywhere. While a panel renders, a
+thread-local scope stack holds its resolved theme. Each accessor checks that scope first
+and returns the panel's value if the role is overridden there, and otherwise falls
+through to the process-global palette. A wrapper element pushes the scope for the render
+build and pushes it again for layout, prepaint, and paint, because that's when hover
+styles and canvas paint closures actually call the accessors, and the render build is
+long over by then. The result is that panel code keeps calling `palette::accent()` and
+gets its own accent, without a context parameter threaded through anything.
+
+An overridden role reads exactly as it was written. Song theming and palette easing move
+right past it, so a pinned role stays where it was pinned. Every role the panel doesn't
+override keeps following the app palette, including live edits and cover-art tinting, so
+a partial override tracks the app for everything it didn't claim.
+
+**Editing.** A panel gets its own settings window, built on the same sidebar-and-pages
+shape as the app settings window. The panel's old customize rows become pages of its
+own, and a shared Appearance page edits the override; both draw from one chrome module
+extracted for the purpose. A panel can also append a section to that Appearance page for
+look knobs it stores on its config rather than in the theme, the way the grid does for
+cover rounding.
+
+Alternatives: threading a palette handle through every accessor call site; giving each
+panel a full palette instead of a sparse diff; running per-panel overrides through the
+derivation and easing pipeline so they get full song-theming parity; adding per-panel
+overrides for the ADR 12 tokens (size, radius, pace) in the same stroke.
+
+**Trade.** The scope is invisible in the accessor signatures, which is the whole point
+and also the cost: a paint that escapes the wrapped subtree, like a deferred overlay or
+a menu, silently reads the global palette instead of the panel's. That's accepted
+because overlays are app chrome rather than panel content, so the global palette is the
+right answer for them anyway.
+
+A sparse diff means an override keeps tracking global edits for every role it doesn't
+pin, where a full per-panel copy would freeze the panel against them the moment it was
+made. What it gives up is that a panel theme isn't a standalone palette file someone
+can hand around on its own.
+
+Overridden roles beating song theming is the intended behavior rather than a
+consequence, since the reason to pin a role is to have it stay put while the rest of the
+app moves. Skipping derivation for those roles also keeps the scope a read-time lookup
+rather than a second derivation pipeline running beside the first.
+
+Two limits are worth naming. gpui-component's widget chrome, meaning table striping and
+tab bars, projects from the global theme only, so a panel override recolors the panel's
+own drawing while the widget skeleton underneath stays on the app palette. And rounding
+styles the body's own background quad rather than clipping to it, because gpui's content
+masks are rectangular: content pushed hard into a rounded corner still paints square.
+Small radii keep that invisible. Covers are the exception, since they run edge to edge
+with nothing to hide behind, so the art surfaces round their images themselves.
+
+Two smaller things fell out along the way. The border's old per-side on/off mask folded
+into the widths, since a side set to zero draws nothing, so one control now says what two
+used to; configs holding the old mask still load, and it folds over whichever width wins
+until the border is next edited. And tokens stay ADR 12 consts, because the frame knobs
+shape the panel's outer edge while the tokens govern the spacing and radii of what's
+inside it, which are different questions with different owners.

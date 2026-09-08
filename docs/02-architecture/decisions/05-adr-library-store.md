@@ -13,15 +13,21 @@ which SQL and secondary indexes give for free and a KV store makes us hand-build
 the credible pure-Rust runner-up if avoiding the C dependency matters more than SQL; sled
 is effectively abandoned. The catalog is small in RAM (tens of MB even at 100k tracks), so
 holding a full projection is cheap and turns browse/sort/filter into microsecond in-memory
-work rather than per-keystroke queries. The cost is the sync machinery: every scan result,
-tag edit, and filesystem event has to update SQLite and the projection consistently without
-a full rebuild. That sync is the most complex part of the library service, and the
-[non-functional model](../03-non-functional.md) treats it as the main
-library risk. It landed rebuild-first with one patch path: scans, reloads, removals,
-and prunes rebuild the projection and swap it whole, while watch events and reindexes
-append the rows they touched and tombstone the old ones, and the next rebuild compacts.
-A rebuild is the reference state and a patch is a cheaper route to it; the mechanics are
-in [implementation 02](../../03-implementation/02-library.md#watch-patches).
+work rather than per-keystroke queries. The cost is that there are now two copies of the
+catalog, so every scan result, tag edit, and filesystem event has to land in both SQLite
+and the projection without them drifting apart. That sync is the most complex part of the
+library service, and the [non-functional model](../03-non-functional.md) treats it as the
+main library risk.
+
+It landed rebuild-first, with one cheaper path alongside. Scans, reloads, removals, and
+prunes rebuild the projection from SQLite and swap the new one in whole, so whatever
+state it was in beforehand stops mattering. Watch events and reindexes touch too few rows
+to justify that, so they append the rows they changed and tombstone the ones they
+replaced, and the next rebuild compacts the leftovers away. The point of keeping the two
+paths asymmetric is that there's only ever one definition of correct: a rebuild is the
+reference state, and a patch is a cheaper route to the same answer rather than a second
+way of being right. The mechanics are in
+[implementation 02](../../03-implementation/02-library.md#watch-patches).
 
 Measured at scale in [research 02](../../0R-research/02-library-scale.md): the projection
 costs ~70 MB per million tracks and still meets the browse budget at 10M, provided it's

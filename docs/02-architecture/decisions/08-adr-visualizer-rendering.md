@@ -3,26 +3,38 @@
 **Status:** Decided, supersedes the original call (a CPU-simulated generative visual)
 after the [prototype](../../0R-research/01-generative-visualizer.md)
 
-Decision: the spectrum analyzer and waveform seekbar draw with gpui primitives, quads
-and paths in a `canvas()` paint callback. The generative visual doesn't ship in CPU
-form; it returns only as a real GPU shader. gpui exposes no public custom-surface or
-shader API, and its internal move to wgpu opened no door (no public device handle),
-so the return is gated on the framework.
+Decision: the spectrum analyzer and waveform seekbar draw with gpui primitives, meaning
+quads and paths issued from a `canvas()` paint callback. The generative visual doesn't
+ship in CPU form at all; it comes back only if it can be a real GPU shader. That's
+blocked on the framework rather than on us: gpui exposes no public custom-surface or
+shader API, and its internal move to wgpu didn't change that, because it hands out no
+public device handle to build against.
 
-Alternatives: the original call, a curl-noise flow field simulated on a worker thread
-and drawn as polylines or a per-frame image blit; a custom WGSL shader handed to
+Alternatives: the original call, a curl-noise flow field simulated on a worker thread and
+drawn either as polylines or as a per-frame image blit; a custom WGSL shader handed to
 gpui; a separate wgpu surface composited into the window.
 
-Trade: the prototype settled feasibility, not worth. Both CPU paths meet a 60fps
-budget at 12,000 particles, and the blit keeps the UI thread flat at 0.1 ms. What the
-working version costs is a worker thread rasterizing and copying a framebuffer for
-every frame the panel is visible, a standing tax for a decoration, and the output is
-a fixed-resolution buffer GPU-scaled to the panel, soft at large sizes on hidpi. A
-shader gets the same look sharp at any size for near nothing, so the CPU version is
-the worse form of the feature carried as maintenance while the right form stays
-possible. The spectrum and waveform lose nothing here: a handful of shapes per frame
-is exactly what gpui's primitives are for. The escape hatch, a separate wgpu surface,
-still has no clean embedding API and stays a last resort.
+Trade: the prototype answered whether the CPU version was possible, and the answer was
+yes. What it couldn't answer, and what actually decides this, is whether the possible
+version is worth having. Both CPU paths hold a 60fps budget at 12,000 particles, and the
+blit keeps the UI thread flat at 0.1 ms, so performance isn't the objection.
+
+Two things are. The first is what the working version costs to run: a worker thread
+rasterizing a framebuffer and copying it across for every single frame the panel is
+visible. That's a permanent background cost, paid whenever the panel is open, for
+something that's decoration. The second is how it looks. The output is a fixed-resolution
+buffer that the GPU scales up to whatever size the panel is, so it goes soft at large
+sizes on a hidpi display, which is exactly the setup someone who wants a visualizer is
+likely to have.
+
+A shader gets the same look, sharp at any size, for almost no cost. So shipping the CPU
+version would mean carrying the worse form of the feature as permanent maintenance while
+the better form stayed available, which is a bad trade even though the code works.
+
+None of this touches the spectrum and waveform. Those draw a handful of shapes per frame,
+which is precisely the workload gpui's primitives exist for. The remaining escape hatch,
+compositing a separate wgpu surface into the window, still has no clean embedding API and
+stays a last resort.
 
 **Amendment: the shader arrives, through the vendored gpui.** The return this ADR
 gated on the framework happens by patching the framework. gpui gets vendored the way
@@ -36,7 +48,7 @@ sides build against; changing it edits that file first.
 
 The shader path is built on blade's render pipelines on Linux and FreeBSD, and on macOS
 through gpui's `macos-blade` feature, which the vendored patches extend the shader calls
-onto. Windows renders through gpui's own Direct3D 11 renderer, and a later patch carries
+onto. Windows renders through gpui's own Direct3D 11 renderer, and a later patch takes
 the pipeline there too: naga translates the composed WGSL to HLSL, `D3DCompile` builds it
 at shader model 5.0, and chains, textures, and the post pass register the same way. The
 one Windows case that stays unsupported is a device that caps below shader model 5.0,

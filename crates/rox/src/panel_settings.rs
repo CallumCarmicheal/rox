@@ -23,6 +23,7 @@ use crate::panels::window_controls::WindowControlsPanel;
 use rox_panels::art::ArtPanel;
 use rox_panels::artist_grid::ArtistGridPanel;
 use rox_panels::biography::BiographyPanel;
+use rox_panels::bookmarks::BookmarksPanel;
 use rox_panels::cover::CoverArtPanel;
 use rox_panels::drag_anchor::DragAnchorPanel;
 use rox_panels::eq_widget::EqWidgetPanel;
@@ -71,6 +72,7 @@ macro_rules! with_settings_panel {
             PlaylistsPanel,
             QueuePanel,
             HistoryPanel,
+            BookmarksPanel,
             CoverArtPanel,
             MetadataPanel,
             LyricsPanel,

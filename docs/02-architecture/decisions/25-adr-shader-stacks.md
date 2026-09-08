@@ -2,7 +2,7 @@
 
 **Status:** Proposed
 
-Proposal: every shader surface carries an ordered list of shaders instead of one.
+Proposal: every shader surface holds an ordered list of shaders instead of one.
 A panel's chrome, the app-wide overlay shader, and the Shader panel all grow the
 same shape, and the settings UI for each becomes the Signals page's: a section
 with an Add button, one fold per entry, the entry's identity and its enable switch
@@ -19,29 +19,36 @@ routing an entry's output sideways, no naming another entry's passes, and no
 topology in the config. What a bundle stores stays a list of shaders in an order,
 which is the thing a person can read.
 
-`screen` means what's underneath you, and that call makes a stack worth
-building. Today the binding is the composed frame under the surface's rect. In a
-stack it becomes the frame with every entry below this one already drawn over it,
-so filters compose: Tube over Dither is a dithered CRT, and neither shader learns
-anything about the other. It also makes the two shader shapes fall out of one
-rule rather than two. An entry that binds `screen` composites itself, exactly as
-it does today, because reading the accumulation and printing it back *is*
-compositing. An entry that doesn't bind it draws over a transparent target and the
-composer appends a synthetic pass that blends its output over the accumulation.
-Which of the two an entry gets is read from `// @overlay`, which is the second
-consumer that directive was waiting on: it already tells the picker whether a
-shader hides the app, and here it tells the composer whether that shader needs the
-blend appended.
+Redefining `screen` to mean "whatever is underneath you" is the call that makes a stack
+worth building at all. Today that binding is the composed frame under the surface's rect.
+In a stack it becomes the frame with every entry below this one already drawn onto it.
 
-Signals go per entry, and this is the one change with real teeth. A chain shares
-one `ShaderParams` across its passes today, filled once per draw, so all sixteen
-slots belong to the program. Stacked entries each have their own routes, so the
-uniform has to be filled per pass from the entry that pass came from. The renderer
-already builds a `ShaderParams` inside the per-pass loop; what changes is where
-the values come from, plus carrying an entry index on each composed pass. Nothing
-about the bind group layout moves. A caller that hands over a single shader
-behaves exactly as before, because a one-entry stack fills every pass from the
-same routes.
+That one change is what makes filters compose. Tube stacked over Dither gives a dithered
+CRT, because Tube reads a frame that Dither has already processed, and neither shader
+contains a line of code about the other.
+
+It also collapses the two shapes a shader can have into one rule instead of two special
+cases. An entry that binds `screen` composites itself, exactly as it does today, because
+reading the accumulation and printing it back out *is* compositing. An entry that doesn't
+bind `screen` has nothing underneath to print, so it draws over a transparent target and
+the composer appends a synthetic pass that blends its output over the accumulation
+instead. Which of the two an entry gets is read from `// @overlay`. That directive
+already existed to tell the picker whether a shader hides the app behind it, and this is
+the second consumer it was waiting on: the same declaration now tells the composer
+whether a blend pass has to be appended.
+
+**Signals go per entry**, and this is the one change with real teeth in the renderer.
+Today a chain shares one `ShaderParams` across all of its passes, filled once per draw,
+because every pass belongs to the same program and so all sixteen slots do too. Stacked
+entries each bring their own routes, so that assumption breaks: the uniform now has to be
+filled per pass, from whichever entry that pass came from.
+
+The change is smaller than it sounds, because the renderer already builds a
+`ShaderParams` inside the per-pass loop. What moves is where the values come from, plus
+carrying an entry index on each composed pass so the fill knows which routes to read.
+Nothing about the bind group layout changes. And a caller handing over a single shader
+behaves exactly as it did before, since a one-entry stack fills every pass from the same
+set of routes.
 
 The pass cap becomes a budget on the stack. Eight passes and eight images are per
 program today; they stay per composed program, which means a stack spends them

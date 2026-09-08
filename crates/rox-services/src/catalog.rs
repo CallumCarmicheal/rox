@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{App, Context, Entity, EventEmitter, PathPromptOptions, SharedString, Task};
 
+use rox_library::bookmarks::{self, Bookmark, BookmarkRow};
 use rox_library::cue::TrackKey;
 use rox_library::embeddings;
 use rox_library::listens;
@@ -36,6 +37,9 @@ pub enum LibraryEvent {
     /// A playlist was created, renamed, deleted, or had its tracks change.
     /// The playlist panel and the add-to-playlist menu re-read on it.
     PlaylistsChanged,
+    /// A bookmark was set, edited, moved, or removed. The seek strip, the
+    /// waveform, and the bookmarks panel re-read their marks on it.
+    BookmarksChanged,
 }
 
 /// A background job crossed a line. Separate from [`LibraryEvent`] because
@@ -1528,6 +1532,98 @@ impl Library {
         }
         if changed {
             cx.emit(LibraryEvent::PlaylistsChanged);
+        }
+    }
+
+    /// The marks on one track, earliest first. Empty for a key the
+    /// library doesn't hold: a bookmark needs a row to hang off, so a
+    /// file played from outside the library can't take one.
+    pub fn bookmarks_for(&self, key: &TrackKey) -> Vec<Bookmark> {
+        let Some(conn) = &self.conn else {
+            return Vec::new();
+        };
+        let Some(id) = self.id_for_key(key) else {
+            return Vec::new();
+        };
+        bookmarks::for_track(conn, id).unwrap_or_default()
+    }
+
+    /// Every mark whose track is in the catalog, grouped by track in
+    /// browse order. What the bookmarks panel lists.
+    pub fn all_bookmarks(&self) -> Vec<BookmarkRow> {
+        let Some(conn) = &self.conn else {
+            return Vec::new();
+        };
+        bookmarks::all(conn).unwrap_or_default()
+    }
+
+    /// One mark by id, for the edit dialog seeding its fields.
+    pub fn bookmark(&self, id: i64) -> Option<Bookmark> {
+        let conn = self.conn.as_ref()?;
+        bookmarks::get(conn, id).ok().flatten()
+    }
+
+    /// Drop a mark at `position_ms` into the track `key` names, with an
+    /// optional label and color (`#rrggbb`; None follows the theme
+    /// accent). None when the key isn't a library track.
+    pub fn add_bookmark(
+        &mut self,
+        key: &TrackKey,
+        position_ms: u32,
+        name: &str,
+        color: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Option<i64> {
+        let track_id = self.id_for_key(key)?;
+        let conn = self.conn.as_ref()?;
+        let id =
+            bookmarks::add(conn, track_id, &key.to_fragment(), position_ms, name, color).ok()?;
+        cx.emit(LibraryEvent::BookmarksChanged);
+        Some(id)
+    }
+
+    pub fn rename_bookmark(&mut self, id: i64, name: &str, cx: &mut Context<Self>) {
+        let Some(conn) = &self.conn else { return };
+        if bookmarks::rename(conn, id, name).is_ok() {
+            cx.emit(LibraryEvent::BookmarksChanged);
+        }
+    }
+
+    /// Recolor a mark; None goes back to the theme accent.
+    pub fn set_bookmark_color(&mut self, id: i64, color: Option<&str>, cx: &mut Context<Self>) {
+        let Some(conn) = &self.conn else { return };
+        if bookmarks::set_color(conn, id, color).is_ok() {
+            cx.emit(LibraryEvent::BookmarksChanged);
+        }
+    }
+
+    /// Slide a mark to `position_ms` on its track, the "move here" edit.
+    pub fn move_bookmark(&mut self, id: i64, position_ms: u32, cx: &mut Context<Self>) {
+        let Some(conn) = &self.conn else { return };
+        if bookmarks::set_position(conn, id, position_ms).is_ok() {
+            cx.emit(LibraryEvent::BookmarksChanged);
+        }
+    }
+
+    /// How many marks these tracks carry between them, for the track menu
+    /// deciding whether to offer clearing them.
+    pub fn bookmark_count_for(&self, track_ids: &[i64]) -> u64 {
+        let Some(conn) = &self.conn else { return 0 };
+        bookmarks::count_for_tracks(conn, track_ids).unwrap_or(0)
+    }
+
+    /// Drop every mark on these tracks.
+    pub fn remove_track_bookmarks(&mut self, track_ids: &[i64], cx: &mut Context<Self>) {
+        let Some(conn) = &self.conn else { return };
+        if matches!(bookmarks::remove_for_tracks(conn, track_ids), Ok(n) if n > 0) {
+            cx.emit(LibraryEvent::BookmarksChanged);
+        }
+    }
+
+    pub fn remove_bookmark(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(conn) = &self.conn else { return };
+        if bookmarks::remove(conn, id).is_ok() {
+            cx.emit(LibraryEvent::BookmarksChanged);
         }
     }
 

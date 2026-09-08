@@ -11,9 +11,13 @@ use gpui::{
 };
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use rox_dock::{Panel, PanelEvent, TabPanel};
+use rox_library::bookmarks::Bookmark;
+use rox_library::cue::TrackKey;
 use serde::{Deserialize, Serialize};
 
 use crate::assets::icons;
+use crate::bookmark_ui;
+use crate::catalog::LibraryEvent;
 use crate::design::{palette, tokens};
 use crate::panel::{self, AppState, PanelChrome, PanelSettings, ScrubState, ValueEdit};
 use crate::panel_settings;
@@ -109,6 +113,9 @@ pub struct SeekConfig {
     /// counts as listened for Last.fm. Only draws while scrobbling is
     /// connected and on.
     pub scrobble_marker: bool,
+    /// The playing track's bookmarks as chevrons under the line, each one
+    /// a seek and a right-click menu.
+    pub bookmarks: bool,
     /// The track line's height in px.
     pub thickness: f32,
     /// The track line's corner radius in px, capped at a pill.
@@ -130,6 +137,7 @@ impl Default for SeekConfig {
             chrome: PanelChrome::default(),
             show_total: false,
             scrobble_marker: false,
+            bookmarks: true,
             thickness: tokens::SEEK_STRIP_H,
             rounding: 0.0,
             playhead_width: tokens::PLAYHEAD_W,
@@ -151,6 +159,8 @@ struct SeekConfigDump {
     show_total: bool,
     #[serde(default)]
     scrobble_marker: bool,
+    #[serde(default = "default_true")]
+    bookmarks: bool,
     #[serde(default = "default_thickness")]
     thickness: f32,
     #[serde(default)]
@@ -196,6 +206,7 @@ impl From<SeekConfigDump> for SeekConfig {
             chrome: dump.chrome,
             show_total: dump.show_total,
             scrobble_marker: dump.scrobble_marker,
+            bookmarks: dump.bookmarks,
             thickness: dump.thickness,
             rounding: dump.rounding,
             playhead_width: dump.playhead_width,
@@ -229,7 +240,15 @@ pub struct SeekStripPanel {
     /// rather than their catalog rank. Held on the panel and not the config
     /// because it's the undo for one toggle, not a layout anybody saves.
     timings_stash: Option<Vec<SeekItem>>,
+    /// The playing track's bookmarks and which track they were read for,
+    /// re-read on a track change and on a bookmark edit rather than on
+    /// every pump tick the strip repaints on.
+    marks: Vec<Bookmark>,
+    marks_key: Option<TrackKey>,
+    /// The bookmark chevron the pointer is on, for its readout.
+    hover_mark: Option<i64>,
     _player_changed: Subscription,
+    _library_changed: Subscription,
 }
 
 impl SeekStripPanel {
@@ -237,6 +256,20 @@ impl SeekStripPanel {
         // The clock and the playhead move every tick, so this one uses the
         // raw per-pump notify, not the gated observe the other panels use.
         let _player_changed = cx.observe(&state.player, |_, _, cx| cx.notify());
+        // A bookmark edit anywhere (the M key, the panel, this strip's own
+        // menu) drops the cached marks so the next paint reads them again.
+        let _library_changed = cx.subscribe(
+            &state.library,
+            |this: &mut Self, _, event: &LibraryEvent, cx| {
+                if matches!(
+                    event,
+                    LibraryEvent::BookmarksChanged | LibraryEvent::Updated
+                ) {
+                    this.marks_key = None;
+                    cx.notify();
+                }
+            },
+        );
         SeekStripPanel {
             state,
             config,
@@ -249,8 +282,23 @@ impl SeekStripPanel {
             focus: cx.focus_handle().tab_stop(true),
             tab_panel: None,
             timings_stash: None,
+            marks: Vec::new(),
+            marks_key: None,
+            hover_mark: None,
             _player_changed,
+            _library_changed,
         }
+    }
+
+    /// The playing track's bookmarks, read once per track (and again after
+    /// an edit), so the per-tick repaint never touches the database.
+    fn marks_for(&mut self, key: &TrackKey, cx: &App) -> &[Bookmark] {
+        if self.marks_key.as_ref() != Some(key) {
+            self.marks = self.state.library.read(cx).bookmarks_for(key);
+            self.marks_key = Some(key.clone());
+            self.hover_mark = None;
+        }
+        &self.marks
     }
 
     /// Whether either clock is on the row, what the quick timings toggle
@@ -292,13 +340,25 @@ impl SeekStripPanel {
                 }),
         );
         let weak = cx.entity().downgrade();
-        menu.item(
+        let menu = menu.item(
             PopupMenuItem::new(rox_i18n::t!("seek-scrobble-marker"))
                 .checked(self.config.scrobble_marker)
                 .on_click(move |_, _, cx| {
                     let Some(this) = weak.upgrade() else { return };
                     this.update(cx, |this, cx| {
                         this.config.scrobble_marker = !this.config.scrobble_marker;
+                        cx.notify();
+                    });
+                }),
+        );
+        let weak = cx.entity().downgrade();
+        menu.item(
+            PopupMenuItem::new(rox_i18n::t!("seek-bookmarks"))
+                .checked(self.config.bookmarks)
+                .on_click(move |_, _, cx| {
+                    let Some(this) = weak.upgrade() else { return };
+                    this.update(cx, |this, cx| {
+                        this.config.bookmarks = !this.config.bookmarks;
                         cx.notify();
                     });
                 }),
@@ -463,6 +523,18 @@ impl PanelSettings for SeekStripPanel {
                     cx,
                 ),
             ))
+            .child(panel::setting_row(
+                rox_i18n::t!("seek-bookmarks"),
+                Some(rox_i18n::t!("seek-bookmarks.description")),
+                panel::toggle(
+                    self.config.bookmarks,
+                    |this: &mut Self, on, cx| {
+                        this.config.bookmarks = on;
+                        cx.notify();
+                    },
+                    cx,
+                ),
+            ))
             .into_any_element()
     }
 }
@@ -493,11 +565,13 @@ impl From<&SeekConfig> for StripLook {
 /// dim, played side solid, the waveform's playhead on top. `look` holds
 /// the config's line and playhead knobs, the radius capped at a pill.
 /// `marker` draws the scrobble threshold as a thin full-height line under
-/// the playhead, and `ab` the repeat section's ends and wash under that.
+/// the playhead, `ab` the repeat section's ends and wash under that, and
+/// `marks` the bookmark chevrons along the bottom edge.
 fn paint_strip(
     progress: f32,
     marker: Option<f32>,
     ab: Option<(f32, Option<f32>)>,
+    marks: &[bookmark_ui::Mark],
     look: StripLook,
     bounds: Bounds<Pixels>,
     window: &mut Window,
@@ -547,6 +621,7 @@ fn paint_strip(
         ));
     }
     panel::paint_ab(ab, 1.0, bounds, window);
+    bookmark_ui::paint_marks(marks, 1.0, bounds, window);
     // The playhead: the panel's full height, capped when the config says
     // so, or the line's when it hugs. Either way it centers on the line.
     let head_w = look.playhead_width.clamp(1.0, w);
@@ -660,6 +735,13 @@ impl SeekStripPanel {
             .flatten();
         // The A-B section, or the lone A while the cycle waits for B.
         let ab = panel::ab_fractions(ab, now.duration_secs);
+        // The track's bookmarks, placed along the strip.
+        let marks = if self.config.bookmarks {
+            bookmark_ui::marks(self.marks_for(&now.key, cx), now.duration_secs)
+        } else {
+            Vec::new()
+        };
+        let hover_mark = self.hover_mark;
         // The seek click is on the track alone so the clocks beside it
         // stay inert.
         // The seek preview shows once the duration resolves; before that a
@@ -690,18 +772,34 @@ impl SeekStripPanel {
                         let scrub = scrub.clone();
                         move |bounds, _, _| scrub.set_bounds(bounds)
                     },
-                    move |bounds, _, window, _| {
-                        paint_strip(progress, marker, ab, look, bounds, window);
-                        panel::scrub_on_paint(&scrub, window, {
-                            let player = player.clone();
-                            move |fraction, cx| panel::seek_fraction(&player, fraction, cx)
-                        });
+                    {
+                        let marks = marks.clone();
+                        move |bounds, _, window, _| {
+                            paint_strip(progress, marker, ab, &marks, look, bounds, window);
+                            panel::scrub_on_paint(&scrub, window, {
+                                let player = player.clone();
+                                move |fraction, cx| panel::seek_fraction(&player, fraction, cx)
+                            });
+                        }
                     },
                 )
                 .size_full(),
             )
             .when_some(hover_duration, |d, duration| {
                 d.child(panel::seek_hover(&self.scrub, duration, cx))
+            })
+            // The chevrons' hit layer goes over the seek readout's, so a
+            // pointer on a mark reads the mark.
+            .when(!marks.is_empty(), |d| {
+                d.child(bookmark_ui::overlay(
+                    &self.state,
+                    &now.key,
+                    &marks,
+                    hover_mark,
+                    &self.scrub,
+                    |this: &mut Self, id, _| this.hover_mark = id,
+                    cx,
+                ))
             });
 
         // The clocks around the strip: the ending one counts down, or

@@ -17,8 +17,10 @@ line.
 Formats: the whole Symphonia codec and container matrix, taken wholesale because every
 one of them is pure Rust and none costs a C dependency (FLAC, MP3, AAC, ALAC, Vorbis,
 PCM and friends, in wav, ogg, mkv, mp4, caf, aiff). The contract is format-agnostic, so
-adding a format is additive; Opus is the gap, and it stays one until Symphonia ships a
-decoder rather than entering through C.
+adding a format is additive. Opus was the one gap Symphonia 0.6 left, and it's closed
+with `opus-pure` rather than through C: Symphonia's Ogg reader still parses the stream
+and only the decoder is swapped in. Multistream Opus (more than two channels) refuses to
+open and says why.
 
 Processing ([ADR 19](decisions/19-adr-processing-chain.md)): per-source gain (ReplayGain,
 the crossfade curve) multiplies each decoded source on its own, then the chain of DSP
@@ -124,9 +126,13 @@ Contract:
 Responsibility: supply the album-art grid without stalling the scroll. Generates 256px
 thumbnails once, caches them, and returns decoded textures to the UI.
 
-Boundary: two bounded pools, not one thread per tile. A worker pool loads and resizes
-thumbnails from a dedicated SQLite thumbnail DB; a bounded LRU of decoded textures is
-checked before that pool, sized to the viewport plus a margin, not the whole library.
+Boundary: everything here is bounded, because the obvious implementation isn't. Spawning
+a load per visible tile means a fast scroll through a large grid queues thousands of
+loads for art nobody is looking at any more. So there are two bounded layers instead. A
+worker pool of fixed size loads and resizes thumbnails out of a dedicated SQLite
+thumbnail database, and a bounded LRU of already-decoded textures is checked before that
+pool is asked for anything. The LRU is sized to the viewport plus a margin rather than to
+the library, so its memory cost doesn't grow with the collection.
 
 Contract:
 - In: `thumbnail(key, size)` where key is content-addressed (path + mtime + size).
@@ -137,17 +143,29 @@ Contract:
 
 ## Visualizer subsystem
 
-Responsibility: the spectrum analyzer and the waveform seekbar. Consumes the playback
-PCM tap, owns the FFT analysis and the per-track waveform cache. The generative visual
-is gated on a real GPU shader ([ADR 8](decisions/08-adr-visualizer-rendering.md)).
+Responsibility: turn the playback PCM tap into everything the visual surfaces read. Owns
+the FFT analysis, the per-track waveform cache, and the signal pool that shaders route
+from.
 
-Boundary: analysis runs off the UI thread; rendering is gpui primitives in a paint
-callback.
+Three rendering paths read from it, and they differ in what does the drawing:
+
+- Spectrum and waveform draw as gpui primitives in a paint callback, a handful of shapes
+  per frame ([ADR 8](decisions/08-adr-visualizer-rendering.md)).
+- User WGSL runs on the GPU through the vendored gpui shader API, as a whole-window post
+  pass, a per-panel surface, or the Shader panel's whole body, composed into pass chains
+  ([ADR 23](decisions/23-adr-shader-pipeline.md)).
+- MilkDrop presets render in a libprojectM worker with its own GL context and come back
+  as a read-back buffer the panel uploads as a texture
+  ([ADR 28](decisions/28-adr-milkdrop.md)).
+
+Boundary: analysis runs off the UI thread, and so does the projectM worker. A worker that
+can't get a GL context reports a failure status instead of taking the app down.
 
 Contract:
 - In: the PCM tap ring, plus the current track for waveform precompute.
-- Out: analysis frames (spectrum bands, recent samples) the UI draws, and a cached
-  min/max peak waveform per track (a few KB, keyed on file identity: path, size, mtime).
+- Out: analysis frames (spectrum bands, recent samples) the UI draws, a cached min/max
+  peak waveform per track (a few KB, keyed on file identity: path, size, mtime), and the
+  signal pool a shader's sixteen slots route from.
 
 ## UI shell and panel system
 

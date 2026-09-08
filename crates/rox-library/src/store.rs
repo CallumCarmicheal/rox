@@ -259,6 +259,13 @@ const MIGRATIONS: &[crate::migrate::Migration] = &[
         name: "track-meta",
         up: crate::track_meta::init_schema,
     },
+    // Playback bookmarks, a saved position inside a track. Keyed by track
+    // id with the path snapshotted beside it for the post-scan reattach,
+    // the listens shape. No mtime reset: nothing here is read from a tag.
+    crate::migrate::Migration {
+        name: "bookmarks",
+        up: crate::bookmarks::init_schema,
+    },
 ];
 
 pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {

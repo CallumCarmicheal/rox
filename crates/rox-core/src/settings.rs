@@ -3674,6 +3674,12 @@ pub struct QueuedTrack {
 /// sheet folds the four sort rows away until it's on, so a library
 /// that carries no romanizations doesn't read four empty rows on every
 /// open. Off by default, and the table keeps its own answer in `shown`.
+///
+/// The replace panel's two switches ride along, its boxes don't:
+/// whether a library's rules are regexes is a habit, what they say is
+/// not. The case switch is stored as ignore rather than match, so a
+/// file written before it existed reads as the exact match a fresh
+/// panel starts with.
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct TagEditorState {
@@ -3685,6 +3691,8 @@ pub struct TagEditorState {
     pub tag_columns: BTreeMap<String, f32>,
     pub sort_fields: bool,
     pub pattern: String,
+    pub replace_regex: bool,
+    pub replace_ignore_case: bool,
 }
 
 /// The rename dialog's remembered shape: window size in logical pixels

@@ -93,7 +93,7 @@ projection is ~7 GB and worst-case search ~300 ms; at 1B it's ~70 GB and ~3 s, p
 the budget. Somewhere around 50M the resident-scan design stops fitting, and search
 and sort have to move from scans to disk indexes (ADR 6's FTS5 and tantivy escalation,
 persisted sort orders) behind the same library service contract. No local library
-gets there; it matters because the browse/search boundary is what lets that backend
+gets there; it matters because the browse/search boundary lets that backend
 swap in without the UI noticing.
 
 ## What this doesn't settle

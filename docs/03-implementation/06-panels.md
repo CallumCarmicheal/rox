@@ -175,7 +175,7 @@ pub struct WorkspaceBundle {
     pub mini_layout: Option<String>,
     pub palette_dark: BTreeMap<String, String>,  // role name -> #rrggbb
     pub palette_light: BTreeMap<String, String>,
-    pub signals: Vec<Signal>,                     // the pool the looks ride
+    pub signals: Vec<Signal>,                     // the pool the looks route from
     pub appearance: AppearanceBundle,             // opacity, frame, fonts, rating style, ...
 }
 ```

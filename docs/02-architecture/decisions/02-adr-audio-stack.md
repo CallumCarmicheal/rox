@@ -7,11 +7,22 @@ with our own decode thread, ring buffer, and mixer.
 
 Alternatives: rodio (wraps cpal, adds a Sink/mixer/decoder), GStreamer, kira.
 
-Trade: rodio is the fast path for "play a file, set volume," but it abstracts the frame
-clock away, so no sample-accurate scheduling, and its seeking is young. For Foobar-grade
-control, gapless, precise seek, a custom DSP and ReplayGain path, a visualizer tap, we
-need the layer under rodio. The cost is that we build the queue and mixer ourselves.
-GStreamer would give the widest format support for free but drags in a heavy C dependency
-and a different threading model; kira is game-oriented and precise but built around a
-different use case. cpal + Symphonia is the same stack Psst and termusic use, which
-de-risks it.
+Trade: rodio is the fast path if what you want is "play a file, set volume." What it
+costs is the frame clock. Its Sink hands you a play/pause/volume API and keeps the
+output frame counter to itself, so there's no way to say "do this thing at exactly that
+sample," and its seeking is young on top of that. Everything on the Foobar-grade list
+needs that counter: gapless has to know the exact frame a track ends on, precise seek
+has to land on a frame rather than near one, a DSP and ReplayGain path has to sit at a
+known point in the sample flow, and a visualizer tap has to pull the same samples the
+device is about to play. So we work at the layer under rodio, and the cost of that is
+building the queue and the mixer ourselves.
+
+The other two lose on different grounds. GStreamer would give the widest format support
+for free, and it brings a heavy C dependency and its own threading model to get there,
+which is a large thing to fit around a Rust app that already has a decode thread and a
+real-time callback. kira is precise and well built, but it's aimed at game audio, where
+the job is firing many short sounds with low latency rather than streaming long tracks
+end to end with sample-exact boundaries between them.
+
+cpal + Symphonia is the same stack Psst and termusic run on, so the combination has been
+exercised by real players before us.

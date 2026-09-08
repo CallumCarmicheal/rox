@@ -1,6 +1,6 @@
 # ADR 28: MilkDrop presets through libprojectM, rendered off-thread and read back
 
-**Status:** Proposed
+**Status:** Decided
 
 Decision: rox plays MilkDrop presets by linking libprojectM into the process rather
 than reimplementing the format. A worker thread owns its own OpenGL context and a
@@ -47,7 +47,7 @@ default framebuffer to bind. Master adds `projectm_opengl_render_frame_fbo` and
 render into our own target, and resolve GL through our loader instead of linking
 libGL. The cost of pinning a commit is that the vendoring script and the nix
 derivation both name it and have to move together, which is the same bookkeeping the
-vendored gpui already carries. libprojectM is LGPL-2.1-only linked statically into an
+vendored gpui already needs. libprojectM is LGPL-2.1-only linked statically into an
 AGPL-3.0-only binary whose source ships, so the relink clause is satisfied by the
 source we publish anyway.
 

@@ -32,15 +32,15 @@ use rox_panel_api::actions::{
 use rox_panels::lyrics::StampLine;
 
 use crate::workspace::{
-    AbRepeat, AnalyzeTempo, BuildAcoustic, ClosePanelAction, CloseWindow, CycleLoop,
-    DecreaseFontSize, FillSortNames, FindDuplicates, FocusSearch, ImportWorkspace,
-    IncreaseFontSize, MeasureReplayGain, NewEmptyWindow, NewWindow, NextTrack, OpenAbout,
-    OpenConsole, OpenEqualizer, OpenHealth, OpenPowerSearch, OpenPresetPicker, OpenQuickPlay,
-    OpenSettings, OpenSignals, OpenStats, OpenTasks, OpenWelcome, PlayRandom, PreviousTrack, Quit,
-    RescanLibrary, ResetFontSize, RomanizeLibrary, StopPlayback, TagGenres, ToggleArtTheming,
-    ToggleDecorations, ToggleDesignMode, ToggleMenubar, ToggleMute, TogglePostShader,
-    ToggleQuitToTray, ToggleResizeLock, ToggleShuffle, ToggleStopAfter, ToggleTheme, VolumeDown,
-    VolumeUp,
+    AbRepeat, AddBookmark, AddNamedBookmark, AnalyzeTempo, BuildAcoustic, ClosePanelAction,
+    CloseWindow, CycleLoop, DecreaseFontSize, FillSortNames, FindDuplicates, FocusSearch,
+    ImportWorkspace, IncreaseFontSize, MeasureReplayGain, NewEmptyWindow, NewWindow, NextBookmark,
+    NextTrack, OpenAbout, OpenConsole, OpenEqualizer, OpenHealth, OpenPowerSearch,
+    OpenPresetPicker, OpenQuickPlay, OpenSettings, OpenSignals, OpenStats, OpenTasks, OpenWelcome,
+    PlayRandom, PrevBookmark, PreviousTrack, Quit, RescanLibrary, ResetFontSize, RomanizeLibrary,
+    StopPlayback, TagGenres, ToggleArtTheming, ToggleDecorations, ToggleDesignMode, ToggleMenubar,
+    ToggleMute, TogglePostShader, ToggleQuitToTray, ToggleResizeLock, ToggleShuffle,
+    ToggleStopAfter, ToggleTheme, VolumeDown, VolumeUp,
 };
 
 /// Bindings match key contexts along the focus path, so this scope holds
@@ -237,6 +237,10 @@ mod defaults {
     pub const PREVIOUS_TRACK: &[&str] = &["cmd-left"];
     pub const STOP: &[&str] = &["cmd-."];
     pub const AB_REPEAT: &[&str] = &["l", "cmd-shift-l"];
+    pub const BOOKMARK: &[&str] = &["m"];
+    pub const BOOKMARK_NAMED: &[&str] = &["shift-m"];
+    pub const PREV_BOOKMARK: &[&str] = &["ctrl-shift-left"];
+    pub const NEXT_BOOKMARK: &[&str] = &["ctrl-shift-right"];
     pub const PLAY_RANDOM: &[&str] = &["cmd-r"];
     pub const MUTE: &[&str] = &["cmd-shift-m"];
     pub const DESIGN_MODE: &[&str] = &["cmd-shift-d"];
@@ -266,6 +270,10 @@ mod defaults {
     pub const PREVIOUS_TRACK: &[&str] = &["ctrl-left"];
     pub const STOP: &[&str] = &["ctrl-."];
     pub const AB_REPEAT: &[&str] = &["l", "ctrl-shift-l"];
+    pub const BOOKMARK: &[&str] = &["m"];
+    pub const BOOKMARK_NAMED: &[&str] = &["shift-m"];
+    pub const PREV_BOOKMARK: &[&str] = &["ctrl-shift-left"];
+    pub const NEXT_BOOKMARK: &[&str] = &["ctrl-shift-right"];
     pub const PLAY_RANDOM: &[&str] = &["ctrl-r"];
     pub const MUTE: &[&str] = &["ctrl-shift-m"];
     pub const DESIGN_MODE: &[&str] = &["ctrl-shift-d"];
@@ -331,6 +339,47 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             defaults::AB_REPEAT,
             AbRepeat,
             rox_i18n::t_static("keymap-ab-repeat.description")
+        ),
+        // Bare m beside l: a bookmark at the playing position, and the
+        // shifted one asks for a name first. Same playback scope, so a
+        // search box keeps its m.
+        command!(
+            "bookmark",
+            rox_i18n::t_static("keymap-bookmark"),
+            Group::Playback,
+            PLAYBACK,
+            defaults::BOOKMARK,
+            AddBookmark,
+            rox_i18n::t_static("keymap-bookmark.description")
+        ),
+        command!(
+            "bookmark_named",
+            rox_i18n::t_static("keymap-bookmark-named"),
+            Group::Playback,
+            PLAYBACK,
+            defaults::BOOKMARK_NAMED,
+            AddNamedBookmark,
+            rox_i18n::t_static("keymap-bookmark-named.description")
+        ),
+        // Stepping between marks rides the track keys' arrows with both
+        // modifiers, and the plain workspace scope like every modified chord.
+        command!(
+            "prev_bookmark",
+            rox_i18n::t_static("keymap-prev-bookmark"),
+            Group::Playback,
+            WORKSPACE,
+            defaults::PREV_BOOKMARK,
+            PrevBookmark,
+            rox_i18n::t_static("keymap-prev-bookmark.description")
+        ),
+        command!(
+            "next_bookmark",
+            rox_i18n::t_static("keymap-next-bookmark"),
+            Group::Playback,
+            WORKSPACE,
+            defaults::NEXT_BOOKMARK,
+            NextBookmark,
+            rox_i18n::t_static("keymap-next-bookmark.description")
         ),
         command!(
             "next_track",

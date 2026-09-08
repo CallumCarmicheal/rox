@@ -173,7 +173,7 @@ sets the length and zero disables it: no window ever opens, and every boundary i
 gapless splice above, unchanged. The engine caps a window at half the outgoing track,
 so a fade longer than the track it leaves can't start before that track got going.
 
-The album group (ADR 17) already on the queue entries decides which boundaries fade: two
+The album group (ADR 17) already on the queue entries sets which boundaries fade: two
 tracks of the same album keep their splice, everything else fades, and repeat-one never
 overlaps a track with itself. `Settings.crossfade_albums` overrides the group rule for
 a listener who wants every boundary soft; repeat-one stays out even then.

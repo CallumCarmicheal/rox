@@ -116,6 +116,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # through gpui-component.
 lsp-types = "0.97"
 anyhow = "1"
+# The tag editor's batch find and replace: a literal find is escaped into
+# a pattern so one engine runs both modes. Already in the tree through
+# gpui-component, same 1.x line.
+regex = "1"
 # OS media controls: MPRIS on Linux, SMTC on Windows, the remote command
 # center on macOS. Answers the hardware media keys and shows the now-playing
 # track in the desktop's media widget. The zbus backend is pure Rust, so a

@@ -6,15 +6,27 @@ Decision: lofty as the single read/write metadata layer, wrapped in a copy-verif
 write path and per-file panic isolation.
 
 Alternatives: stitch per-format crates (`id3`, `metaflac`, `mp4ameta`, `ape`), or use
-Symphonia's metadata (read-only, so unusable for a tag editor).
+Symphonia's metadata, which is read-only and so can't back a tag editor at all.
 
-Trade: lofty is the only maintained crate that writes across our whole format matrix
-(ID3v2, Vorbis comments, MP4 atoms, APE) behind one API, including multi-picture album art
-and CJK-safe text. The per-format crates are individually mature (`id3` especially) but
-mean five APIs, five release cadences, and a dispatch layer we'd write anyway. The cost we
-take on: lofty writes in place and isn't crash-atomic, the maintainer confirms a failure
-mid-write can leave a file unrecoverable. For bulk editing thousands of files that's a
-real data-loss exposure, so the atomic-write layer (write to a copy, verify metadata plus
-an audio-stream hash, atomically rename over the original, unlink on failure) is part of
-this component's definition rather than an add-on. We keep `id3` in reserve for ID3 edge
-cases.
+Trade: lofty is the only maintained crate that writes across the whole format matrix
+behind one API. It covers ID3v2, Vorbis comments, MP4 atoms, and APE, including
+multi-picture album art and text that survives CJK round-tripping. The per-format crates
+are individually mature, `id3` especially, but taking them means four or five separate
+APIs on their own release cadences, plus a dispatch layer to pick between them that
+amounts to writing lofty's front end anyway.
+
+What we take on in exchange is a real data-loss exposure. lofty rewrites tags in place
+rather than through a temporary file, and it isn't crash-atomic; the maintainer has
+confirmed that a failure partway through a write can leave a file unrecoverable. One
+file lost that way is bad. Bulk editing is the feature this component exists for, so the
+realistic case is a batch of several thousand files, and a crash in the middle of that
+takes whichever file was open at the time.
+
+That's why the safety layer is part of this component's definition rather than something
+bolted on later. A write goes to a copy, the copy is verified on both the metadata and a
+hash of its audio stream so a mangled write can't pass, the copy is renamed over the
+original in one atomic operation, and a failure anywhere in that sequence unlinks the
+copy and leaves the original untouched. Reads are isolated per file for the same
+reason at a smaller scale: a malformed file that panics lofty's parser takes down one
+worker rather than the batch around it. We keep `id3` in reserve for ID3 edge cases
+lofty handles poorly.

@@ -25,7 +25,7 @@ members = [
 default-members = ["crates/rox"]
 
 [workspace.package]
-version = "1.25.0"
+version = "1.26.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 
@@ -70,26 +70,15 @@ gpui = "=0.2.2"
 gpui-component = "=0.5.1"
 gpui-component-assets = "=0.5.1"
 
-# The 0.2.2 crates.io source with two patches applied. One: the Linux and
-# Windows backends no longer stop the event loop when the last window
-# closes, which is what upstream's QuitMode work does (zed #42391) and what
-# quit-to-tray needs. Two: the Wayland programmatic resize declares xdg
-# window geometry in surface-local logical coordinates instead of a screen
-# origin and device pixels, which collapsed the window to zero size on the
-# next compositor move after a layout switch. vendor/gpui is generated, not
-# checked in: scripts/vendor-gpui.sh (run by the nix shellHook) fetches the
-# crate and applies patches/gpui/*.patch. Both are fixed on zed main (quit
-# mode: zed #42391, resize geometry: zed #45153, merged 2025-12-17) but no
-# crates.io release after 0.2.2 exists yet, so the first gpui bump should
-# carry both and the patches go away with it.
-#
-# gpui-component gets the same treatment for one patch: its ContextMenuExt
-# host (the right-click content menus) leans on the menu's own dismiss, which
-# no-ops while a submenu is open, so an outside click can't close a content
-# menu that has a submenu open. The patch adds a force-dismiss occluder,
-# matching what rox-dock's tab_panel already does for the panel menu. Same
-# vendor script, patches/gpui-component/*.patch. Drop it if upstream fixes the
-# dismiss and the bump carries the fix.
+# Both crates build from the pinned crates.io source with rox's patches
+# applied on top. vendor/ is generated, never checked in: scripts/vendor-gpui.sh
+# (run by the nix shellHook) fetches each crate tarball, verifies it, and
+# applies patches/<crate>/*.patch in glob order. Each patch carries its own
+# rationale in "rox patch" comments at the edit site; the directories are the
+# inventory. Most gpui patches exist because no crates.io release after 0.2.2
+# does, and several are already fixed on zed main (quit mode: zed #42391,
+# Wayland resize geometry: zed #45153), so the next bump is also the moment to
+# re-diff the set and drop what upstream now carries.
 [patch.crates-io]
 gpui = { path = "vendor/gpui" }
 gpui-component = { path = "vendor/gpui-component" }

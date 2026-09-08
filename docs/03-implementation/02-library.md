@@ -271,7 +271,7 @@ single event touches more than a few thousand rows, since the patch reads its
 rows one primary-key lookup at a time. Two things a patch doesn't reproduce
 until that rebuild: the display casing of a value that already had a symbol
 stays whatever the last build's vote chose, and a symbol whose rows have all
-died still sits in its table. Measured on the generated 1M-track store, a
+died is still in its table. Measured on the generated 1M-track store, a
 single-row upsert or remove costs about a tenth of a millisecond against a
 350 ms rebuild (see the benchmarks in
 [research 02](../0R-research/02-library-scale.md)).

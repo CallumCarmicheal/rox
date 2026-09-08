@@ -2,34 +2,47 @@
 
 **Status:** Decided
 
-Decision: the tag editor opens on a selection as one shared form over the whole run. A
-field that's identical across every file shows its value, differing values show empty
-under a "multiple values" placeholder, and only fields the user moves write anything.
-Per-track fields (title, track number, disc number) lock in a batch, since one form value
-would stamp the same title over every file. To fix a single file inside a batch, the form
-swaps for a table: one row per track, columns for every field, the per-track fields a
-batch has to lock editable in place. Both views diff per file against each file's own
-baseline and commit as one batch through the writer's atomic layer
-([ADR 4](04-adr-tagging.md)), so an unchanged field never rewrites and a success updates
-the catalog without a rescan.
+Decision: the tag editor opens on a selection as one shared form covering the whole run.
+A field that reads identically across every selected file shows that value. A field whose
+values differ shows empty under a "multiple values" placeholder, so an empty box means
+"these disagree" rather than "these are blank". Only fields the user actually moves write
+anything, which is what keeps opening the editor and closing it again harmless.
 
-The per-file need, fix one file's value without collapsing the selection, is served by
-table mode, not by a per-field step-in.
+Per-track fields, meaning title, track number, and disc number, lock while a batch is
+selected. They have to, because a single form value written across the run would stamp
+one title onto every file in it.
 
-Alternatives: foobar's Edit Value dialog, the model the feature was first specced against.
-There the shared form holds one field at a time, and activating a field steps into a
-per-file table of just that field, with back returning to the field list and marking the
-field pending. Rejected because it edits one field behind a modal and needs a push/pop
-with per-field pending state, where the flat table shows every file and every per-track
-field at once. For the messy-import case, correcting a run of tracks whose titles and
-numbers all differ, seeing the whole grid and tabbing through it is faster than stepping
-into each field in turn, and it drops the pending-marker machinery entirely.
+Fixing one file inside a batch is what table mode is for. The form swaps for a grid with
+one row per track and a column per field, and the per-track fields the form had to lock
+are editable in place there. Both views diff each file against that file's own baseline
+and commit as a single batch through the writer's atomic layer
+([ADR 4](04-adr-tagging.md)), so a field nobody touched is never rewritten, and a
+successful commit updates the catalog directly without waiting for a rescan.
 
-Trade: one shared pending set backs two views, so form edits and cell edits to the same
-field need a last-edit-wins rule. Entering the table folds a drifted form edit into every
-untouched cell and stops counting it as form drift; a cell the user already moved keeps its
-value; leaving the table re-reads the cells back into the form, so a split field goes back
-to the mixed placeholder. At save, an armed form field is the newest typing and wins its
-column, otherwise each track's own cell wins. The cost is that rule and the loss of
-foobar's exact per-field pending affordance; the gain is one grid that edits the whole
-batch, per-file, in place.
+Alternatives: foobar's Edit Value dialog, which is the model this feature was first
+specced against. There the shared form holds one field at a time, activating a field
+steps into a per-file table showing just that field, and going back returns to the field
+list with the field marked pending.
+
+That was rejected on two counts. It edits one field at a time behind a modal, and it
+needs a push/pop navigation with per-field pending state to track what's been changed but
+not yet saved. A flat table shows every file and every per-track field at once instead.
+The case that decides it is a messy import, where a run of tracks has titles and numbers
+that all differ from each other: seeing the whole grid and tabbing across it is faster
+than stepping into each field in turn, and it removes the pending-marker machinery
+entirely rather than reimplementing it.
+
+Trade: one shared set of pending edits backs both views, so an edit made in the form and
+an edit made in a cell can target the same field, and something has to break the tie. The
+rule is last edit wins, and it plays out in three places.
+
+Entering the table folds a drifted form edit down into every cell the user hasn't already
+touched, and stops treating it as form drift, so the form's value becomes the starting
+point rather than a competing one. A cell the user had already moved keeps what it holds.
+Leaving the table reads the cells back into the form, so a field that's now split across
+files returns to the mixed placeholder. At save, a form field that's still armed is the
+most recent typing and takes its whole column; otherwise each track's own cell wins.
+
+The cost is that rule, plus giving up foobar's per-field pending affordance, which some
+people will have muscle memory for. What it buys is a single grid that edits the whole
+batch per file, in place.

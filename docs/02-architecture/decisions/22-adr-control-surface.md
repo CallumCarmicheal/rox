@@ -2,41 +2,53 @@
 
 **Status:** Decided
 
-Decision: rox's machine interface is newline-delimited JSON-RPC over a local socket, a
-Unix domain socket on Linux and macOS and a named pipe on Windows, living in a
-`rox-ipc` crate. The protocol opens with a version handshake and carries two kinds of
-traffic: request/response for transport, queue edits, library queries, and now-playing
-metadata, and an event subscription that pushes playback state, track changes, and
-queue revision bumps. MCP support is a separate thin stdio binary, `rox-mcp`, that
-proxies the socket, gated behind an opt-in "Enable AI features" setting. Workspace
-files gain a JSON Schema derived from the Rust bundle types, stamped into every saved
-file via `$schema`, and the workspaces folder is watched so an edited file re-applies
-live. An icecast broadcast sink completes the surface on the audio side: rox pushes
-the stream, it doesn't serve it. rox never hosts an HTTP server.
+Decision: rox's machine interface is newline-delimited JSON-RPC over a local socket,
+which is a Unix domain socket on Linux and macOS and a named pipe on Windows, living in
+a `rox-ipc` crate. The protocol opens with a version handshake and then carries two kinds
+of traffic. Request/response covers transport, queue edits, library queries, and
+now-playing metadata. An event subscription pushes playback state, track changes, and
+queue revision bumps out to whoever is listening.
 
-The capability being adopted is the one other players get from bundling a web server:
-outside programs can read the library, pull metadata, and drive playback, so anyone
-can build their own front end on their own machine. The bundled-server delivery of it
-is refused. A web UI throws away rox's theming, a server means ports, an auth story,
-and an attack surface that a music player has no business having, and the streaming
-case those servers imply is a separate concern anyway.
+MCP support is a separate thin stdio binary, `rox-mcp`, that proxies the socket, gated
+behind an opt-in "Enable AI features" setting. Workspace files gain a JSON Schema derived
+from the Rust bundle types, stamped into every saved file through `$schema`, and the
+workspaces folder is watched so a file edited on disk re-applies live. An icecast
+broadcast sink completes the surface on the audio side, where rox pushes the stream out
+rather than serving it. rox never hosts an HTTP server.
 
-A D-Bus extension was the other candidate and lost on platform reach: idiomatic on
-Linux, foreign on Windows and macOS, and rox ships on all three. MPRIS stays as the
-standard desktop shim via souvlaki; the socket is the real surface behind it. The
-socket's auth is filesystem permissions, its prior art is mpv's JSON IPC and mpd's
-protocol, and its cost is that consumers need a socket client where a server would
-have offered curl. That's acceptable because the consumers are programs, and a small
-bundled CLI covers the shell case while doubling as the reference client.
+The capability being adopted here is the one other players get by bundling a web server:
+outside programs can read the library, pull metadata, and drive playback, so anyone can
+build their own front end on their own machine. What's refused is the delivery mechanism,
+for three separate reasons. A web UI would throw away rox's theming, which is most of
+what the product is. A server means opening a port and then owning an authentication
+story and an attack surface, which is a lot of security work for a music player to be
+carrying. And the streaming that those servers usually exist to do is a different problem
+with a different answer, covered by the icecast sink below.
 
-Push matters as much as pull. A front end that can't subscribe will poll, so the
-event stream is part of the contract from the first version, reusing the queue
-revision and engine command machinery that already exists internally rather than new
-plumbing. The surface also includes a debug scope, things like a panel-tree dump and a
-settings snapshot that no external consumer needs, because the socket doubles as the
-runtime test surface: state-level verification against a live instance stops needing
-a human's eyes, whether the client is a script or an agent. Pixels stay a screenshot
-job.
+A D-Bus extension was the other candidate, and it lost on platform reach. It's the
+idiomatic answer on Linux and a foreign one on Windows and macOS, and rox ships on all
+three, so choosing it would mean either a second mechanism for the other two platforms or
+treating them as second-class. MPRIS still exists as the standard desktop shim through
+souvlaki; the socket is the real surface sitting behind it.
+
+The socket authenticates through filesystem permissions, which is the same model mpv's
+JSON IPC and mpd's protocol use, so the prior art is well worn. Its one real cost is that
+a consumer needs a socket client where a web server would have let someone reach for
+curl. That's acceptable because the consumers are programs rather than people at a
+prompt, and the small bundled CLI covers the shell case while doubling as a reference
+client for anyone writing their own.
+
+Push matters as much as pull. A front end that can't subscribe to changes will poll for
+them instead, which is wasteful and always slightly behind, so the event stream is part
+of the contract from the first version rather than something added once someone
+complains. It reuses the queue revision counter and engine command machinery that already
+exist internally, so it's a new exposure rather than new plumbing.
+
+The surface also includes a debug scope, things like a panel-tree dump and a settings
+snapshot, which no external consumer has any use for. Those exist because the socket
+doubles as the runtime test surface: with them, verifying what state the app is actually
+in can be done against a live instance by a script or an agent instead of by a person
+looking at the window. Anything about pixels stays a screenshot job.
 
 MCP layers on cleanly because of a constraint in how clients work: they spawn stdio
 servers as child processes, and a long-running GUI can't be one. Embedding MCP in rox

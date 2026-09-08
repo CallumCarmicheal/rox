@@ -2,73 +2,110 @@
 
 **Status:** Decided
 
-Decision: audio processing runs on the decode thread, after the stereo fold and
-resample, immediately before the push into the sample ring, in two parts. Per-source
-gain (ReplayGain, crossfade's fade curve) applies to each decoded source individually;
-the chain of DSP nodes (EQ, any future effect) processes the single stream after
-sources mix. The real-time callback is untouched: it keeps exactly its two jobs,
-draining the ring and applying user volume. Crossfade isn't a chain node; it's a
-second decoded source mixed in the engine before the chain, so the ring keeps its
-single producer. Exclusive output, deferred by [ADR 9](09-adr-audio-output.md), comes
-into scope as a second backend behind the output seam that ADR 9 kept, and a bypass
-rule ties the two halves together: what "bit-perfect" means is defined here, once, and
-holds in both modes.
+Decision: audio processing runs on the decode thread, after the stereo fold and the
+resample, immediately before samples are pushed into the ring. It comes in two parts
+that sit at different points.
 
-The callback's contract (no allocation, no locks, no I/O,
-[ADR 2](02-adr-audio-stack.md)) rules out running DSP there, and the decode thread already owns every transform the samples go through: fold,
-resample, trim. The chain slots in as the last step before the ring, which buys three
-things. Chain output goes through flush, seek, and the gapless boundary like any other
-sample data, with no new protocol. The PCM tap keeps working unchanged, so visualizers
-see what the chain produced. And chain state persists across the gapless
-splice ([ADR 3](03-adr-gapless.md)), which an EQ needs at a track boundary,
-filter history intact, no click.
+Per-source gain, meaning ReplayGain and the crossfade curve, applies to each decoded
+source on its own, while the sources are still separate. The chain of DSP nodes, meaning
+the EQ and any future effect, processes the single stream after the sources have mixed
+down to one.
 
-The chain runs at the device rate, after the resampler. The alternative, running at the
-source rate before resampling, means stateful nodes re-anchor on every track whose rate
-differs, and an EQ shaped against a rate the device never plays. At device rate the
-chain sees one stable rate for the life of the stream; the events that change it
-(device switch, an exclusive-mode rate follow) are already stream rebuilds, and the
-chain resets with the resampler.
+The real-time callback is untouched by all of this. It keeps exactly the two jobs it
+already had: drain the ring, and apply user volume.
 
-A node's contract: process an interleaved stereo f32 buffer in place, same length out
-as in, at the rate it was told at reset. `reset(rate)` is called at stream open and on
-every discontinuity the engine already knows, the seek flush and the device rebuild,
-and not at the gapless boundary. Nodes allocate at construction and reset, never in
-process. Parameters are atomics shared with the UI, so a knob write is a store, no
-command round trip; structural edits, adding, removing, reordering nodes, go through the
-existing command channel like queue edits do. Nodes are zero-latency by contract:
-anything that needs lookahead or introduces group delay (convolution, a limiter) is out
-until a latency-reporting extension is worth designing, and the position clock stays
-accurate for free.
+Crossfade isn't a node in the chain. It's a second decoded source that the engine mixes
+in before the chain runs, which is what keeps the ring a single-producer structure, since
+a second producer writing into it would break the one property the output layer is built
+on.
 
-What the pre-ring placement costs is the delay on those parameter writes: a store applies
-to the samples being decoded now, behind however much already-processed audio the ring
-is holding. The ring keeps its 500 ms of capacity, allocated once at stream open, since
-that's the underrun cushion; the gate is how full the decode thread lets it get. While
-a chain editor is open it holds a process-global refcount and the push loop stops at
-120 ms of buffered audio, so the wait between slider and ear is that instead of half a
-second. Shortening the ring itself would mean reallocating under a live stream for the
-same result. The cushion is thinner for as long as an editor is up, accepted because
-that's exactly when a knob needs to respond; the fill goes back to the brim on close,
-and no stream is torn down either way.
+Exclusive output, which [ADR 9](09-adr-audio-output.md) deferred, comes into scope here
+as a second backend behind the output seam ADR 9 kept for exactly this. A bypass rule
+ties the two halves of this ADR together, by defining once what "bit-perfect" means so
+that it means the same thing in both output modes.
 
-The bypass rule, which makes bit-perfect a checkable claim instead of a label: with the
-chain empty or disabled, the samples pushed into the ring are the decoder's output
-unchanged. The fold and resampler already honor this, a stereo source folds to itself
-and the resampler is a passthrough at equal rates. That leaves the callback's volume
-multiply, the one-node chain that predates this ADR. It stays in the callback: volume
-must respond instantly, and a chain-side volume would lag by ring depth, up to 500 ms.
-Instead, unity short-circuits, at `volume == 1.0` the callback skips the multiply
-entirely. So the claim is: chain off, volume at 100%, device rate equal to
-source rate, and the device receives bit-identical samples. The UI states those three
-conditions rather than showing a decoration; ReplayGain on is processing on
-and reads as such.
+**Why the decode thread.** The callback's contract, no allocation, no locks, no I/O
+([ADR 2](02-adr-audio-stack.md)), rules out running DSP inside it. The decode thread is
+where the samples already get transformed anyway, since it owns the fold, the resample,
+and the trim, so the chain is joining work that's already happening rather than starting a
+new stage somewhere.
+
+Putting it last, immediately before the ring, buys three things. Chain output travels
+through flush, seek, and the gapless boundary like any other sample data, so none of those
+need a new protocol to handle processed audio. The PCM tap keeps working unchanged, and
+because it sits downstream, visualizers show what the chain actually produced rather than
+what went into it. And chain state survives the gapless splice
+([ADR 3](03-adr-gapless.md)), which an EQ needs: a filter carries history, and resetting
+it at a track boundary is audible as a click.
+
+**Why the device rate.** The chain runs after the resampler, so it sees the rate the
+device is playing at. The alternative is running before the resampler at the source rate,
+and that costs twice. Stateful nodes would re-anchor on every track whose rate differs
+from the last, so a filter's history would reset at arbitrary boundaries. And the EQ
+would be shaped against a rate the device never actually plays, since everything gets
+resampled after it.
+
+At device rate the chain sees one stable rate for the life of the stream. The events that
+can change it, a device switch or an exclusive-mode rate follow, are already stream
+rebuilds, so the chain simply resets alongside the resampler and there's no new case to
+handle.
+
+**A node's contract.** Process an interleaved stereo f32 buffer in place, returning the
+same number of samples that came in, at the rate it was given at reset. `reset(rate)` is
+called at stream open and at every discontinuity the engine already recognizes, which
+means the seek flush and the device rebuild. It is deliberately not called at the gapless
+boundary, since that's the case where a filter's history has to carry over. Nodes
+allocate at construction and at reset, and never inside process.
+
+Parameters are atomics shared with the UI, so turning a knob is a single store with no
+command round trip in the way. Structural edits are different, since adding, removing, or
+reordering nodes changes the shape of the thing being iterated, so those go through the
+existing command channel the same way queue edits do.
+
+Nodes are zero-latency by contract. Anything that needs lookahead or introduces group
+delay, like a convolution reverb or a limiter, is out until a latency-reporting extension
+is worth designing. The payoff for that restriction is that the position clock stays
+accurate without anyone maintaining an offset: if no node delays the signal, the frame
+being processed is the frame that will be heard.
+
+**What the placement costs.** Sitting before the ring means a parameter write lands on
+the samples being decoded right now, which are behind however much already-processed
+audio the ring is holding. So a knob turn is heard after that audio drains, not
+immediately.
+
+The ring keeps its 500 ms of capacity, allocated once at stream open, because that's the
+underrun cushion and shrinking it would mean reallocating underneath a live stream. What
+changes instead is how full the decode thread allows it to get. While a chain editor is
+open it holds a process-global refcount, and the push loop stops at 120 ms of buffered
+audio, so the wait between moving a slider and hearing it is 120 ms rather than half a
+second.
+
+That leaves a thinner underrun cushion for as long as an editor is up. It's accepted
+because an open editor is exactly the moment a knob needs to respond, and the fill goes
+back to the brim when it closes, with no stream torn down in either direction.
+
+**The bypass rule** is what turns bit-perfect from a label into something you can check.
+With the chain empty or disabled, the samples pushed into the ring are the decoder's
+output unchanged. The fold and the resampler already satisfy this without special casing,
+since a stereo source folds to itself and the resampler is a passthrough when the rates
+match.
+
+That leaves the callback's volume multiply, which is a one-node chain that predates this
+ADR. It stays in the callback, because volume has to respond instantly and a chain-side
+volume would lag by the full ring depth, up to 500 ms. The multiply is short-circuited at
+unity instead: when `volume == 1.0` the callback skips it entirely, so the sample is
+untouched rather than multiplied by one.
+
+So the claim has three conditions: chain off, volume at 100%, and device rate equal to
+source rate. Meet all three and the device receives bit-identical samples. The UI states
+those conditions rather than showing a badge, and ReplayGain being on counts as
+processing being on, which it reads as.
 
 Crossfade feeds the single-producer ring by never being a second producer. During a
 fade window the engine holds two open sources, pulls chunks from both, folds and
 resamples each, applies the fade gains, and pushes one summed stream; the chain then
 processes the mix, so an EQ shapes the fade like anything else. Which boundaries fade
-is adjacency the engine can already see: entries carry the group metadata
+is adjacency the engine can already see: entries hold the group metadata
 [ADR 17](17-adr-queue-continuation.md) introduced, same group means the gapless splice
 untouched, different or absent group means fade, and a manual skip always fades since
 it arrives as a command. The position clock flips inside the fade window: the new

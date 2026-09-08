@@ -5,7 +5,8 @@
 
 use super::*;
 
-use gpui::{anchored, MouseDownEvent};
+use gpui::{anchored, point, Corner, MouseDownEvent, Stateful};
+use gpui_component::scroll::Scrollbar;
 use rox_core::settings::MenubarButtons;
 
 /// Where the keyboard cursor sits inside an open dropdown: the entry it's
@@ -43,6 +44,10 @@ pub(crate) enum NavRow {
 const ISSUES_URL: &str = "https://github.com/zealsprince/rox/issues/new/choose";
 const DISCUSSIONS_URL: &str = "https://github.com/zealsprince/rox/discussions";
 const CHAT_URL: &str = "https://hivecom.net/chat?channel=rox";
+
+/// The room a menu surface keeps from the window edge, what its rows are
+/// capped against and what `anchored` snaps it back inside of.
+const MENU_MARGIN: Pixels = px(8.);
 
 impl Workspace {
     pub(crate) fn run(&mut self, action: MenuAction, window: &mut Window, cx: &mut Context<Self>) {
@@ -350,6 +355,7 @@ impl Workspace {
             self.open_top(self.menu_top, cx);
             if delta < 0 {
                 self.menu_slot = self.menu_rows().last().map(|(slot, _)| *slot);
+                self.menu_scroll_follow();
                 cx.notify();
             }
             return;
@@ -365,6 +371,7 @@ impl Workspace {
                 .and_then(|slot| rows.iter().position(|(row, _)| *row == slot));
             self.menu_slot = step_index(at, delta, rows.len()).map(|i| rows[i].0);
         }
+        self.menu_scroll_follow();
         cx.notify();
     }
 
@@ -399,7 +406,9 @@ impl Workspace {
         if self.open_submenu.is_some() {
             if let Some(NavRow::Open(group)) = self.row_at(self.flyout_rows(), self.menu_sub_slot) {
                 self.open_subgroup = Some(group);
+                self.reset_menu_scrolls(self.level(2));
                 self.menu_group_slot = (!self.group_rows().is_empty()).then_some(0);
+                self.menu_scroll_follow();
                 cx.notify();
             }
             return;
@@ -408,6 +417,7 @@ impl Workspace {
             if let Some(NavRow::Open(entry)) = self.current_row() {
                 self.open_flyout(Some(entry));
                 self.menu_sub_slot = (!self.flyout_rows().is_empty()).then_some(0);
+                self.menu_scroll_follow();
                 cx.notify();
             } else if !self.menu_root {
                 self.open_top(self.step_top(1), cx);
@@ -452,6 +462,7 @@ impl Workspace {
         self.menu_top = index;
         self.open_menu = Some(index);
         self.menu_slot = self.menu_rows().first().map(|(slot, _)| *slot);
+        self.menu_scroll_follow();
         cx.notify();
     }
 
@@ -461,6 +472,7 @@ impl Workspace {
     /// the list; the deeper levels go with the dropdown they hung off.
     fn show_top(&mut self, index: Option<usize>) {
         self.open_flyout(None);
+        self.reset_menu_scrolls(self.level(0));
         self.open_menu = index;
         self.menu_slot = None;
         if let Some(index) = index {
@@ -749,12 +761,7 @@ impl Workspace {
             })
             .child(menu_label(menu.label, letter))
             .when(open, |d| {
-                d.child(deferred(
-                    self.dropdown(menu, cx)
-                        .absolute()
-                        .left_0()
-                        .top(px(MENU_BAR_H)),
-                ))
+                d.child(Self::dropdown_at(self.dropdown(menu, cx)))
             })
     }
 
@@ -789,7 +796,7 @@ impl Workspace {
                     .size(px(14.))
                     .text_color(palette::text_muted()),
             )
-            .when(open, |d| d.child(deferred(self.root_menu(cx))))
+            .when(open, |d| d.child(Self::dropdown_at(self.root_menu(cx))))
     }
 
     /// The collapsed bar's root surface: one row per top menu, flying out
@@ -797,24 +804,14 @@ impl Workspace {
     /// while the bar is taking keys.
     fn root_menu(&self, cx: &mut Context<Self>) -> Div {
         let letters = self.menubar_keys.then(mnemonics).unwrap_or_default();
-        div()
-            .absolute()
-            .left_0()
-            .top(px(MENU_BAR_H))
-            .min_w(px(160.))
-            .flex()
-            .flex_col()
-            .py(tokens::SPACE_XS)
-            .bg(palette::bg_menu_opaque())
-            .border_1()
-            .border_color(palette::border_light())
-            .shadow_md()
-            .occlude()
-            .child(self.menu_surface_capture(0, cx))
+        let list = self
+            .menu_list(0)
             .children(MENUS.iter().enumerate().map(|(i, menu)| {
                 let letter = letters.get(i).cloned().flatten().map(|(range, _)| range);
                 self.root_row(i, menu, letter, cx)
-            }))
+            }));
+        self.menu_frame(0, px(160.), list)
+            .child(self.menu_surface_capture(0, cx))
     }
 
     /// A root row for a top menu. Lit while its dropdown is out or the
@@ -856,12 +853,10 @@ impl Workspace {
                     .text_color(palette::text_muted()),
             )
             .when(open, |d| {
-                // The same offset the submenu flyouts back out, so the
-                // dropdown's first row lines up with this one.
-                d.child(
-                    flyout_side(self.dropdown(menu, cx).absolute(), self.flyout_left(0))
-                        .top(px(-5.)),
-                )
+                d.child(Self::flyout_at(
+                    self.flyout_left(0),
+                    self.dropdown(menu, cx),
+                ))
             })
     }
     /// The menubar row: the mini toggle, the menus, and the status side.
@@ -916,8 +911,12 @@ impl Workspace {
     fn menubar_capture(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
         canvas(
-            move |bounds, _, cx| {
-                view.update(cx, |this, _| this.menubar_bounds = Some(bounds));
+            move |bounds, window, cx| {
+                let viewport_h = window.viewport_size().height;
+                view.update(cx, |this, _| {
+                    this.menubar_bounds = Some(bounds);
+                    this.menu_viewport_h = viewport_h;
+                });
             },
             |_, _, _, _| {},
         )
@@ -1353,10 +1352,11 @@ impl Workspace {
         let view = cx.entity();
         canvas(
             move |bounds, window, cx| {
-                let viewport_w = window.viewport_size().width;
+                let viewport = window.viewport_size();
                 view.update(cx, |this, _| {
                     this.menu_surfaces[level] = Some(bounds);
-                    this.menu_viewport_w = viewport_w;
+                    this.menu_viewport_w = viewport.width;
+                    this.menu_viewport_h = viewport.height;
                 })
             },
             |_, _, _, _| {},
@@ -1378,90 +1378,215 @@ impl Workspace {
         level + usize::from(self.menubar_collapsed)
     }
 
-    /// A top menu's dropdown, unplaced: the unfolded bar hangs it under
-    /// its button, the collapsed bar flies it out of a root row.
-    fn dropdown(&self, menu: &'static Menu, cx: &mut Context<Self>) -> Div {
+    /// The tallest a surface at `level` can be before its rows scroll: the
+    /// window from the last paint, less the margin the surface keeps from
+    /// the edge and the frame's border. Level 0 hangs under the bar, so it
+    /// has the room below the bar; a flyout can sit anywhere, so it gets
+    /// the whole window and `anchored` slides it up to fit.
+    fn menu_fit(&self, level: usize) -> Pixels {
+        let border = px(2.);
+        if level == 0 {
+            let bar_bottom = self
+                .menubar_bounds
+                .map(|bar| bar.bottom())
+                .unwrap_or(px(MENU_BAR_H));
+            self.menu_viewport_h - bar_bottom - MENU_MARGIN - border
+        } else {
+            self.menu_viewport_h - MENU_MARGIN * 2. - border
+        }
+    }
+
+    /// The rows of a menu surface: a column capped at [`Self::menu_fit`]
+    /// that scrolls past it, on the scroll handle for `level` so the
+    /// keyboard cursor can follow. The first paint has no window height
+    /// yet; that frame runs uncapped and the next one settles it.
+    fn menu_list(&self, level: usize) -> Stateful<Div> {
+        let fit = self.menu_fit(level);
         div()
-            .min_w(px(180.))
+            .id(("menu-list", level))
             .flex()
             .flex_col()
             .py(tokens::SPACE_XS)
+            .when(fit > Pixels::ZERO, |d| d.max_h(fit))
+            .overflow_y_scroll()
+            .track_scroll(&self.menu_scrolls[level])
+    }
+
+    /// The frame every dropdown and flyout is: the opaque box, its border
+    /// and shadow, `list` inside it, and the scrollbar over it, which the
+    /// scrollbar hides while the rows fit. Anything else the caller adds,
+    /// a bounds capture say, goes on the frame rather than in the list, so
+    /// it doesn't count toward the scroll extent.
+    fn menu_frame(&self, level: usize, min_w: Pixels, list: impl IntoElement) -> Div {
+        div()
+            .relative()
+            .min_w(min_w)
+            .flex()
+            .flex_col()
             .bg(palette::bg_menu_opaque())
             .border_1()
             .border_color(palette::border_light())
             .shadow_md()
             .occlude()
-            .child(self.menu_surface_capture(self.level(0), cx))
-            .children(menu.entries.iter().enumerate().map(|(i, entry)| {
-                match entry {
-                    MenuEntry::Item(item) => self
-                        .action_item(*item, cx)
-                        .id(("menu-entry", i))
-                        // Sliding onto a plain item retracts a flyout a
-                        // sibling submenu left open.
-                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                            if *hovered && this.open_submenu.is_some() {
-                                this.open_flyout(None);
-                                cx.notify();
+            .child(list)
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(Scrollbar::vertical(&self.menu_scrolls[level])),
+            )
+    }
+
+    /// A surface hung under the bar at its button's left edge: deferred
+    /// over the dock, and snapped back into the window when the button sits
+    /// near its right edge.
+    fn dropdown_at(frame: Div) -> impl IntoElement {
+        deferred(
+            div().absolute().left_0().top(px(MENU_BAR_H)).child(
+                anchored()
+                    .snap_to_window_with_margin(MENU_MARGIN)
+                    .child(frame),
+            ),
+        )
+    }
+
+    /// A flyout beside the row that opened it, on the side
+    /// [`flyout_leftward`] picked. Deferred, so it paints past the scroll
+    /// clip of the list its row is in, and anchored by the corner that
+    /// touches the row, so it snaps back into the window when the side
+    /// estimate was off or its rows would run past the bottom. The top
+    /// offset backs out the row's padding and the frame's border so the
+    /// first item lines up with the row.
+    fn flyout_at(leftward: bool, frame: Div) -> impl IntoElement {
+        let corner = if leftward {
+            Corner::TopRight
+        } else {
+            Corner::TopLeft
+        };
+        deferred(
+            flyout_side(div().absolute(), leftward).top(px(-5.)).child(
+                anchored()
+                    .anchor(corner)
+                    .snap_to_window_with_margin(MENU_MARGIN)
+                    .child(frame),
+            ),
+        )
+    }
+
+    /// Bring the keyboard cursor's row into view on the deepest open
+    /// surface. The lists draw one child per row, which is what the scroll
+    /// handle counts by; the dropdown also draws headings, so its index
+    /// comes from [`dropdown_child_index`].
+    fn menu_scroll_follow(&self) {
+        let (level, child) = if self.open_subgroup.is_some() {
+            (self.level(2), self.menu_group_slot)
+        } else if self.open_submenu.is_some() {
+            (self.level(1), self.menu_sub_slot)
+        } else if let Some(menu) = self.open_menu {
+            let child = self
+                .menu_slot
+                .and_then(|slot| MENUS.get(menu).map(|menu| dropdown_child_index(menu, slot)));
+            (self.level(0), child)
+        } else {
+            return;
+        };
+        if let Some(child) = child {
+            self.menu_scrolls[level].scroll_to_item(child);
+        }
+    }
+
+    /// Put the surfaces from `level` down back at their top, for the next
+    /// list to open there.
+    fn reset_menu_scrolls(&self, level: usize) {
+        for scroll in &self.menu_scrolls[level..] {
+            scroll.set_offset(point(Pixels::ZERO, Pixels::ZERO));
+        }
+    }
+
+    /// A top menu's dropdown, unplaced: the unfolded bar hangs it under
+    /// its button, the collapsed bar flies it out of a root row. The rows
+    /// are the list's direct children, a bare catalog section spread in
+    /// place, so their order is the one [`dropdown_child_index`] counts.
+    fn dropdown(&self, menu: &'static Menu, cx: &mut Context<Self>) -> Div {
+        let level = self.level(0);
+        let list =
+            self.menu_list(level)
+                .children(menu.entries.iter().enumerate().flat_map(
+                    |(i, entry)| -> Vec<AnyElement> {
+                        match entry {
+                            MenuEntry::Item(item) => vec![self
+                                .action_item(*item, cx)
+                                .id(("menu-entry", i))
+                                // Sliding onto a plain item retracts a flyout a
+                                // sibling submenu left open.
+                                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                    if *hovered && this.open_submenu.is_some() {
+                                        this.open_flyout(None);
+                                        cx.notify();
+                                    }
+                                }))
+                                .when(self.nav_on(i, None), nav_lit)
+                                .into_any_element()],
+                            MenuEntry::Section(label) => {
+                                vec![menu_section(label).into_any_element()]
                             }
-                        }))
-                        .when(self.nav_on(i, None), nav_lit)
-                        .into_any_element(),
-                    MenuEntry::Section(label) => menu_section(label).into_any_element(),
-                    // A gated-off section draws nothing rather than an
-                    // empty group row.
-                    MenuEntry::Panels(section) if !section_shows(section) => {
-                        div().into_any_element()
-                    }
-                    MenuEntry::Panels(section) => match section.group {
-                        // A bare section is a run of plain rows in place.
-                        None => div()
-                            .flex()
-                            .flex_col()
-                            .children(section.panels.iter().enumerate().map(|(j, def)| {
-                                self.action_item(panel_menu_item(def), cx)
-                                    .id(("panel-entry", j))
-                                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                                        if *hovered && this.open_submenu.is_some() {
-                                            this.open_flyout(None);
-                                            cx.notify();
-                                        }
-                                    }))
-                                    .when(self.nav_on(i, Some(j)), nav_lit)
-                            }))
-                            .into_any_element(),
-                        Some((label, icon)) => self
-                            .submenu_row(i, label, icon, section.panels, cx)
-                            .into_any_element(),
+                            // A gated-off section draws nothing rather than an
+                            // empty group row.
+                            MenuEntry::Panels(section) if !section_shows(section) => Vec::new(),
+                            MenuEntry::Panels(section) => match section.group {
+                                // A bare section is a run of plain rows in place.
+                                None => section
+                                    .panels
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(j, def)| {
+                                        self.action_item(panel_menu_item(def), cx)
+                                            .id(("panel-entry", j))
+                                            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                                if *hovered && this.open_submenu.is_some() {
+                                                    this.open_flyout(None);
+                                                    cx.notify();
+                                                }
+                                            }))
+                                            .when(self.nav_on(i, Some(j)), nav_lit)
+                                            .into_any_element()
+                                    })
+                                    .collect(),
+                                Some((label, icon)) => vec![self
+                                    .submenu_row(i, label, icon, section.panels, cx)
+                                    .into_any_element()],
+                            },
+                            MenuEntry::LayoutsSubmenu {
+                                label,
+                                icon,
+                                target,
+                                with_new,
+                            } => vec![self
+                                .layouts_submenu_row(i, label, icon, *target, *with_new, cx)
+                                .into_any_element()],
+                            MenuEntry::WorkspacesSubmenu {
+                                label,
+                                icon,
+                                target,
+                                with_new,
+                            } => vec![self
+                                .workspaces_submenu_row(i, label, icon, *target, *with_new, cx)
+                                .into_any_element()],
+                            MenuEntry::PresetsSubmenu {
+                                label,
+                                icon,
+                                target,
+                            } => vec![self
+                                .presets_submenu_row(i, label, icon, *target, cx)
+                                .into_any_element()],
+                            MenuEntry::PanelWindowsSubmenu { label, icon } => vec![self
+                                .panel_windows_submenu_row(i, label, icon, cx)
+                                .into_any_element()],
+                        }
                     },
-                    MenuEntry::LayoutsSubmenu {
-                        label,
-                        icon,
-                        target,
-                        with_new,
-                    } => self
-                        .layouts_submenu_row(i, label, icon, *target, *with_new, cx)
-                        .into_any_element(),
-                    MenuEntry::WorkspacesSubmenu {
-                        label,
-                        icon,
-                        target,
-                        with_new,
-                    } => self
-                        .workspaces_submenu_row(i, label, icon, *target, *with_new, cx)
-                        .into_any_element(),
-                    MenuEntry::PresetsSubmenu {
-                        label,
-                        icon,
-                        target,
-                    } => self
-                        .presets_submenu_row(i, label, icon, *target, cx)
-                        .into_any_element(),
-                    MenuEntry::PanelWindowsSubmenu { label, icon } => self
-                        .panel_windows_submenu_row(i, label, icon, cx)
-                        .into_any_element(),
-                }
-            }))
+                ));
+        self.menu_frame(level, px(180.), list)
+            .child(self.menu_surface_capture(level, cx))
     }
 
     /// A dropdown row that runs an action and closes the menu. The caller
@@ -1589,26 +1714,17 @@ impl Workspace {
                     .text_color(palette::text_muted()),
             )
             .when(open, |d| {
-                d.child(
-                    // Top offset backs out the parent's padding and the
-                    // dropdown border so the first item lines up with the
-                    // parent row.
-                    flyout_side(div().absolute(), self.flyout_left(self.level(0)))
-                        .top(px(-5.))
-                        .min_w(px(160.))
-                        .flex()
-                        .flex_col()
-                        .py(tokens::SPACE_XS)
-                        .bg(palette::bg_menu_opaque())
-                        .border_1()
-                        .border_color(palette::border_light())
-                        .shadow_md()
-                        .occlude()
-                        .children(panels.iter().enumerate().map(|(row, def)| {
-                            self.action_item(panel_menu_item(def), cx)
-                                .when(self.nav_sub(row), nav_lit)
-                        })),
-                )
+                let level = self.level(1);
+                let list = self
+                    .menu_list(level)
+                    .children(panels.iter().enumerate().map(|(row, def)| {
+                        self.action_item(panel_menu_item(def), cx)
+                            .when(self.nav_sub(row), nav_lit)
+                    }));
+                d.child(Self::flyout_at(
+                    self.flyout_left(self.level(0)),
+                    self.menu_frame(level, px(160.), list),
+                ))
             })
     }
 
@@ -1670,17 +1786,8 @@ impl Workspace {
                 // Read the presets only once the flyout opens, not on every
                 // parent-menu paint.
                 let presets = rox_core::settings::layouts::all(&Settings::load());
-                let mut flyout = flyout_side(div().absolute(), self.flyout_left(self.level(0)))
-                    .top(px(-5.))
-                    .min_w(px(180.))
-                    .flex()
-                    .flex_col()
-                    .py(tokens::SPACE_XS)
-                    .bg(palette::bg_menu_opaque())
-                    .border_1()
-                    .border_color(palette::border_light())
-                    .shadow_md()
-                    .occlude();
+                let level = self.level(1);
+                let mut flyout = self.menu_list(level);
                 if with_new {
                     flyout = flyout.child(self.save_new_item(cx).when(self.nav_sub(0), nav_lit));
                 }
@@ -1703,7 +1810,10 @@ impl Workspace {
                                 .when(self.nav_sub(row + usize::from(with_new)), nav_lit)
                         }));
                 }
-                d.child(flyout)
+                d.child(Self::flyout_at(
+                    self.flyout_left(self.level(0)),
+                    self.menu_frame(level, px(180.), flyout),
+                ))
             })
     }
 
@@ -1782,15 +1892,20 @@ impl Workspace {
             // Read the presets only once the flyout opens, not on every
             // parent-menu paint.
             let presets = panel_presets::saved();
-            let flyout = flyout_box(self.flyout_left(self.level(0)));
-            d.child(if presets.is_empty() {
-                flyout.child(flyout_note(rox_i18n::t!("menu-no-presets")))
+            let level = self.level(1);
+            let list = self.menu_list(level);
+            let list = if presets.is_empty() {
+                list.child(flyout_note(rox_i18n::t!("menu-no-presets")))
             } else {
-                flyout.children(presets.into_iter().enumerate().map(|(row, preset)| {
+                list.children(presets.into_iter().enumerate().map(|(row, preset)| {
                     self.preset_item(preset, target, cx)
                         .when(self.nav_sub(row), nav_lit)
                 }))
-            })
+            };
+            d.child(Self::flyout_at(
+                self.flyout_left(self.level(0)),
+                self.menu_frame(level, px(180.), list),
+            ))
         })
     }
 
@@ -1810,10 +1925,8 @@ impl Workspace {
         let lit = open || self.nav_on(index, None);
         submenu_shell(index, label, icon, lit, cx).when(open, |d| {
             let presets = panel_presets::saved();
-            // This flyout hosts the group flyouts, so it captures its own
-            // bounds for their side decision.
-            let mut flyout = flyout_box(self.flyout_left(self.level(0)))
-                .child(self.menu_surface_capture(self.level(1), cx));
+            let level = self.level(1);
+            let mut flyout = self.menu_list(level);
             // Group 0 is the presets when there are any, so the catalog's
             // groups start one along and the two levels never share an index.
             if !presets.is_empty() {
@@ -1852,7 +1965,13 @@ impl Workspace {
                     }
                 };
             }
-            d.child(flyout)
+            // This flyout hosts the group flyouts, so it captures its own
+            // bounds for their side decision.
+            d.child(Self::flyout_at(
+                self.flyout_left(self.level(0)),
+                self.menu_frame(level, px(180.), flyout)
+                    .child(self.menu_surface_capture(level, cx)),
+            ))
         })
     }
 
@@ -1879,6 +1998,7 @@ impl Workspace {
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered && this.open_subgroup != Some(index) {
                     this.open_subgroup = Some(index);
+                    this.reset_menu_scrolls(this.level(2));
                     this.menu_group_slot = None;
                     cx.notify();
                 }
@@ -1909,7 +2029,11 @@ impl Workspace {
                     .text_color(palette::text_muted()),
             )
             .when(open, |d| {
-                d.child(flyout_box(self.flyout_left(self.level(1))).children(rows))
+                let level = self.level(2);
+                d.child(Self::flyout_at(
+                    self.flyout_left(self.level(1)),
+                    self.menu_frame(level, px(180.), self.menu_list(level).children(rows)),
+                ))
             })
     }
 
@@ -1963,6 +2087,7 @@ impl Workspace {
         self.menu_sub_slot = None;
         self.open_subgroup = None;
         self.menu_group_slot = None;
+        self.reset_menu_scrolls(0);
         cx.notify();
     }
 
@@ -1972,6 +2097,7 @@ impl Workspace {
     /// longer belongs to.
     fn open_flyout(&mut self, index: Option<usize>) {
         self.open_submenu = index;
+        self.reset_menu_scrolls(self.level(1));
         self.menu_sub_slot = None;
         self.open_subgroup = None;
         self.menu_group_slot = None;
@@ -2042,17 +2168,8 @@ impl Workspace {
                 if target == WorkspaceTarget::Overwrite {
                     entries.retain(|entry| !entry.builtin);
                 }
-                let mut flyout = flyout_side(div().absolute(), self.flyout_left(self.level(0)))
-                    .top(px(-5.))
-                    .min_w(px(180.))
-                    .flex()
-                    .flex_col()
-                    .py(tokens::SPACE_XS)
-                    .bg(palette::bg_menu_opaque())
-                    .border_1()
-                    .border_color(palette::border_light())
-                    .shadow_md()
-                    .occlude();
+                let level = self.level(1);
+                let mut flyout = self.menu_list(level);
                 if with_new {
                     flyout = flyout.child(
                         self.save_new_workspace_item(cx)
@@ -2078,7 +2195,10 @@ impl Workspace {
                                 .when(self.nav_sub(row + usize::from(with_new)), nav_lit)
                         }));
                 }
-                d.child(flyout)
+                d.child(Self::flyout_at(
+                    self.flyout_left(self.level(0)),
+                    self.menu_frame(level, px(180.), flyout),
+                ))
             })
     }
 
@@ -2219,21 +2339,24 @@ fn submenu_shell(
         )
 }
 
-/// The panel a flyout's items go in, beside the row that opened it on the
-/// side [`flyout_leftward`] picked. The top offset backs out the parent's
-/// padding and the dropdown border so the first item lines up with that row.
-fn flyout_box(leftward: bool) -> Div {
-    flyout_side(div().absolute(), leftward)
-        .top(px(-5.))
-        .min_w(px(180.))
-        .flex()
-        .flex_col()
-        .py(tokens::SPACE_XS)
-        .bg(palette::bg_menu_opaque())
-        .border_1()
-        .border_color(palette::border_light())
-        .shadow_md()
-        .occlude()
+/// Where the dropdown row at `slot` sits among its list's children, which
+/// is what the scroll handle counts by when the keyboard cursor is brought
+/// into view. Walks the entries the way [`Workspace::dropdown`] draws them:
+/// an item or a heading is one child, a gated-off section none, a bare
+/// section one per panel, and a flyout row one.
+pub(crate) fn dropdown_child_index(menu: &Menu, slot: NavSlot) -> usize {
+    let (entry, row) = slot;
+    let before: usize = menu
+        .entries
+        .iter()
+        .take(entry)
+        .map(|entry| match entry {
+            MenuEntry::Panels(section) if !section_shows(section) => 0,
+            MenuEntry::Panels(section) if section.group.is_none() => section.panels.len(),
+            _ => 1,
+        })
+        .sum();
+    before + row.unwrap_or(0)
 }
 
 /// What a flyout shows instead of its items when it has none.
@@ -2458,6 +2581,25 @@ mod nav_tests {
         // an e must not read as the e menu.
         assert_eq!(mnemonic_menu("escape"), None);
         assert_eq!(mnemonic_menu("enter"), None);
+    }
+
+    /// The scroll handle counts list children, the cursor counts rows, and
+    /// headings sit between them. Walking a menu's rows in order must land
+    /// on children in order, never behind or on top of the row before.
+    #[test]
+    fn dropdown_children_run_with_the_rows() {
+        for (i, menu) in MENUS.iter().enumerate() {
+            let mut last = None;
+            for (slot, _) in menu_entry_rows(i) {
+                let child = dropdown_child_index(menu, slot);
+                assert!(
+                    last.is_none_or(|last| child > last),
+                    "{}: row {slot:?} landed on child {child} behind {last:?}",
+                    menu.label
+                );
+                last = Some(child);
+            }
+        }
     }
 
     #[test]

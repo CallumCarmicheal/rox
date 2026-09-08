@@ -90,6 +90,12 @@ pub enum Cmd {
         /// the queue behind it. A drag onto Play now sets this; Play Next and
         /// Add to Queue leave it off so the current track keeps playing.
         and_play: bool,
+        /// With `and_play`, open the first of the batch this far in, track
+        /// seconds, rather than at its start. A play-from-bookmark lands
+        /// here in one move: a Seek sent beside the insert would cancel the
+        /// jump, since one pass over the commands keeps a single flush, and
+        /// one sent after it plays the track's head until it arrives.
+        start_secs: Option<f64>,
     },
     /// Drop the entry with this id from the queue. Removing the playing entry
     /// is ignored; the UI never offers it.
@@ -476,6 +482,10 @@ impl Engine {
             // Which way the navigation went, for the transport's fade
             // readout: a Previous sweeps the other way from a Next.
             let mut nav_back = false;
+            // Where in the track a navigation lands, track seconds; only
+            // an Insert that plays now sets it, and a plain Next, Prev, or
+            // Jump arriving after it starts at the top like they always do.
+            let mut nav_at: Option<f64> = None;
             // A queue edit moved the pre-decoded next track out from under its
             // open source: a remove dropped it, or a reorder put something else
             // in the slot after the audible entry. Set here, acted on after the
@@ -509,6 +519,7 @@ impl Engine {
                     Cmd::Seek(secs) => {
                         flush_to = Some(FlushAction::Seek(secs.max(0.0)));
                         nav_pos = None;
+                        nav_at = None;
                     }
                     Cmd::Next => {
                         // Off the audible track, not the decode cursor, which
@@ -521,6 +532,7 @@ impl Engine {
                             nav_pos = Some(0);
                         }
                         nav_back = false;
+                        nav_at = None;
                         flush_to = None;
                     }
                     Cmd::Prev => {
@@ -532,6 +544,7 @@ impl Engine {
                         };
                         nav_pos = Some(target);
                         nav_back = true;
+                        nav_at = None;
                         flush_to = None;
                     }
                     Cmd::SetLoop(mode) => {
@@ -600,6 +613,7 @@ impl Engine {
                         spans,
                         explicit,
                         and_play,
+                        start_secs,
                     } => {
                         let at = self.insert(after, paths, groups, gains, spans, explicit);
                         // From the ended state the source is None, so the new
@@ -611,6 +625,7 @@ impl Engine {
                         // leave the current track playing.
                         if and_play || source.is_none() {
                             nav_pos = at;
+                            nav_at = start_secs.filter(|_| and_play);
                         }
                         // Play now means play: resume if we were paused, so a
                         // drop onto Play now starts audio instead of loading it
@@ -628,6 +643,7 @@ impl Engine {
                         if let Some(p) = self.find(id) {
                             nav_pos = Some(p);
                         }
+                        nav_at = None;
                         flush_to = None;
                     }
                     Cmd::ChainPush(node) => self.chain.push(node),
@@ -655,6 +671,7 @@ impl Engine {
                 flush_to = Some(FlushAction::Track {
                     pos: p,
                     back: nav_back,
+                    at: nav_at,
                 });
             }
 
@@ -664,14 +681,14 @@ impl Engine {
             // before the cut, and what's left after it is arithmetic.
             if let Some(action) = flush_to {
                 match action {
-                    FlushAction::Track { pos, back } => {
+                    FlushAction::Track { pos, back, at } => {
                         // A loop belongs to the track it was marked on, so
                         // any move through the queue ends it: Next, Prev,
                         // Jump, a drop onto Play now. The natural advance
                         // can't get here while looping, since the wrap
                         // takes EOF before the boundary does.
                         self.clear_ab();
-                        source = self.skip_to(source.take(), pos, back);
+                        source = self.skip_to(source.take(), pos, back, at);
                     }
                     FlushAction::Seek(secs) => {
                         source = self.seek_to(source.take(), secs);
@@ -850,7 +867,7 @@ impl Engine {
     /// announces a track before it's audible (ADR 19).
     fn open_at_from(&mut self, p: usize, after: u64) -> Option<Source> {
         let (src, at, info) = self.open_file_at(p)?;
-        self.adopt(at, info, after);
+        self.adopt(at, info, 0, after);
         Some(src)
     }
 
@@ -891,7 +908,13 @@ impl Engine {
     /// Claiming zero there would leave the position half a fade behind the
     /// audio for the rest of the track, and a later skip winds the outgoing
     /// track back to that position, which is a jump backwards you can hear.
-    fn adopt(&mut self, p: usize, info: TrackInfo, after: u64) {
+    ///
+    /// `start` is where in the track the source was opened, in device-rate
+    /// frames: zero for the ordinary open at the top, the landing spot for
+    /// a play-from-bookmark, whose first pushed frame is already that far
+    /// in. It adds to `after` the same way, since both are audio the clock
+    /// has to count as played before the segment is reached.
+    fn adopt(&mut self, p: usize, info: TrackInfo, start: u64, after: u64) {
         let i = self.order[p].idx;
         self.pos = p;
         self.idx = i;
@@ -904,7 +927,7 @@ impl Engine {
         segments.push(Segment {
             at_frame,
             track: i,
-            track_frame: after,
+            track_frame: start + after,
         });
         prune_segments(&mut segments, consumed);
     }
@@ -1078,7 +1101,18 @@ impl Engine {
     ///
     /// One case takes no cut at all, see below: an ending still coming out of
     /// the ring is left to finish.
-    fn skip_to(&mut self, old: Option<Source>, p: usize, back: bool) -> Option<Source> {
+    /// `at` opens the new track that many seconds in, the play-from-bookmark
+    /// landing: the seek happens on the fresh source before anything of it
+    /// reaches the ring, so the listener never hears its head, and the
+    /// segment registers at the landing spot so the clock reads right from
+    /// the first frame.
+    fn skip_to(
+        &mut self,
+        old: Option<Source>,
+        p: usize,
+        back: bool,
+        at: Option<f64>,
+    ) -> Option<Source> {
         let opened = self.open_file_at(p);
         // Nothing decoding, nothing mixing, and the ring still holding
         // samples: this is the half second between the last track's EOF and
@@ -1100,9 +1134,13 @@ impl Engine {
         // install either. Publishing one here would leave the transport
         // showing an overlap that never renders and never clears: the mix
         // never runs, so nothing is ever there to close it.
-        let (src, at, info) = opened?;
+        let (mut src, pos, info) = opened?;
+        // A failed seek is a track that starts at its top, which is what
+        // every other skip does anyway; nothing to report.
+        let landed = at.and_then(|secs| src.seek(secs)).unwrap_or(0.0);
         let midpoint = self.install_skip_fade(leaving, cut, back);
-        self.adopt(at, info, midpoint);
+        let start = (landed * self.device_rate as f64).round() as u64;
+        self.adopt(pos, info, start, midpoint);
         Some(src)
     }
 
@@ -1137,7 +1175,7 @@ impl Engine {
         };
         self.flush_ring();
         if let Some((src, at, info)) = reopened {
-            self.adopt(at, info, 0);
+            self.adopt(at, info, 0, 0);
             // A seek that revived a played-out queue is playing again, so
             // nothing downstream should still read as finished.
             self.shared.ended.store(false, Ordering::Relaxed);
@@ -1795,6 +1833,9 @@ enum FlushAction {
         /// The jump came from a Previous. Only the transport's fade
         /// readout uses it; the engine treats both directions the same.
         back: bool,
+        /// Open the track this far in, track seconds, instead of at its
+        /// start: the play-from-bookmark landing.
+        at: Option<f64>,
     },
 }
 
@@ -3245,7 +3286,7 @@ mod tests {
         };
         // A four second window opening at 100_000, so the clock flips to the
         // incoming track at the midpoint, two seconds later.
-        engine.adopt(1, info, 96_000);
+        engine.adopt(1, info, 0, 96_000);
         let flip = 100_000 + 96_000;
         // The incoming track has been audible since the window opened, so at
         // the flip it's two seconds in rather than at its start.
@@ -3637,7 +3678,7 @@ mod tests {
         e.fade_secs = 4.0;
         let source = ready_to_skip(&mut e, 48_000);
 
-        let after = e.skip_to(source, 1, false);
+        let after = e.skip_to(source, 1, false, None);
         assert!(after.is_some(), "the second fixture opens");
         assert!(e.fade.is_some(), "the track left is under the new one");
         // Half the track is the ceiling, and the fixture is four seconds
@@ -3656,7 +3697,7 @@ mod tests {
         let source = ready_to_skip(&mut e, 48_000);
 
         // Nothing past the skip target opens, so nothing drives a mix.
-        let after = e.skip_to(source, 1, false);
+        let after = e.skip_to(source, 1, false, None);
         assert!(after.is_none());
         assert!(e.fade.is_none());
         // The clock is frozen at the cut with no source to move it, so a
@@ -3807,7 +3848,7 @@ mod tests {
         e.shared.flush_ack.store(u64::MAX, Ordering::Release);
         let seq = e.shared.flush_seq.load(Ordering::Acquire);
 
-        let after = e.skip_to(None, 1, false);
+        let after = e.skip_to(None, 1, false, None);
         assert!(after.is_some(), "the second fixture opens");
         assert_eq!(
             e.shared.flush_seq.load(Ordering::Acquire),
@@ -3833,8 +3874,45 @@ mod tests {
         e.shared.flush_ack.store(u64::MAX, Ordering::Release);
         let seq = e.shared.flush_seq.load(Ordering::Acquire);
 
-        assert!(e.skip_to(None, 1, false).is_some());
+        assert!(e.skip_to(None, 1, false, None).is_some());
         assert!(e.shared.flush_seq.load(Ordering::Acquire) > seq, "cut");
+    }
+
+    /// A play-from-bookmark: the skip opens the new track at the offset it
+    /// was asked for, so its head never reaches the ring, and the segment
+    /// says the track is that far in from its first frame rather than
+    /// reading zero until a later seek corrects it.
+    #[test]
+    fn a_skip_with_a_landing_opens_the_track_there() {
+        let fx = Fixtures::new("skip-landing");
+        let mut e = engine_over(vec![fx.wav("a.wav", 1.0), fx.wav("b.wav", 3.0)]);
+        e.pushed_playable = 1_000;
+        e.shared.frames_consumed.store(1_000, Ordering::Relaxed);
+        e.shared.flush_ack.store(u64::MAX, Ordering::Release);
+
+        let src = e
+            .skip_to(None, 1, false, Some(1.5))
+            .expect("the second fixture opens");
+        // A seek lands on a packet boundary, so the spot is near the ask
+        // rather than on the frame; what has to hold exactly is that the
+        // clock's segment says the same thing the source does.
+        let landed = src.pos_frames;
+        assert!(
+            (landed as i64 - 72_000).abs() < 4_800,
+            "the source stands about a second and a half in, got {landed}"
+        );
+        let segments = e.shared.segments.lock().unwrap();
+        let last = segments.last().expect("the skip registered its track");
+        assert_eq!(last.track, 1);
+        assert_eq!(last.track_frame, landed);
+        drop(segments);
+        // And with no landing asked for, the same skip starts at the top.
+        let src = e
+            .skip_to(None, 0, false, None)
+            .expect("the first fixture opens");
+        assert_eq!(src.pos_frames, 0);
+        let segments = e.shared.segments.lock().unwrap();
+        assert_eq!(segments.last().map(|s| s.track_frame), Some(0));
     }
 
     /// The queue played out and the last track's decoder is long gone, so a

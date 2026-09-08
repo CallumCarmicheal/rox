@@ -132,4 +132,4 @@ Each ADR records the call, the alternatives weighed, and what it costs. They're 
 | [25 - Shader stacks](decisions/25-adr-shader-stacks.md) | Every shader surface holds an ordered stack, composed into one chain | Proposed |
 | [26 - Last.fm sessions](decisions/26-adr-lastfm-sessions.md) | One session per api key, so builds stop invalidating each other | Decided |
 | [27 - i18n](decisions/27-adr-i18n.md) | Fluent messages and ICU4X formatting behind one locale static, en-CA as source | Decided |
-| [28 - Milkdrop](decisions/28-adr-milkdrop.md) | MilkDrop presets through libprojectM, rendered off-thread and read back | Proposed |
+| [28 - Milkdrop](decisions/28-adr-milkdrop.md) | MilkDrop presets through libprojectM, rendered off-thread and read back | Decided |

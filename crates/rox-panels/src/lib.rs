@@ -10,6 +10,7 @@
 pub mod art;
 pub mod artist_grid;
 pub mod biography;
+pub mod bookmarks;
 pub mod cover;
 pub mod discs;
 pub mod drag_anchor;
@@ -50,7 +51,7 @@ pub(crate) use rox_design as design;
 pub(crate) use rox_design::assets;
 pub(crate) use rox_net::providers;
 pub(crate) use rox_panel_api::{
-    group_head, panel, panel_settings, query, rating_ui, signal_ui, source, track_ui,
+    bookmark_ui, group_head, panel, panel_settings, query, rating_ui, signal_ui, source, track_ui,
 };
 pub(crate) use rox_playback::continuation;
 // The listen history is the one name that clashes: `history` here is the

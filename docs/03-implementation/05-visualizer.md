@@ -11,7 +11,7 @@ GPU shader), plus the one panel that takes the other side of that trade: Milkdro
 [ADR 28](../02-architecture/decisions/28-adr-milkdrop.md). Version-sensitive: the tap
 ring is rtrb, the FFT is hand-rolled, the paint path is gpui's `canvas()`, and the
 Milkdrop engine is libprojectM pinned to master commit `88f23c76` (CMake version 4.2.0;
-the pin lives in `scripts/vendor-projectm.sh` and `flake.nix`, bumped together).
+the pin is in `scripts/vendor-projectm.sh` and `flake.nix`, bumped together).
 
 ## From the tap to the feed
 
@@ -172,10 +172,10 @@ custom waves and shapes, and hand-written GLSL for the composite. Twenty years o
 exist and nothing but libprojectM runs them, so rox links libprojectM in and gives it
 the three things it asks for: a current OpenGL context, a framebuffer, and audio. None
 of rox's renderers (blade on Vulkan and Metal, Direct3D 11 on Windows) will let a
-second renderer into their swapchain, which is why the engine lives on a thread with a
+second renderer into their swapchain, which is why the engine runs on a thread with a
 context of its own and the frame comes back over the CPU. That readback is the cost
-ADR 8 refused for the generative visual and ADR 28 takes here on purpose, because the
-alternative is porting MilkDrop to WGSL.
+ADR 8 refused for the generative visual and ADR 28 takes here, because the alternative
+is porting MilkDrop to WGSL.
 
 ```
  rox-milkdrop worker (own GL context)            UI thread (MilkdropPanel canvas)
@@ -193,7 +193,7 @@ Three crates split the work. `rox-milkdrop-sys` is the C API: `build.rs` runs cm
 the vendored projectM source and links the static library and the C++ runtime, and
 `src/lib.rs` is hand-written `extern "C"` declarations checked against the headers, no
 bindgen. `rox-milkdrop` is the engine, DSP-adjacent like `rox-viz` and drawing nothing.
-The panel sits in `rox-panels` beside every other panel.
+The panel is in `rox-panels` beside every other panel.
 
 **The worker.** `Engine::spawn` starts one thread named `rox-milkdrop` and returns at
 once, since a cold driver can take a second to hand over a context. The thread makes a
@@ -246,7 +246,7 @@ layout comes up as it was left. The paint closure runs in order:
    as `main` and the texture bound as the asset `frame`. A chain with an asset can only
    run as a screen pass, so it's painted with `paint_screen_shader` keyed by the panel's
    entity id, the same branch the shader panel's feedback buffer takes. Fade, hue turn,
-   tint, the grade and the flips ride the signal slots into the pass.
+   tint, the grade and the flips reach the pass through the signal slots.
 4. `request_animation_frame` while animating: a docked panel renders cached, and the
    recorded pass replays with stale values unless the view is dirtied every frame.
 
@@ -256,7 +256,7 @@ panel out registers a fresh pair in the new window; the pair left behind dies wi
 old window, the same life a registered image has there.
 
 Why a dynamic texture and a chain rather than `img()` with a fresh `RenderImage` per
-frame: that path runs through the sprite atlas and wants an allocation and a `drop_image`
+frame: that path runs through the sprite atlas and needs an allocation and a `drop_image`
 every frame for what is really a video stream. The chain path also means a Milkdrop
 frame composes like any other shader surface, so the panel takes a surface shader over
 the top. The three window calls it relies on (`register_dynamic_texture`,
@@ -307,5 +307,5 @@ headless GL context per platform; `gl.rs` the sixteen raw GL calls; `library.rs`
 `PresetLibrary` and `Rotation`; `examples/headless.rs` the cost baseline), and
 `crates/rox-panels/src/milkdrop.rs` (`MilkdropPanel`, `MilkdropConfig`, `FRAME_WGSL`, the
 paint closure and the settings pages). `AudioFeed::since` in `crates/rox-viz/src/feed.rs`
-is the worker's audio pull, and `patches/gpui/z4-dynamic-user-textures.patch` carries
+is the worker's audio pull, and `patches/gpui/z4-dynamic-user-textures.patch` adds
 the three window calls the panel draws through.

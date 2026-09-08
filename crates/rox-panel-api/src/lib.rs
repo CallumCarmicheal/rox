@@ -11,6 +11,7 @@
 //! of function pointers the binary installs once at startup.
 
 pub mod actions;
+pub mod bookmark_ui;
 pub mod charts;
 pub mod group_head;
 pub mod openers;

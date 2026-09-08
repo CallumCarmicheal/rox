@@ -53,7 +53,7 @@ Queue semantics for this layer, one flat list:
 
 Shuffle stays in the engine, which owns `order`. An earlier cut of this ADR moved it to the
 Player, back when the Player held the canonical timeline; the single-owner decision above
-put `order` in the engine, so the permutation lives there too. The engine reshuffles only
+put `order` in the engine, so the permutation belongs there too. The engine reshuffles only
 the upcoming portion, `order[pos + 1..]`, leaving history and the playing entry in place and
 composing with the explicit queued entries already in the list. Owning shuffle in the Player
 would mean sending a permutation down and re-syncing a copy, the dual-copy cost this ADR
@@ -85,10 +85,13 @@ explicit queue when a new context starts, which is the simplification that buys 
 feel for a fraction of the machinery; the richer continuation is a later layer built on the
 same timeline.
 
-Open: whether the queue persists across an app restart, today `restore()` recovers a single
-track and position, not a list. Shuffle semantics on a partially played order, reshuffle
-upcoming only, leaving history and queued items in place. These are decided when layer one
-ships, not before.
+Left open at the time: whether the queue persists across an app restart, since `restore()`
+recovered a single track and position rather than a list; and shuffle semantics on a
+partially played order. Both settled when layer one shipped. The whole queue is written to
+`session.json` as a `last_queue` and restored on the next launch, so Prev/Next and the
+queue panel come back, with the single-track path kept as the fallback for a file that
+predates it. Shuffle reshuffles the upcoming portion only, leaving history and queued
+items where they are.
 
 **Amendment: layer two is built.** The flat model surfaced its own flaw the moment the
 queue panel existed: playing from the library seeded the view into the timeline, and since

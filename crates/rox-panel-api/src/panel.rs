@@ -712,6 +712,8 @@ pub fn track_actions(
     on_play: impl Fn(&mut Window, &mut App) + 'static,
 ) -> PopupMenu {
     let reveal = ids.first().copied();
+    let mark_ids = ids.clone();
+    let mark_state = state.clone();
     let tag_ids = ids.clone();
     let tag_state = state.clone();
     let cover_state = state.clone();
@@ -814,6 +816,22 @@ pub fn track_actions(
         PopupMenuItem::submenu(rox_i18n::t!("panel-add-to-playlist"), submenu)
             .icon(Icon::default().path(icons::LIST_MUSIC)),
     );
+    // Clearing bookmarks only offers itself where there are some to clear:
+    // a row for every track would be noise on a library where most have
+    // none.
+    let marks = mark_state.library.read(cx).bookmark_count_for(&mark_ids);
+    let menu = menu.when(marks > 0, |menu| {
+        menu.item(
+            PopupMenuItem::new(rox_i18n::t!("panel-remove-bookmarks", count = marks))
+                .icon(Icon::default().path(icons::BOOKMARK))
+                .on_click(move |_, _, cx| {
+                    let ids = mark_ids.clone();
+                    mark_state
+                        .library
+                        .update(cx, |library, cx| library.remove_track_bookmarks(&ids, cx));
+                }),
+        )
+    });
     let menu = menu
         // The primary editing flow: the selection into the tag editor
         // window; the metadata panel's inline pencil stays the quick path.

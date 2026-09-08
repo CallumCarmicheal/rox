@@ -8,6 +8,7 @@ pub mod album_meta;
 pub mod art;
 pub mod artist_meta;
 pub mod bake;
+pub mod bookmarks;
 pub mod cue;
 pub mod duplicates;
 pub mod embed_tag;

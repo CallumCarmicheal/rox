@@ -44,6 +44,13 @@ pub struct Openers {
     pub playlist_create: fn(AppState, Vec<i64>, &mut App),
     /// The rename prompt for an existing playlist.
     pub playlist_rename: fn(AppState, i64, String, &mut App),
+    /// The new-bookmark prompt: name and color for a mark about to be
+    /// dropped at this many seconds into the track the key names. The
+    /// position is taken at the press, not at the save, so typing a name
+    /// doesn't drift the mark down the track.
+    pub bookmark_new: fn(AppState, TrackKey, f64, &mut App),
+    /// The edit prompt over an existing bookmark: its name and color.
+    pub bookmark_edit: fn(AppState, i64, &mut App),
     /// The smart-playlist query editor: None for a new one, Some for the
     /// playlist whose query is being edited.
     pub smart_playlist: fn(AppState, Option<i64>, &mut App),
@@ -163,6 +170,20 @@ pub fn playlist_create(state: AppState, ids: Vec<i64>, cx: &mut App) {
 pub fn playlist_rename(state: AppState, id: i64, current: String, cx: &mut App) {
     if let Some(openers) = openers("the playlist rename prompt") {
         (openers.playlist_rename)(state, id, current, cx);
+    }
+}
+
+/// Prompt for a new bookmark `secs` into the track `key` names.
+pub fn bookmark_new(state: AppState, key: TrackKey, secs: f64, cx: &mut App) {
+    if let Some(openers) = openers("the new-bookmark prompt") {
+        (openers.bookmark_new)(state, key, secs, cx);
+    }
+}
+
+/// Prompt to edit the bookmark `id`, its name and color.
+pub fn bookmark_edit(state: AppState, id: i64, cx: &mut App) {
+    if let Some(openers) = openers("the bookmark edit prompt") {
+        (openers.bookmark_edit)(state, id, cx);
     }
 }
 

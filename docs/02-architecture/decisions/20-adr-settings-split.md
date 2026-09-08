@@ -98,19 +98,24 @@ needs no callsite changes but leaves the transcription functions in place and ma
 split a property of the writer rather than of the type. Keep one file and write it
 compactly, which buys bytes and none of the three properties above.
 
-Splitting a file five ways sharpens what a parse failure costs, so the pieces inside each
-one narrow it further. Serde is all or nothing by default: a preset whose dump went
-missing fails the list, which fails the look, which resets `workspace.json` over one bad
-entry. The collections that hold independent things (layout presets, the working copies,
-the signal pool) drop the entries that don't parse and keep the rest, and the optional
-fields that hold a remembered thing (each window's shape, the last track, the queue) read
-as None on their own rather than failing the file around them.
+Splitting the file five ways contains what a parse failure costs, and the fields inside
+each piece narrow it further still. The reason they have to is that serde is all or
+nothing by default. One preset whose layout dump went missing fails the preset list,
+which fails the look that holds it, which resets the whole of `workspace.json` over a
+single bad entry.
 
-Which of the two a field takes follows from the data, not from taste. A queue's `cursor`
-indexes its `entries`, so dropping a bad entry shifts the cursor and resumes the wrong
-track: that one fails whole or not at all. A list of presets has no such coupling, so it
-drops the one and keeps the others. Both paths log what they dropped, since a preset or a
-queue disappearing silently leaves no thread back to why.
+So two kinds of field read leniently. Collections holding independent things, meaning
+layout presets, the working copies, and the signal pool, drop the entries that don't
+parse and keep the rest. Optional fields holding a single remembered thing, meaning each
+window's shape, the last track, and the queue, read as `None` on their own instead of
+taking the file down around them.
+
+Which of the two a field gets is decided by the data rather than by preference. A queue's
+`cursor` is an index into its `entries`, so dropping one bad entry shifts every index
+after it and the app resumes on the wrong track. A partial queue is worse than no queue,
+so that one fails whole or not at all. A list of presets has no such coupling between its
+entries, so losing one costs exactly that one. Both paths log what they dropped, because
+a preset or a queue that vanishes silently leaves nobody a thread back to why.
 
 Trade: five files can disagree by one edit after a crash, and a file that fails to parse
 outright still resets to its defaults rather than falling back to a stale copy elsewhere.

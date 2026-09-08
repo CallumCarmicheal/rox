@@ -14,6 +14,7 @@
 mod backdrop_visual;
 mod bake;
 mod bake_dialog;
+mod bookmark_dialog;
 mod composite;
 mod console_window;
 mod convert;
@@ -241,6 +242,8 @@ fn install_openers() {
         convert_available: convert::available,
         playlist_create: playlist_create::open,
         playlist_rename: playlist_create::open_rename,
+        bookmark_new: bookmark_dialog::open_new,
+        bookmark_edit: bookmark_dialog::open_edit,
         smart_playlist: smart_playlist::open,
         eq_window: eq_window::open,
         stats_window: stats_window::open,
@@ -414,6 +417,7 @@ fn main() {
         tags::repair::init(cx);
         smart_playlist::init(cx);
         playlist_create::init(cx);
+        bookmark_dialog::init(cx);
         bake_dialog::init(cx);
         convert_dialog::init(cx);
         lyrics::edit::init(cx);

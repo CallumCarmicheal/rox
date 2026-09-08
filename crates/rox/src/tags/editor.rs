@@ -7,7 +7,9 @@
 //! write anything. Table mode swaps the form for one row of cells per
 //! track, where the per-track fields a batch form has to lock stay
 //! editable and tab steps through the grid. The name fields suggest the
-//! library's own values as they're typed. Baselines come off each file
+//! library's own values as they're typed, and a mixed row unfolds a
+//! find and replace over its files, literal or regex, previewed before
+//! it lands in the cells. Baselines come off each file
 //! through the writer's read,
 //! the metadata panel's convention, so every save diffs per file against
 //! what that file actually has and commits through the atomic layer.
@@ -20,9 +22,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    actions, div, prelude::*, px, size, svg, App, Bounds, Context, Div, Entity, FocusHandle,
-    Focusable as _, Global, KeyBinding, MouseButton, ScrollHandle, SharedString, Stateful,
-    Subscription, WeakEntity, Window, WindowHandle,
+    actions, div, prelude::*, px, size, svg, App, Bounds, ClickEvent, Context, Div, ElementId,
+    Entity, FocusHandle, Focusable as _, Global, KeyBinding, MouseButton, MouseDownEvent,
+    ScrollHandle, SharedString, Stateful, Subscription, WeakEntity, Window, WindowHandle,
 };
 use gpui_component::input::{Enter, Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
@@ -37,6 +39,7 @@ use rox_library::writer::{self, Change, Edit, Field, UnknownValue};
 
 use crate::matching::{open_or_focus, WindowRegistry};
 use crate::tags::guess;
+use crate::tags::replace;
 use rox_core::settings::{rating_style, RatingStyle, Settings};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
@@ -643,6 +646,56 @@ fn rating_field(input: &Entity<InputState>, cx: &App) -> Div {
     })
 }
 
+/// A row's arm toggle in the clear-all chip's language: muted until it's
+/// on, accent while it is, one click each way.
+fn arm_chip(
+    id: impl Into<ElementId>,
+    on: bool,
+    label: SharedString,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .px(tokens::SPACE_XS)
+        .py(px(1.))
+        .rounded(tokens::RADIUS)
+        .text_xs()
+        .cursor_pointer()
+        .map(|d| {
+            if on {
+                d.text_color(palette::accent())
+            } else {
+                d.text_color(palette::text_muted())
+                    .hover(|d| d.text_color(palette::text()))
+            }
+        })
+        .child(label)
+        .on_click(on_click)
+}
+
+/// A labelled tick box on one row, the sort-names toggle's face; the
+/// whole row takes the click.
+fn switch_row(
+    id: &'static str,
+    on: bool,
+    label: SharedString,
+    on_mouse_down: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .flex_none()
+        .items_center()
+        .gap(tokens::SPACE_XS)
+        .text_xs()
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, on_mouse_down)
+        .child(settings_ui::checkbox(on))
+        .child(div().text_color(palette::text_muted()).child(label))
+}
+
 actions!(tag_editor, [FieldTab, FieldTabPrev, Save]);
 
 /// The key context the window root's own bindings scope to.
@@ -810,6 +863,10 @@ struct AdditionalRow {
     files: usize,
     /// Armed to remove the key from every carrier on save.
     removed: bool,
+    /// Whether the carriers disagreed at the last fill, the same note
+    /// the form's `mixed` keeps per field: the row's way into the
+    /// replace panel shows only where there's a split to resolve.
+    mixed: bool,
 }
 
 impl AdditionalRow {
@@ -837,6 +894,16 @@ enum TagCell {
     /// for a file that doesn't carry the key. Read-only either way:
     /// bytes never edited in the form and a column doesn't change that.
     Fixed(SharedString),
+}
+
+/// What the replace panel rewrites: one of [`FIELDS`] by index, or one
+/// of the additional rows by its place in the section's list. Rows are
+/// only ever appended there, so a place stays good while the panel is
+/// open.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReplaceTarget {
+    Field(usize),
+    Tag(usize),
 }
 
 pub struct TagEditor {
@@ -903,6 +970,16 @@ pub struct TagEditor {
     /// The guess pattern's input, remembered across editors through the
     /// settings file, since one library tends to one naming scheme.
     pattern: Entity<InputState>,
+    /// The replace panel's target, opened from a mixed row and drawn
+    /// under it; None while the panel is closed.
+    replace: Option<ReplaceTarget>,
+    /// The rule's two boxes, fresh on every editor, and its two
+    /// switches, remembered through the settings file: whether a
+    /// library's rules are regexes is a habit, what they say is not.
+    find: Entity<InputState>,
+    replacement: Entity<InputState>,
+    replace_regex: bool,
+    replace_ignore_case: bool,
     /// The tags no field addresses, editable under their own fold.
     /// None until the reads come in; a file whose tag read failed
     /// only costs its own rows, never the form.
@@ -1089,6 +1166,23 @@ impl TagEditor {
             .filter(|key| opt_in_column(key))
             .collect();
         let sort_fields = saved.as_ref().is_some_and(|s| s.sort_fields);
+        // The replace rule's boxes; enter in either applies it rather
+        // than saving, for the guess pattern's reason.
+        let find = cx.new(|cx| InputState::new(window, cx));
+        let replacement = cx.new(|cx| InputState::new(window, cx));
+        for input in [&find, &replacement] {
+            _input_events.push(cx.subscribe_in(
+                input,
+                window,
+                |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.apply_replace(window, cx),
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
+                },
+            ));
+        }
+        let replace_regex = saved.as_ref().is_some_and(|s| s.replace_regex);
+        let replace_ignore_case = saved.as_ref().is_some_and(|s| s.replace_ignore_case);
         let this = TagEditor {
             library: state.library,
             tracks,
@@ -1108,6 +1202,11 @@ impl TagEditor {
             sort_fields,
             guess: false,
             pattern,
+            replace: None,
+            find,
+            replacement,
+            replace_regex,
+            replace_ignore_case,
             additional: None,
             additional_baselines: Vec::new(),
             additional_open: false,
@@ -1255,6 +1354,7 @@ impl TagEditor {
                 binary: None,
                 files: additional.files,
                 removed: false,
+                mixed: false,
             });
         }
         self.additional_open = true;
@@ -1322,6 +1422,7 @@ impl TagEditor {
         shown.sort();
         let pattern = self.pattern.read(cx).value().to_string();
         let sort_fields = self.sort_fields;
+        let (replace_regex, replace_ignore_case) = (self.replace_regex, self.replace_ignore_case);
         Settings::update(move |s| {
             let state = s.windows.tag_editor.get_or_insert_with(Default::default);
             state.width = frame.size.width.into();
@@ -1352,6 +1453,8 @@ impl TagEditor {
             state.shown = shown;
             state.sort_fields = sort_fields;
             state.pattern = pattern;
+            state.replace_regex = replace_regex;
+            state.replace_ignore_case = replace_ignore_case;
         });
     }
 
@@ -1756,6 +1859,7 @@ impl TagEditor {
             });
             if let Some(row) = self.additional.as_mut().and_then(|a| a.rows.get_mut(ix)) {
                 row.initial = value;
+                row.mixed = mixed;
             }
         }
     }
@@ -1793,6 +1897,324 @@ impl TagEditor {
             window.focus(&self.pattern.read(cx).focus_handle(cx));
         }
         cx.notify();
+    }
+
+    /// Unfold the replace panel under a row, or fold it away when it's
+    /// already there; opening moves focus to the find box.
+    fn toggle_replace(
+        &mut self,
+        target: ReplaceTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.replace == Some(target) {
+            self.replace = None;
+        } else {
+            self.replace = Some(target);
+            window.focus(&self.find.read(cx).focus_handle(cx));
+        }
+        cx.notify();
+    }
+
+    fn close_replace(&mut self, cx: &mut Context<Self>) {
+        self.replace = None;
+        cx.notify();
+    }
+
+    fn toggle_replace_regex(&mut self, cx: &mut Context<Self>) {
+        self.replace_regex = !self.replace_regex;
+        cx.notify();
+    }
+
+    fn toggle_replace_ignore_case(&mut self, cx: &mut Context<Self>) {
+        self.replace_ignore_case = !self.replace_ignore_case;
+        cx.notify();
+    }
+
+    /// Every track's value under the target as the editor holds it now,
+    /// parallel to `tracks`: the table's cell once the grid exists, the
+    /// file's own baseline before that. A track the target has nothing
+    /// for reads empty, and the rule leaves an empty value alone.
+    fn replace_values(&self, target: ReplaceTarget, cx: &App) -> Vec<String> {
+        match target {
+            ReplaceTarget::Field(i) => match &self.cells {
+                Some(cells) => cells
+                    .iter()
+                    .map(|row| row[i].read(cx).value().to_string())
+                    .collect(),
+                None => self
+                    .baselines
+                    .iter()
+                    .flatten()
+                    .map(|baseline| baseline_value(baseline, &FIELDS[i].0).to_owned())
+                    .collect(),
+            },
+            ReplaceTarget::Tag(ix) => {
+                let Some(key) = self
+                    .additional
+                    .as_ref()
+                    .and_then(|a| a.rows.get(ix))
+                    .map(|row| row.key.clone())
+                else {
+                    return Vec::new();
+                };
+                match &self.tag_cells {
+                    Some(cells) => cells
+                        .iter()
+                        .map(|row| match row.get(ix) {
+                            Some(TagCell::Edit(cell)) => cell.read(cx).value().to_string(),
+                            _ => String::new(),
+                        })
+                        .collect(),
+                    None => self
+                        .additional_baselines
+                        .iter()
+                        .map(|baseline| tag_baseline_value(baseline.as_ref(), &key))
+                        .collect(),
+                }
+            }
+        }
+    }
+
+    /// The rule as the panel's boxes and switches spell it, or what's
+    /// wrong with it.
+    fn replace_rule(&self, cx: &App) -> Result<Option<replace::Rule>, String> {
+        replace::compile(
+            &self.find.read(cx).value(),
+            &self.replacement.read(cx).value(),
+            self.replace_regex,
+            self.replace_ignore_case,
+        )
+    }
+
+    /// Run the rule over the target's values and write the results into
+    /// the per-track cells, where the guesser's apply also lands: the
+    /// values arm like typing, so nothing touches disk until save, and
+    /// the seeds stay put, so a replaced value reads as the user's own
+    /// edit and never reseeds away. The form stays up and re-reads
+    /// itself from the cells afterwards, the same re-read leaving the
+    /// table does, so a row the rule brought into agreement shows its
+    /// one value and the panel's preview goes quiet under it.
+    fn apply_replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.saving || self.baselines.is_none() {
+            return;
+        }
+        let Some(target) = self.replace else {
+            return;
+        };
+        let Ok(Some(rule)) = self.replace_rule(cx) else {
+            return;
+        };
+        // The cells hold the truth from here, so any form drift folds
+        // into them first and the rule reads what it folded.
+        self.seed_cells(window, cx);
+        let changes: Vec<(usize, String)> = self
+            .replace_values(target, cx)
+            .iter()
+            .enumerate()
+            .filter_map(|(t, before)| rule.apply(before).map(|after| (t, after)))
+            .collect();
+        match target {
+            ReplaceTarget::Field(i) => {
+                let Some(cells) = self.cells.clone() else {
+                    return;
+                };
+                for (t, after) in changes {
+                    cells[t][i].update(cx, |cell, cx| cell.set_value(after, window, cx));
+                }
+            }
+            ReplaceTarget::Tag(ix) => {
+                let Some(cells) = self.tag_cells.clone() else {
+                    return;
+                };
+                for (t, after) in changes {
+                    if let Some(TagCell::Edit(cell)) = cells[t].get(ix) {
+                        cell.update(cx, |cell, cx| cell.set_value(after, window, cx));
+                    }
+                }
+            }
+        }
+        if !self.table {
+            self.refill_form(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The replace panel, unfolded under the row it's on: a rule over
+    /// that field or tag with a live before-and-after of every value it
+    /// changes, so the rule's reach is visible before anything applies.
+    /// Only the values that change list, as they are and as they'd be,
+    /// in a box that scrolls past a screenful; the status counts them
+    /// against the selection. The row above already names the field,
+    /// so the panel doesn't.
+    fn replace_panel(&self, target: ReplaceTarget, cx: &mut Context<Self>) -> Div {
+        let values = self.replace_values(target, cx);
+        let rule = self.replace_rule(cx);
+        let mut rows: Vec<(&str, String)> = Vec::new();
+        let error = match &rule {
+            Ok(Some(rule)) => {
+                for before in &values {
+                    if let Some(after) = rule.apply(before) {
+                        rows.push((before, after));
+                    }
+                }
+                None
+            }
+            Ok(None) => None,
+            Err(e) => Some(SharedString::from(e.clone())),
+        };
+        let hits = rows.len();
+        let status: SharedString = match error {
+            Some(e) => e,
+            None => rox_i18n::t!(
+                "tags-editor-replace-match-count",
+                hits = hits as u64,
+                total = values.len() as u64
+            ),
+        };
+        let preview = rows
+            .into_iter()
+            .map(|(before, after)| {
+                // A rule that eats the whole value empties the tag on
+                // save; the row says so the way the form shows an empty
+                // per-track field.
+                let (after, color) = if after.is_empty() {
+                    ("-".to_owned(), palette::text_faint())
+                } else {
+                    (after, palette::text_bright())
+                };
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(tokens::SPACE_MD)
+                    .py(px(1.))
+                    .text_xs()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(palette::text_muted())
+                            .child(SharedString::from(before.to_owned())),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(palette::text_faint())
+                            .child("→"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(color)
+                            .child(SharedString::from(after)),
+                    )
+            })
+            .collect::<Vec<_>>();
+        let inert = self.saving || self.baselines.is_none();
+        let label = |text: SharedString| {
+            div()
+                .w(px(84.))
+                .flex_none()
+                .text_color(palette::text_muted())
+                .child(text)
+        };
+        // Enter in either box applies the rule, which the boxes' own
+        // subscriptions do; it stops short of the window root's save,
+        // since the preview is right there and a save would close the
+        // window out from under it.
+        let boxed = |input: &Entity<InputState>| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .on_action(|_: &Save, _, cx: &mut App| cx.stop_propagation())
+                .child(Input::new(input).small())
+        };
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .gap(tokens::SPACE_XS)
+            .p(tokens::SPACE_SM)
+            .my(tokens::SPACE_XS)
+            .border_1()
+            .border_color(palette::border())
+            .rounded(tokens::RADIUS)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(tokens::SPACE_SM)
+                    .child(label(rox_i18n::t!("tags-editor-replace-find")))
+                    .child(boxed(&self.find))
+                    .child(switch_row(
+                        "replace-regex",
+                        self.replace_regex,
+                        rox_i18n::t!("tags-editor-replace-regex"),
+                        cx.listener(|this, _, _, cx| this.toggle_replace_regex(cx)),
+                    ))
+                    .child(switch_row(
+                        "replace-ignore-case",
+                        self.replace_ignore_case,
+                        rox_i18n::t!("tags-editor-replace-ignore-case"),
+                        cx.listener(|this, _, _, cx| this.toggle_replace_ignore_case(cx)),
+                    ))
+                    .child(
+                        div()
+                            .id("replace-close")
+                            .flex_none()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| this.close_replace(cx)))
+                            .child(
+                                svg()
+                                    .path(icons::CLOSE)
+                                    .size(px(12.))
+                                    .text_color(palette::text_muted()),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(tokens::SPACE_SM)
+                    .child(label(rox_i18n::t!("tags-editor-replace-with")))
+                    .child(boxed(&self.replacement))
+                    .child(settings_ui::small_button(
+                        rox_i18n::t!("tags-editor-replace-apply"),
+                        icons::ARROW_DOWN,
+                        inert || hits == 0,
+                        cx.listener(|this, _, window, cx| this.apply_replace(window, cx)),
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(palette::text_muted())
+                    .child(rox_i18n::t!("tags-editor-replace-help")),
+            )
+            .when(hits > 0, |d| {
+                d.child(
+                    div()
+                        .id("replace-preview")
+                        .max_h(px(200.))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .children(preview),
+                )
+            })
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(palette::text_muted())
+                    .child(status),
+            )
     }
 
     /// Write the pattern's matches into the editor: per-track values go
@@ -2514,8 +2936,24 @@ impl TagEditor {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.toggle_remove_additional(i, cx)
                             })),
-                    ),
+                    )
+                    // A split text value can run a find and replace
+                    // over its carriers, like a mixed field's row.
+                    .when(row.mixed && row.input.is_some() && !removed, |d| {
+                        d.child(arm_chip(
+                            ("replace-tag", i),
+                            self.replace == Some(ReplaceTarget::Tag(i)),
+                            rox_i18n::t!("tags-editor-replace"),
+                            cx.listener(move |this, _, window, cx| {
+                                this.toggle_replace(ReplaceTarget::Tag(i), window, cx)
+                            }),
+                        ))
+                    }),
             );
+            // The panel unfolds under its row here too.
+            if self.replace == Some(ReplaceTarget::Tag(i)) {
+                body = body.child(self.replace_panel(ReplaceTarget::Tag(i), cx));
+            }
         }
         // Under the table the page never scrolls, so a long list caps
         // and scrolls itself; the form page already scrolls whole.
@@ -2827,14 +3265,21 @@ impl TagEditor {
         let label_w = px(label_column_w(&shown));
         let rows = shown.iter().copied().map(|i| {
             let (field_def, label, per_track) = &FIELDS[i];
+            let target = ReplaceTarget::Field(i);
+            let mixed = self.mixed.get(i).copied().unwrap_or(false);
             // A mixed batch field can be wiped across every file: its
             // box is empty over the placeholder, so typing can only add
             // a value, never say "clear it everywhere". The toggle does.
-            let clearable = !single && !per_track && self.mixed.get(i).copied().unwrap_or(false);
+            let clearable = !single && !per_track && mixed;
             let cleared = self.cleared.get(i).copied().unwrap_or(false);
+            // Any mixed row can run a find and replace over its files,
+            // per-track or not: a batch of titles split by a junk
+            // suffix is the case the panel is for.
+            let replaceable = !single && mixed;
+            let replacing = self.replace == Some(target);
             let field: gpui::AnyElement = if *per_track && !single {
                 let value = self.inputs[i].read(cx).value();
-                let (text, faded) = if self.mixed.get(i).copied().unwrap_or(false) {
+                let (text, faded) = if mixed {
                     (rox_i18n::t!("tags-editor-multiple-values"), true)
                 } else if value.is_empty() {
                     (SharedString::from("-"), true)
@@ -2843,6 +3288,19 @@ impl TagEditor {
                 };
                 div()
                     .when(faded, |d| d.text_color(palette::text_muted()))
+                    // The mixed note itself is the way in: it's the
+                    // thing the eye lands on, and there's no box to
+                    // click into on a per-track row.
+                    .when(mixed, |d| {
+                        d.cursor_pointer()
+                            .hover(|d| d.text_color(palette::text()))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, window, cx| {
+                                    this.toggle_replace(ReplaceTarget::Field(i), window, cx)
+                                }),
+                            )
+                    })
                     .child(text)
                     .into_any_element()
             } else if *field_def == Field::Rating && rating_style() == RatingStyle::Stars {
@@ -2876,7 +3334,7 @@ impl TagEditor {
                     .child(Input::new(&self.inputs[i]).small().disabled(self.saving))
                     .into_any_element()
             };
-            div()
+            let row = div()
                 .flex()
                 .flex_row()
                 .items_center()
@@ -2924,6 +3382,28 @@ impl TagEditor {
                             })),
                     )
                 })
+                .when(replaceable, |d| {
+                    d.child(arm_chip(
+                        ("replace-field", i),
+                        replacing,
+                        rox_i18n::t!("tags-editor-replace"),
+                        cx.listener(move |this, _, window, cx| {
+                            this.toggle_replace(ReplaceTarget::Field(i), window, cx)
+                        }),
+                    ))
+                });
+            // The panel unfolds right under the row it's on, so what
+            // it's replacing in is the label to its upper left.
+            if replacing {
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(row)
+                    .child(self.replace_panel(target, cx))
+                    .into_any_element()
+            } else {
+                row.into_any_element()
+            }
         });
         div().flex().flex_col().gap(px(2.)).children(rows)
     }
@@ -3377,6 +3857,7 @@ fn build_additional(
                     binary: Some(size.into()),
                     files,
                     removed: false,
+                    mixed: false,
                 };
             }
             let (value, placeholder) = if agreed {
@@ -3399,6 +3880,7 @@ fn build_additional(
                 binary: None,
                 files,
                 removed: false,
+                mixed: !agreed,
             }
         })
         .collect::<Vec<_>>();

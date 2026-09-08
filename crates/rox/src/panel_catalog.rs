@@ -24,6 +24,7 @@ use rox_panel_api::panel::AppState;
 use rox_panels::art::{ArtConfig, ArtPanel};
 use rox_panels::artist_grid::{ArtistGridConfig, ArtistGridPanel};
 use rox_panels::biography::{BiographyConfig, BiographyPanel};
+use rox_panels::bookmarks::{BookmarksConfig, BookmarksPanel};
 use rox_panels::cover::{CoverArtPanel, CoverConfig};
 use rox_panels::drag_anchor::{DragAnchorConfig, DragAnchorPanel};
 use rox_panels::eq_widget::{EqWidgetConfig, EqWidgetPanel};
@@ -222,6 +223,17 @@ pub(crate) static CATALOGUE: PanelSection =
                 build: |state, _, window, cx| {
                     Arc::new(cx.new(|cx| {
                         HistoryPanel::new(state.clone(), HistoryConfig::default(), window, cx)
+                    }))
+                },
+            },
+            PanelDef {
+                label: "panel-catalog-bookmarks",
+                name: "bookmarks",
+                icon: icons::BOOKMARK,
+                placement: PanelPlacement::Center,
+                build: |state, _, _, cx| {
+                    Arc::new(cx.new(|cx| {
+                        BookmarksPanel::new(state.clone(), BookmarksConfig::default(), cx)
                     }))
                 },
             },
