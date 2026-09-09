@@ -247,16 +247,27 @@ pub struct MilkdropConfig {
     /// while the pointer is on the panel, so the menu isn't the only way
     /// to move.
     pub show_controls: bool,
-    /// Whether stopping fades the visual out or cuts it. Two fields
-    /// rather than one, so turning the fade off and back on returns the
-    /// duration that was picked instead of making the user find it again.
-    /// Zero seconds still reads as a cut, which is what a layout saved
-    /// before this switch existed has.
+    /// What losing the audio does to the picture. Off is hold: a pause
+    /// and a stop both freeze the frame where it was, and play picks
+    /// straight back up from there. On is fade: the visual goes down to
+    /// the panel background over `fade_secs` and comes back the same way.
+    /// Two fields rather than one, so switching the fade off and back on
+    /// returns the duration that was picked instead of making the user
+    /// find it again.
     pub fade: bool,
-    /// Seconds the visual takes to fade to the panel background when
-    /// playback stops, and to come back when it starts again. Zero cuts
-    /// straight to the background with no fade at all.
+    /// Seconds the visual takes to fade to the panel background when the
+    /// audio pauses or stops, and to come back when it starts again. Zero
+    /// cuts straight to the background with no fade at all. Only read
+    /// with `fade` on.
     pub fade_secs: f32,
+    /// Keep the worker running while the panel has focus, whatever the
+    /// audio is doing. Only offered with `fade` off, since a held frame is
+    /// what leaves somebody sitting on the panel picking presets in
+    /// silence with nothing moving. Off by default because focus is
+    /// sticky: the dock hands it to the active tab and any click on the
+    /// panel takes it, so with this always on a paused track under a
+    /// focused panel kept cycling for people who never meant it to.
+    pub run_focused: bool,
     /// How far the frame's hues turn toward the playing track's cover, 0
     /// for none and 1 for every hue landing on the cover's. On by default
     /// at a strength that reads as the visual agreeing with the album
@@ -296,8 +307,9 @@ impl Default for MilkdropConfig {
             show_preset_name: true,
             name_always: false,
             show_controls: true,
-            fade: true,
+            fade: false,
             fade_secs: 1.0,
+            run_focused: false,
             tint_strength: TINT_DEFAULT,
             rotation_folder: None,
             favorites_only: false,
@@ -499,9 +511,13 @@ pub struct MilkdropPanel {
     banner: Option<(String, Instant)>,
     /// A preset projectM refused, shown until the next one lands.
     failed: Option<String>,
-    /// Whether the worker is parked. Set once the fade-out has finished
-    /// with the panel unfocused, cleared on play.
+    /// Whether the worker is parked. Set at the bottom of a fade-out or
+    /// on the first frame of a hold, cleared on play.
     parked: bool,
+    /// Whether the worker has run for this panel yet. A hold with nothing
+    /// ever rendered would pin an empty texture at full opacity, so until
+    /// the first run a hold reads as a cut.
+    held: bool,
     /// The fade between the visual and the panel background. Driven by the
     /// play state, and the clock the park waits on.
     fade: Fade,
@@ -554,8 +570,9 @@ impl MilkdropPanel {
             banner: None,
             failed: None,
             parked: false,
+            held: false,
             // Settled and fully visible. The panel comes up drawing, and
-            // the first render with nothing playing starts the fade out.
+            // the first render with nothing playing takes it down.
             fade: Fade::default(),
             // Untinted, so the first frame with a cover up eases in
             // rather than opening on a colour.
@@ -887,38 +904,42 @@ impl MilkdropPanel {
         self.fade.retarget(to, duration);
     }
 
-    /// Follow the audio: run while it plays, hold the last frame while
-    /// it's paused, fade out when it's stopped. The panel's own focus is
-    /// the override throughout, since somebody sitting on the panel
-    /// picking presets in silence is using it and wants to see it move.
+    /// Follow the audio. Playing runs the worker; a pause or a stop either
+    /// holds the last frame or fades the visual out, whichever the config
+    /// says, and parks the worker under it. The two mean different things
+    /// to look at: a held frame reads as the track waiting, a fade reads
+    /// as the panel letting go, so it's the user's pick rather than a rule
+    /// about pause versus stop.
     ///
-    /// Pause and stop part ways here because they mean different things to
-    /// look at. A paused track is still the track: freezing on the frame
-    /// it stopped at reads as held, and picks straight back up from there.
-    /// A stopped queue is nothing, so it goes.
+    /// A held frame costs nothing to keep. The texture holding the last
+    /// render is the panel's own until it's released or the window closes,
+    /// so every frame after the park samples what's already up there, with
+    /// no render, no readback and no upload. On the fade path the fade is
+    /// the park timer rather than a second clock beside it. A parked
+    /// worker publishes no frames, so pausing on the event would freeze
+    /// the picture the fade is meant to be taking away; the pause goes out
+    /// at the bottom of the fade, when there's nothing left on screen to
+    /// hold still.
     ///
-    /// The frozen frame costs nothing to keep. The worker parks on the
-    /// pause, and the texture holding the last render is the panel's own
-    /// until it's released or the window closes, so every frame after the
-    /// park is a sample of what's already up there: no render, no
-    /// readback, no upload.
-    ///
-    /// On the stop path the fade is the park timer rather than a second
-    /// clock beside it. A parked worker publishes no frames, so pausing on
-    /// the stop event would freeze the picture the fade is meant to be
-    /// taking away; the pause goes out at the bottom of the fade, when
-    /// there's nothing left on screen to hold still.
+    /// With `run_focused` on, a held panel's own focus keeps it running,
+    /// since somebody sitting on the panel picking presets in silence is
+    /// using it and wants to see it move. It's a switch because focus is
+    /// sticky: the dock focuses the active tab and a click anywhere on the
+    /// panel takes focus, so a panel stays focused long after anyone last
+    /// used it, and a paused track with the visual still cycling under it
+    /// reads as the pause not having taken.
     fn park_or_resume(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.engine.is_none() {
             return;
         }
-        let player = self.state.player.read(cx);
-        let playing = player.is_playing();
-        // A session that has played its queue out is stopped, not paused:
-        // the engine keeps it alive at the end so Play can revive it, so
-        // the session alone doesn't answer this.
-        let paused = !playing && player.is_active() && !player.queue_ended();
-        if playing || self.focus.is_focused(window) {
+        let playing = self.state.player.read(cx).is_playing();
+        let hold = !self.config.fade;
+        // Focus only stands in for the audio where the frame would
+        // otherwise sit still under somebody using the panel; a fading
+        // panel follows the audio alone.
+        let focused = hold && self.config.run_focused && self.focus.is_focused(window);
+        if playing || focused {
+            self.held = true;
             self.fade_to(1.0);
             if self.parked {
                 self.parked = false;
@@ -926,7 +947,9 @@ impl MilkdropPanel {
             }
             return;
         }
-        if paused {
+        // Never having run is the one hold that isn't: there's no frame
+        // to keep, and an empty texture at full opacity is a black panel.
+        if hold && self.held {
             self.fade_to(1.0);
             if !self.parked {
                 self.parked = true;
@@ -1775,6 +1798,19 @@ impl MilkdropPanel {
             cx,
         );
 
+        let idle = panel::choices_shared(
+            &[
+                (rox_i18n::t!("milkdrop-idle-hold"), false),
+                (rox_i18n::t!("milkdrop-idle-fade"), true),
+            ],
+            config.fade,
+            |this: &mut Self, fade, cx| {
+                this.config.fade = fade;
+                cx.notify();
+            },
+            cx,
+        );
+
         // Seconds, snapped to a tenth so the readout holds still under a
         // drag and a typed value comes back unchanged.
         let fade = panel::value_slider_edit(
@@ -1845,20 +1881,15 @@ impl MilkdropPanel {
                     },
                 )
                 .child(setting_row(
-                    rox_i18n::t!("milkdrop-fade"),
-                    Some(rox_i18n::t!("milkdrop-fade.description")),
-                    toggle(
-                        config.fade,
-                        |this: &mut Self, on, cx| {
-                            this.config.fade = on;
-                            cx.notify();
-                        },
-                        cx,
-                    ),
+                    rox_i18n::t!("milkdrop-idle"),
+                    Some(rox_i18n::t!("milkdrop-idle.description")),
+                    idle,
                 ))
                 // The duration is only a question once there's a fade to
-                // time, so it isn't asked otherwise. Dimming it in place
-                // would leave a slider that still drags.
+                // time, and focus only stands in for the audio on a held
+                // frame, so each is asked only where it does something.
+                // Dimming either in place would leave a control that
+                // still moves.
                 .when(config.fade, |page| {
                     page.child(setting_row(
                         rox_i18n::t!("milkdrop-fade-duration"),
@@ -1866,9 +1897,23 @@ impl MilkdropPanel {
                         fade,
                     ))
                 })
+                .when(!config.fade, |page| {
+                    page.child(setting_row(
+                        rox_i18n::t!("milkdrop-run-focused"),
+                        Some(rox_i18n::t!("milkdrop-run-focused.description")),
+                        toggle(
+                            config.run_focused,
+                            |this: &mut Self, on, cx| {
+                                this.config.run_focused = on;
+                                cx.notify();
+                            },
+                            cx,
+                        ),
+                    ))
+                })
                 .child(setting_row(
                     rox_i18n::t!("milkdrop-show-name"),
-                    None,
+                    Some(rox_i18n::t!("milkdrop-show-name.description")),
                     toggle(
                         config.show_preset_name,
                         |this: &mut Self, on, cx| {
@@ -1884,7 +1929,7 @@ impl MilkdropPanel {
                 .when(config.show_preset_name, |page| {
                     page.child(setting_row(
                         rox_i18n::t!("milkdrop-name-always"),
-                        None,
+                        Some(rox_i18n::t!("milkdrop-name-always.description")),
                         toggle(
                             config.name_always,
                             |this: &mut Self, on, cx| {
@@ -2386,8 +2431,9 @@ mod tests {
             show_preset_name: false,
             name_always: true,
             show_controls: false,
-            fade: false,
+            fade: true,
             fade_secs: 2.5,
+            run_focused: true,
             tint_strength: 0.6,
             rotation_folder: Some("cream/Fractal".to_string()),
             favorites_only: true,
@@ -2421,8 +2467,9 @@ mod tests {
         assert!(!read.show_preset_name);
         assert!(read.name_always);
         assert!(!read.show_controls);
-        assert!(!read.fade);
+        assert!(read.fade);
         assert_eq!(read.fade_secs, 2.5);
+        assert!(read.run_focused);
         assert_eq!(read.tint_strength, 0.6);
         assert_eq!(read.rotation_folder, config.rotation_folder);
         assert!(read.favorites_only);
@@ -2537,9 +2584,9 @@ mod tests {
     }
 
     /// The switch and the duration are two fields, so a layout saved
-    /// before the switch existed keeps its duration and comes back
-    /// fading. Somebody who had saved a zero duration to mean "no fade"
-    /// still gets a cut, since a zero-length fade is already over.
+    /// before the switch existed comes back on the default, holding, and
+    /// still has its duration waiting for the day the fade is switched
+    /// on.
     #[test]
     fn a_dump_without_the_fade_switch_keeps_its_duration() {
         let mut dumped = serde_json::to_value(tuned()).expect("dump");
@@ -2547,7 +2594,7 @@ mod tests {
         object.remove("fade").expect("the switch was written");
 
         let read: MilkdropConfig = serde_json::from_value(dumped).expect("read back");
-        assert!(read.fade);
+        assert!(!read.fade);
         assert_eq!(read.fade_secs, 2.5);
     }
 

@@ -77,10 +77,10 @@ use rox_services::player::Player;
 const MIN_SIDE: u32 = 128;
 const MAX_SIDE: u32 = 4096;
 
-/// How long the visual takes to come up when playback starts and to go away
-/// when it stops. Fixed rather than exposed: the panel offers a fade slider
-/// because the panel is the thing you're looking at, and a backdrop that
-/// takes its own sweet time reads as a bug.
+/// How long the visual takes to come up and go away under hold, where the
+/// only transitions are the switch and the first play: the play-state fade
+/// under the fade setting runs on the config's own time. Fixed because a
+/// backdrop that takes its own sweet time to appear reads as a bug.
 const FADE: Duration = Duration::from_millis(700);
 
 /// How long a window's stated size counts after its last paint. A window
@@ -164,6 +164,18 @@ struct Pane {
     size: (u32, u32),
     at: Instant,
     fade: Fade,
+    /// How long this pane's fade runs: the config's under fade, [`FADE`]
+    /// under hold. Kept here so the lit test reads the same clock the
+    /// paint retargeted with.
+    duration: Duration,
+    /// Whether this window's player was playing at the last paint. What
+    /// the worker's park keys on under hold, where a lit window isn't a
+    /// reason to render.
+    playing: bool,
+    /// Whether this window has ever seen its player play. Under hold a
+    /// pane that never has holds nothing, so it stays dark rather than
+    /// pinning an empty texture over the cover at full strength.
+    held: bool,
 }
 
 impl Pane {
@@ -171,8 +183,12 @@ impl Pane {
     /// included. A dark pane costs the engine nothing and doesn't count
     /// toward the shared render size.
     fn lit(&self, now: Instant) -> bool {
-        (self.fade.to > 0.0 || self.fade.running(FADE))
-            && now.duration_since(self.at) < WINDOW_STALE
+        (self.fade.to > 0.0 || self.fade.running(self.duration)) && self.fresh(now)
+    }
+
+    /// Whether this window painted recently enough to have a say.
+    fn fresh(&self, now: Instant) -> bool {
+        now.duration_since(self.at) < WINDOW_STALE
     }
 }
 
@@ -390,6 +406,15 @@ impl Visual {
     /// picture in another.
     fn any_lit(&self, now: Instant) -> bool {
         self.panes.values().any(|pane| pane.lit(now))
+    }
+
+    /// Whether any window's player is playing. Under hold this is what the
+    /// park waits for instead: every window stays lit with its held frame,
+    /// and the worker only needs to run while one of them has audio.
+    fn any_playing(&self, now: Instant) -> bool {
+        self.panes
+            .values()
+            .any(|pane| pane.playing && pane.fresh(now))
     }
 
     /// The sizes the lit windows want, folded to the per-axis maximum.
@@ -653,25 +678,39 @@ fn paint(bounds: gpui::Bounds<gpui::Pixels>, window: &mut Window, cx: &mut App, 
         window.scale_factor(),
         config.scale,
     );
+    // Hold or fade is the config's call, the same switch the panel has.
+    // Under hold the pane stays lit through a pause or a stop with the
+    // frame it had, once it has ever had one; under fade it follows the
+    // audio down and back on the config's own clock.
+    let hold = !config.fade;
+    let duration = if hold {
+        FADE
+    } else {
+        Duration::from_secs_f32(
+            config
+                .fade_secs
+                .clamp(0.0, settings::BACKDROP_VISUAL_FADE_MAX),
+        )
+    };
     let pane = visual.panes.entry(id).or_insert_with(|| Pane {
         size: wants,
         at: now,
         // Dark and settled: a window that opens mid-track fades its visual
         // in rather than snapping it on.
         fade: Fade::settled(0.0),
+        duration,
+        playing: false,
+        held: false,
     });
     pane.size = wants;
     pane.at = now;
-    pane.fade.retarget(
-        if config.enabled && allowed && playing {
-            1.0
-        } else {
-            0.0
-        },
-        FADE,
-    );
-    let opacity = pane.fade.opacity(FADE);
-    let running = pane.fade.running(FADE);
+    pane.duration = duration;
+    pane.playing = playing;
+    pane.held |= playing;
+    let lit = config.enabled && allowed && (playing || (hold && pane.held));
+    pane.fade.retarget(if lit { 1.0 } else { 0.0 }, duration);
+    let opacity = pane.fade.opacity(duration);
+    let running = pane.fade.running(duration);
 
     // The worker takes commands while parked, and the Appearance page can
     // send it one with nothing playing. Its answer has to be read even
@@ -755,10 +794,22 @@ fn paint(bounds: gpui::Bounds<gpui::Pixels>, window: &mut Window, cx: &mut App, 
             start(visual, player, size, cx);
         }
     }
-    if visual.parked {
+    // Under fade, being here means something is still on screen and the
+    // worker has to feed it, fade-out included: parking early would
+    // freeze the picture the fade is taking away. Under hold the screen
+    // stays lit with a still frame, so the worker only runs while some
+    // window's player has audio, and the frame it left is what every
+    // window keeps sampling.
+    let awake = !hold || visual.any_playing(now);
+    if awake && visual.parked {
         visual.parked = false;
         if let Some(engine) = visual.engine.as_ref() {
             engine.send(Command::Resume);
+        }
+    } else if !awake && !visual.parked && visual.engine.is_some() {
+        visual.parked = true;
+        if let Some(engine) = visual.engine.as_ref() {
+            engine.send(Command::Pause);
         }
     }
     let Some(engine) = visual.engine.clone() else {
@@ -858,11 +909,18 @@ fn paint(bounds: gpui::Bounds<gpui::Pixels>, window: &mut Window, cx: &mut App, 
         cover,
     )
     .write(&mut signals);
+    // A held frame over a parked worker has nothing new coming: the next
+    // paint is the play flip's or a settings write's to ask for, and both
+    // wake every window. Asking every frame would spin the paint on a
+    // still texture for as long as the music sits paused.
+    let still = visual.parked && !running && visual.pending.is_none();
     // Everything this layer owns has been read; the record and the frame
     // request below don't need it, so the lock goes back first.
     drop(guard);
     window.paint_screen_shader(bounds, shader, INSTANCE, signals, meta);
-    window.request_animation_frame();
+    if !still {
+        window.request_animation_frame();
+    }
 }
 
 /// Give a window its texture back. Only that window's own registry can free
@@ -1054,6 +1112,9 @@ mod tests {
             size,
             at: now,
             fade: Fade::settled(1.0),
+            duration: FADE,
+            playing: true,
+            held: true,
         }
     }
 
@@ -1086,6 +1147,9 @@ mod tests {
                 size: (3840, 2160),
                 at: now,
                 fade: Fade::settled(0.0),
+                duration: FADE,
+                playing: false,
+                held: false,
             },
         );
         // The settings window sitting there faded out doesn't get to ask
@@ -1095,5 +1159,23 @@ mod tests {
         visual.panes.get_mut(&1).expect("inserted").fade = Fade::settled(0.0);
         assert!(!visual.any_lit(now));
         assert_eq!(visual.wanted_size(now), None);
+    }
+
+    #[test]
+    fn under_hold_the_park_waits_on_audio_rather_than_light() {
+        let now = Instant::now();
+        let mut visual = Visual::default();
+        visual.panes.insert(1, lit_pane((1920, 1080), now));
+        assert!(visual.any_playing(now));
+        // The window's player pausing leaves its frame lit and held, and
+        // that alone is no reason to keep rendering.
+        visual.panes.get_mut(&1).expect("inserted").playing = false;
+        assert!(visual.any_lit(now));
+        assert!(!visual.any_playing(now));
+        // A window that stopped painting stops counting here too.
+        visual
+            .panes
+            .insert(2, lit_pane((800, 600), now - WINDOW_STALE * 2));
+        assert!(!visual.any_playing(now));
     }
 }

@@ -423,6 +423,7 @@ struct SettingsWindow {
     backdrop_visual_duration_scrub: ScrubState,
     backdrop_visual_fps_scrub: ScrubState,
     backdrop_visual_sensitivity_scrub: ScrubState,
+    backdrop_visual_fade_scrub: ScrubState,
     backdrop_visual_persist_gen: u64,
     /// The app font size's working copy: what the Typography slider shows
     /// and writes through [`palette::set_app_font_size`].
@@ -1220,6 +1221,7 @@ impl SettingsWindow {
             backdrop_visual_duration_scrub: ScrubState::default(),
             backdrop_visual_fps_scrub: ScrubState::default(),
             backdrop_visual_sensitivity_scrub: ScrubState::default(),
+            backdrop_visual_fade_scrub: ScrubState::default(),
             backdrop_visual_persist_gen: 0,
             font_size: settings.app_font_size,
             frame: appearance_frame,
@@ -1839,6 +1841,18 @@ impl SettingsWindow {
         let mut config = settings::backdrop_visual();
         config.hard_cuts = on;
         self.backdrop_visual_switched(config, cx);
+    }
+
+    fn set_backdrop_visual_fade(&mut self, fade: bool, cx: &mut Context<Self>) {
+        let mut config = settings::backdrop_visual();
+        config.fade = fade;
+        self.backdrop_visual_switched(config, cx);
+    }
+
+    fn set_backdrop_visual_fade_secs(&mut self, seconds: f32, cx: &mut Context<Self>) {
+        let mut config = settings::backdrop_visual();
+        config.fade_secs = seconds;
+        self.backdrop_visual_edited(config, cx);
     }
 
     fn set_backdrop_visual_fps(&mut self, fps: f32, cx: &mut Context<Self>) {
@@ -2683,6 +2697,38 @@ impl SettingsWindow {
                             cx,
                         ),
                     )
+                    // Hold or fade with the audio gone, the panel's switch
+                    // with the panel's option labels. The fade time is only
+                    // a question once there's a fade to time.
+                    .keyed(
+                        "settings-appearance-milkdrop-idle",
+                        &["milkdrop", "pause", "stop", "hold", "fade", "freeze"],
+                        panel::choices_shared(
+                            &[
+                                (rox_i18n::t!("milkdrop-idle-hold"), false),
+                                (rox_i18n::t!("milkdrop-idle-fade"), true),
+                            ],
+                            config.fade,
+                            Self::set_backdrop_visual_fade,
+                            cx,
+                        ),
+                    )
+                    .when(config.fade, |rows| {
+                        rows.keyed(
+                            "settings-appearance-milkdrop-fade-duration",
+                            &["milkdrop", "fade", "seconds", "pause", "stop"],
+                            settings_ui::scalar(
+                                &self.backdrop_visual_fade_scrub,
+                                &self.value_edit,
+                                config.fade_secs,
+                                settings_ui::span(0.0, settings::BACKDROP_VISUAL_FADE_MAX, " s")
+                                    .decimals(1)
+                                    .hard(),
+                                Self::set_backdrop_visual_fade_secs,
+                                cx,
+                            ),
+                        )
+                    })
                     .keyed(
                         "settings-appearance-milkdrop-color",
                         &["milkdrop", "light", "dark", "theme", "palette", "invert"],

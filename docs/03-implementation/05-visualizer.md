@@ -263,12 +263,20 @@ the top. The three window calls it relies on (`register_dynamic_texture`,
 `update_user_texture`, `release_user_texture`) are the `z4-dynamic-user-textures.patch`
 addition to the vendored gpui, on both the blade and DirectX backends.
 
-**Parking.** A paused track is still the track, so the panel sends `Command::Pause` and
-keeps the last frame up: the worker stops rendering and reading back, and every UI frame
-after that samples a texture that's already there. A stopped queue fades to black first
-and parks at the bottom of the fade, since a parked worker publishes nothing and pausing
-on the stop event would freeze the picture the fade is taking away. Play, or focus on
-the panel, sends `Resume`.
+**Parking.** What a pause or a stop does to the picture is the config's `fade` switch,
+hold by default in the panel. Under hold the panel sends `Command::Pause` and keeps the
+last frame up: the worker stops rendering and reading back, and every UI frame after that
+samples a texture that's already there. Under fade the visual goes down to the panel
+background first and parks at the bottom of the fade, since a parked worker publishes
+nothing and pausing on the event would freeze the picture the fade is taking away. A
+panel that has never run holds nothing, so a hold before the first play reads as a cut.
+Play sends `Resume`. Under hold, the `run_focused` switch, off by default, lets the
+panel's own focus keep the worker running so presets can be browsed in silence. It's
+opt-in because focus is sticky (the dock focuses the active tab, any click on the panel
+takes it), and a paused track with the visual still cycling under it reads as the pause
+not having taken. The backdrop carries the same hold-or-fade switch on the Appearance
+page, fade by default, and parks on whether any window's player is playing rather than on
+focus, which it hasn't got.
 
 **Presets on disk.** `settings::milkdrop_dir()` is `data_dir()/milkdrop`, with
 `presets/` and `textures/` under it, plus any extra roots from the config. Nothing

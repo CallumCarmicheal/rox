@@ -2045,6 +2045,15 @@ pub struct BackdropVisualConfig {
     /// How the frame's colours meet the theme. The look's.
     #[serde(skip)]
     pub color: MilkdropColor,
+    /// What losing the audio does to the picture. On is fade, the default
+    /// here: the visual goes down to the cover backdrop over `fade_secs`
+    /// on a pause or a stop and comes back on play. Off is hold, the
+    /// panel's default: the last frame stays up behind the app and the
+    /// worker sleeps under it.
+    pub fade: bool,
+    /// Seconds the fade takes, out on a pause or stop and back in on
+    /// play. Only read with `fade` on.
+    pub fade_secs: f32,
     /// The preset the backdrop is on, restored on the next start. Written
     /// on a pick from the Appearance page and, while the lock is on, on
     /// every switch; an unlocked backdrop changes preset every half
@@ -2111,6 +2120,13 @@ pub const BACKDROP_VISUAL_STRENGTH: f32 = 0.35;
 /// The render scale a fresh install runs at. See [`BackdropVisualConfig::scale`].
 pub const BACKDROP_VISUAL_SCALE: f32 = 0.5;
 
+/// How long the backdrop's fade runs on a fresh install. Short, because a
+/// backdrop that takes its own sweet time reads as a bug; the slider is
+/// there for anyone who wants it slower.
+pub const BACKDROP_VISUAL_FADE_SECS: f32 = 0.7;
+/// The longest fade the Appearance page offers, the panel's ceiling too.
+pub const BACKDROP_VISUAL_FADE_MAX: f32 = 5.0;
+
 /// The frame rate a fresh install runs the backdrop at. The panel defaults
 /// to sixty because someone is watching it; the backdrop runs the whole
 /// time the app plays, so it starts at the rate that reads as motion for
@@ -2139,6 +2155,8 @@ impl Default for BackdropVisualConfig {
             locked: true,
             duration_secs: BACKDROP_VISUAL_DURATION,
             color: MilkdropColor::default(),
+            fade: true,
+            fade_secs: BACKDROP_VISUAL_FADE_SECS,
             preset: None,
         }
     }
@@ -2193,6 +2211,13 @@ impl BackdropVisualConfig {
             self.beat_sensitivity.clamp(0.0, 5.0)
         } else {
             1.0
+        };
+        // The fade goes straight into a Duration, which panics on a
+        // negative or a NaN.
+        self.fade_secs = if self.fade_secs.is_finite() {
+            self.fade_secs.clamp(0.0, BACKDROP_VISUAL_FADE_MAX)
+        } else {
+            BACKDROP_VISUAL_FADE_SECS
         };
         // A zero here is a worker that never renders, and the file from
         // before the field reads as zero too.
