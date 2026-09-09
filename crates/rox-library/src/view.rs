@@ -25,9 +25,11 @@ const PAR_CHUNK: usize = 64 * 1024;
 /// One display row of a track list: a track from the projection, or a line
 /// of the group header opening the artist/album run that follows it.
 /// Headers open whatever runs the current order holds: the canonical
-/// order's groups, or the runs a column sort leaves adjacent. Search hits
-/// render flat. Headers share the same index space as tracks, so a
-/// virtualized table scrolls them like any row. A table draws
+/// order's groups, or the runs a column sort leaves adjacent. A searched
+/// subset may be grouped too; its caller supplies the pre-sort needed to
+/// make the intended runs contiguous, or passes no grouping for a flat
+/// result. Headers share the same index space as tracks, so a virtualized
+/// table scrolls them like any row. A table draws
 /// every row one fixed height, so a header block is one row per composed
 /// line, each drawing its own piece list.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -84,8 +86,9 @@ impl Group {
 pub struct Grouping<'a> {
     /// How many header rows open each run, one per composed line.
     pub head_rows: u8,
-    /// The re-sort a grouping needs before its runs are contiguous; None
-    /// keeps the canonical order.
+    /// The re-sort a grouping needs before its runs are contiguous. None
+    /// keeps the input order; callers grouping a searched subset must name
+    /// the sort that restores the runs they intend to label.
     pub pre_sort: Option<SortKey>,
     /// The group key a row belongs to. Rows sharing a key and sitting next
     /// to each other are one run.
@@ -105,17 +108,19 @@ pub struct ViewSpec<'a> {
     pub similar: Option<(&'a HashMap<i64, f32>, bool)>,
     /// The column sort, when one is set.
     pub sort: Option<(SortKey, bool)>,
-    /// The grouping to lay headers out under. A sorted view groups the runs
-    /// the sort leaves adjacent; a search renders flat however this is set.
+    /// The grouping to lay headers out under. An explicit column sort
+    /// groups the runs that sort leaves adjacent; without one, `pre_sort`
+    /// can first restore contiguous runs for a searched or canonical view.
+    /// Callers that want a flat search pass None while the query is active.
     pub grouping: Option<Grouping<'a>>,
 }
 
 /// The rows a view shows: the canonical order or search hits, narrowed by
 /// the structured filter, put through the active sort when one is set.
-/// Grouping headers open the runs of whichever order shows: the canonical
-/// groups unsorted, or the runs a column sort leaves adjacent (an album
-/// scanned in one go stays together under the added sort, and keeps its
-/// header). Search hits render flat.
+/// Grouping headers open the runs of whichever order shows. With no
+/// explicit column sort, the grouping may pre-sort that subset so its keys
+/// are contiguous; with a column sort, headers follow the adjacent runs that
+/// sort leaves behind. A caller that wants flat search hits passes no grouping.
 pub fn view_for(
     projection: &Projection,
     order: Arc<Vec<u32>>,
@@ -183,8 +188,12 @@ pub fn view_for(
                 // recurring later just opens a fresh group. Loners go
                 // bare: a run of one is no series, and a sort that
                 // scatters every group reads as the flat list it is.
-                Some(grouping) if spec.query.is_empty() => {
-                    let (rows, groups) = group_rows(&sorted, projection, grouping, false);
+                Some(grouping) => {
+                    // A searched result still names its group even when only
+                    // one matching track survives the filter. Outside search,
+                    // preserve the sorted view's old "loners go bare" rule.
+                    let solo_heads = !spec.query.is_empty();
+                    let (rows, groups) = group_rows(&sorted, projection, grouping, solo_heads);
                     (Arc::new(rows), groups)
                 }
                 _ => (
@@ -200,9 +209,7 @@ pub fn view_for(
             }
         }
         None => match &spec.grouping {
-            // A query breaks the runs the headers name, so hits render flat
-            // whatever grouping the caller asked for.
-            Some(grouping) if spec.query.is_empty() => {
+            Some(grouping) => {
                 // Genre and year runs aren't contiguous in the canonical
                 // order; re-sort by the group field, canonical inside.
                 let base = match grouping.pre_sort {
@@ -525,10 +532,11 @@ mod tests {
         }
     }
 
-    /// Grouping off or a search renders flat: hits are no run the headers
-    /// could name.
+    /// Search grouping is caller-controlled: asking for grouping keeps a
+    /// singleton hit under its header, while passing None keeps the legacy
+    /// flat result.
     #[test]
-    fn a_searched_view_renders_flat() {
+    fn a_searched_view_groups_only_when_requested() {
         let p = projection(&[
             track("/m/one.flac", "A", "One", 0, 1, 0, "flac", 900, 44100, 16),
             track("/m/two.flac", "B", "Two", 0, 1, 0, "flac", 900, 44100, 16),
@@ -553,9 +561,44 @@ mod tests {
             sort: None,
             grouping: Some(grouping(1)),
         };
-        let (rows, groups) = view_for(&p, order, &searched);
+        let (rows, groups) = view_for(&p, order.clone(), &searched);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0], Row::Head(0, 0)));
+        assert!(matches!(rows[1], Row::Track(_)));
+
+        let flat = ViewSpec {
+            grouping: None,
+            ..searched
+        };
+        let (rows, groups) = view_for(&p, order, &flat);
         assert!(groups.is_empty());
         assert_eq!(rows.len(), 1);
+    }
+
+    /// A searched view with an explicit column sort still keeps the lone
+    /// matching run's header. The sort owns row order in this branch, so the
+    /// grouping pre-sort is deliberately irrelevant.
+    #[test]
+    fn a_sorted_search_keeps_a_singleton_header() {
+        let p = projection(&[
+            track("/m/a.flac", "A", "One", 0, 1, 0, "flac", 900, 44100, 16),
+            track("/m/b.flac", "B", "Two", 0, 1, 0, "flac", 900, 44100, 16),
+        ]);
+        let order = Arc::new(p.sort_canonical());
+        let filter = FilterSet::default();
+        let spec = ViewSpec {
+            query: "a.flac",
+            filter: &filter,
+            similar: None,
+            sort: Some((SortKey::Title, false)),
+            grouping: Some(grouping(1)),
+        };
+        let (rows, groups) = view_for(&p, order, &spec);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0], Row::Head(0, 0)));
+        assert!(matches!(rows[1], Row::Track(_)));
     }
 
     /// The similarity sort beats the column sort, and anything unscored

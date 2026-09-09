@@ -3,16 +3,17 @@
 //! folder strings, never a scan of the filesystem. The shared prefix
 //! above the music (the mount point, the home dir) collapses away, so the
 //! top nodes are the folders where the library actually starts. Expanding
-//! a folder shows its subfolders and then its songs; a double click plays
-//! from there, and the right-click menu has the track actions every
-//! song surface shares plus the folder-scope filter, which narrows the
-//! shared query to the folder's whole subtree with a single pick. The
-//! active query narrows the tree too (the shared one by default, the
-//! panel's own box or the app-wide selection per config), and folders left
-//! with no matching songs drop out.
+//! a folder shows its subfolders and then its songs; CUE-backed images stay
+//! one physical-file row with their logical subsongs nested underneath. A
+//! double click plays from there, and the right-click menu has the track
+//! actions every song surface shares plus the folder-scope filter, which
+//! narrows the shared query to the folder's whole subtree with a single
+//! pick. The active query narrows the tree too (the shared one by default,
+//! the panel's own box or the app-wide selection per config), and folders
+//! left with no matching songs drop out.
 
 use std::collections::{HashMap, HashSet};
-use std::path::MAIN_SEPARATOR;
+use std::path::{PathBuf, MAIN_SEPARATOR};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -95,7 +96,7 @@ pub enum FilterEffect {
 /// The folder tree panel's per-view config: what a saved layout restores.
 /// The shared chrome plus the cover-art and filter knobs; the folder scope
 /// is app state, transient like the rest of the filter, and the expand
-/// state is per-session.
+/// state is saved with the layout.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FolderTreeConfig {
@@ -126,6 +127,11 @@ pub struct FolderTreeConfig {
     /// roots. Paths a rescan no longer knows just sit inert in the set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expanded: Vec<String>,
+    /// The CUE backing images left open when the layout was saved. Full
+    /// paths keep equal filenames in different folders distinct; this is
+    /// separate from `expanded` because an image is not a directory branch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expanded_cues: Vec<PathBuf>,
 }
 
 impl Default for FolderTreeConfig {
@@ -145,14 +151,25 @@ impl Default for FolderTreeConfig {
             query_source: QuerySource::default(),
             query: String::new(),
             expanded: Vec::new(),
+            expanded_cues: Vec::new(),
         }
     }
 }
 
-/// What one visible row stands for: a folder of the tree, or one of a
-/// folder's songs.
+/// A directory, a CUE image, or a playable logical track.
 #[derive(Clone)]
 enum RowKind {
+    /// One physical audio image claimed by a CUE sheet. The row itself is
+    /// structural; `ids` are the playable logical tracks nested beneath it.
+    Cue {
+        /// Full backing-file path, also the expansion-state key.
+        path: PathBuf,
+        expanded: bool,
+        /// Drawn faint only when every currently listed child is dimmed.
+        dimmed: bool,
+        /// Child library ids in the same subsong order the tree presents.
+        ids: Vec<i64>,
+    },
     Folder {
         path: String,
         count: u32,
@@ -183,6 +200,139 @@ struct Row {
     kind: RowKind,
 }
 
+/// One projection row with the path/subsong identity resolved once per
+/// flatten through the panel's shared key cache.
+struct SongRow {
+    row: u32,
+    id: i64,
+    title: SharedString,
+    key: Option<TrackKey>,
+}
+
+/// One first-level file entry in a folder. Plain files contain one song;
+/// CUE images contain every logical subsong that shares the same full path.
+struct SongGroup {
+    /// Physical filename shown at the folder level.
+    label: SharedString,
+    /// Full backing path for a CUE image; None for an ordinary file.
+    cue: Option<PathBuf>,
+    /// Playable rows, ordered by CUE subsong number for an image.
+    songs: Vec<SongRow>,
+}
+
+/// Turn projection rows into physical-file groups before the tree is
+/// flattened. CUE tracks group by full backing path regardless of scan order;
+/// ordinary files stay one row each. Groups sort naturally by filename while
+/// children sort by the stable `TrackKey.sub` number from the sheet.
+fn group_songs(songs: Vec<SongRow>) -> Vec<SongGroup> {
+    let mut groups: Vec<SongGroup> = Vec::new();
+    let mut images: HashMap<PathBuf, usize> = HashMap::new();
+    for song in songs {
+        let label = song
+            .key
+            .as_ref()
+            .and_then(|key| key.path.file_name())
+            .map(|name| SharedString::from(name.to_string_lossy().into_owned()))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| song.title.clone());
+        let cue = song
+            .key
+            .as_ref()
+            .filter(|key| key.sub > 0)
+            .map(|key| key.path.clone());
+        if let Some(path) = &cue {
+            if let Some(&ix) = images.get(path) {
+                groups[ix].songs.push(song);
+                continue;
+            }
+            images.insert(path.clone(), groups.len());
+        }
+        groups.push(SongGroup {
+            label,
+            cue,
+            songs: vec![song],
+        });
+    }
+    for group in &mut groups {
+        group
+            .songs
+            .sort_by_key(|song| song.key.as_ref().map_or(0, |key| key.sub));
+    }
+    // Cache the folded filename once; stable ties retain the ordinary-file order.
+    let mut groups: Vec<_> = groups
+        .into_iter()
+        .map(|group| (group.label.to_lowercase(), group))
+        .collect();
+    groups.sort_by(|(a, _), (b, _)| natural_cmp(a, b));
+    groups.into_iter().map(|(_, group)| group).collect()
+}
+
+/// Open the structural CUE image that owns `key`, if `key` is a subsong.
+/// Plain files deliberately leave the expansion set untouched.
+fn reveal_cue(expanded: &mut HashSet<PathBuf>, key: &TrackKey) {
+    if key.sub > 0 {
+        expanded.insert(key.path.clone());
+    }
+}
+
+/// Append one folder's grouped file entries to the flattened visible tree.
+/// `pos` advances across children of collapsed CUE images too: playback uses
+/// positions in `folder_tracks`, not visible-row indices, so hiding children
+/// must never change where the following file starts in the queue.
+fn append_songs(
+    out: &mut Vec<Row>,
+    groups: &[SongGroup],
+    folder: &str,
+    depth: usize,
+    expanded_cues: &HashSet<PathBuf>,
+    dimmed: &HashSet<u32>,
+) {
+    let mut pos = 0;
+    for group in groups {
+        if let Some(path) = &group.cue {
+            let expanded = expanded_cues.contains(path);
+            out.push(Row {
+                label: group.label.clone(),
+                depth,
+                kind: RowKind::Cue {
+                    path: path.clone(),
+                    expanded,
+                    dimmed: group.songs.iter().all(|song| dimmed.contains(&song.row)),
+                    ids: group.songs.iter().map(|song| song.id).collect(),
+                },
+            });
+            if !expanded {
+                pos += group.songs.len();
+                continue;
+            }
+        }
+        for song in &group.songs {
+            let label = if group.cue.is_some() {
+                format!(
+                    "{:02}. {}",
+                    song.key.as_ref().map_or(0, |key| key.sub),
+                    song.title
+                )
+                .into()
+            } else {
+                group.label.clone()
+            };
+            out.push(Row {
+                label,
+                depth: depth + usize::from(group.cue.is_some()),
+                kind: RowKind::Track {
+                    row: song.row,
+                    id: song.id,
+                    folder: folder.to_owned(),
+                    pos,
+                    dimmed: dimmed.contains(&song.row),
+                },
+            });
+            pos += 1;
+        }
+    }
+}
+
 pub struct FolderTreePanel {
     state: AppState,
     config: FolderTreeConfig,
@@ -210,6 +360,8 @@ pub struct FolderTreePanel {
     /// The expanded folders by path. Kept across rescans; top-level nodes
     /// seed in expanded once.
     expanded: HashSet<String>,
+    /// CUE backing images currently unfolded, keyed by full physical path.
+    expanded_cues: HashSet<PathBuf>,
     seeded: bool,
     scroll: UniformListScrollHandle,
     /// The keyboard-and-click cursor, an index into `visible`: the lit
@@ -308,6 +460,7 @@ impl FolderTreePanel {
         // skip the root seeding, so the tree comes back as it was left.
         let expanded: HashSet<String> = config.expanded.iter().cloned().collect();
         let seeded = !expanded.is_empty();
+        let expanded_cues = config.expanded_cues.iter().cloned().collect();
         let focus = cx.focus_handle().tab_stop(true);
         // The phrase outlives its badge, so it needs an end: leaving the
         // panel drops it, which is also what hands tab back to traversal.
@@ -331,6 +484,7 @@ impl FolderTreePanel {
             dimmed_songs: HashSet::new(),
             visible: Vec::new(),
             expanded,
+            expanded_cues,
             seeded,
             scroll: UniformListScrollHandle::new(),
             cursor: None,
@@ -460,8 +614,9 @@ impl FolderTreePanel {
         self.flatten(cx);
     }
 
-    /// Reflatten the visible rows from the roots and the expand set:
-    /// subfolders first, then the folder's own songs. Folders with no
+    /// Reflatten the visible rows from the roots and the expand sets:
+    /// subfolders first, then each folder's physical files, with CUE subsongs
+    /// nested beneath their backing image. Folders with no
     /// context songs anywhere below stay out, so a search leaves only the
     /// branches that still hold matches.
     fn flatten(&mut self, cx: &mut Context<Self>) {
@@ -472,7 +627,11 @@ impl FolderTreePanel {
             /// Hide the folders a filter leaves with no match, or keep them
             /// faint.
             folder_hide: bool,
-            labels: HashMap<u32, (SharedString, i64)>,
+            /// Physical-file groups for each expanded folder, built once
+            /// before the recursive walk so it never resolves store keys.
+            groups: HashMap<String, Vec<SongGroup>>,
+            /// CUE-image fold state shared with the panel.
+            expanded_cues: &'a HashSet<PathBuf>,
             out: Vec<Row>,
         }
         impl Walk<'_> {
@@ -508,38 +667,32 @@ impl FolderTreePanel {
                 for child in &node.children {
                     self.folder(child, depth + 1);
                 }
-                let Some(tracks) = tracks else { return };
-                for (pos, &row) in tracks.iter().enumerate() {
-                    let Some((label, id)) = self.labels.get(&row) else {
-                        continue;
-                    };
-                    self.out.push(Row {
-                        label: label.clone(),
-                        depth: depth + 1,
-                        kind: RowKind::Track {
-                            row,
-                            id: *id,
-                            folder: node.path.clone(),
-                            pos,
-                            dimmed: self.dimmed_songs.contains(&row),
-                        },
-                    });
+                if let Some(groups) = self.groups.get(&node.path) {
+                    append_songs(
+                        &mut self.out,
+                        groups,
+                        &node.path,
+                        depth + 1,
+                        self.expanded_cues,
+                        self.dimmed_songs,
+                    );
                 }
             }
         }
         // The song rows in expanded folders, each with its db id and the
         // title we fall back to. Gathered under an immutable library borrow
         // before the path resolution below needs `&mut self`.
-        let songs: Vec<(u32, i64, SharedString)> = {
+        let songs: Vec<(String, u32, i64, SharedString)> = {
             let library = self.state.library.read(cx);
             match library.projection() {
                 Some(projection) => self
                     .folder_tracks
                     .iter()
                     .filter(|(path, _)| self.expanded.contains(*path))
-                    .flat_map(|(_, rows)| rows)
-                    .map(|&row| {
+                    .flat_map(|(folder, rows)| rows.iter().map(move |&row| (folder.clone(), row)))
+                    .map(|(folder, row)| {
                         (
+                            folder,
                             row,
                             projection.db_id[row as usize],
                             SharedString::from(projection.title.get(row as usize).to_string()),
@@ -549,54 +702,38 @@ impl FolderTreePanel {
                 None => Vec::new(),
             }
         };
-        // The label is the file's own name, so the tree matches the folder
-        // on disk; a row with no resolvable path or an all-extension name
-        // falls back to its title. The path resolves through the shared
-        // cache, so covers and drags reuse it.
-        let labels: HashMap<u32, (SharedString, i64)> = songs
+        let mut by_folder: HashMap<String, Vec<SongRow>> = HashMap::new();
+        for (folder, row, id, title) in songs {
+            let key = self.key_for(id, cx);
+            by_folder.entry(folder).or_default().push(SongRow {
+                row,
+                id,
+                title,
+                key,
+            });
+        }
+        let groups: HashMap<_, _> = by_folder
             .into_iter()
-            .map(|(row, id, title)| {
-                let label = self
-                    .key_for(id, cx)
-                    .as_ref()
-                    .and_then(|key| key.path.file_name())
-                    .map(|name| SharedString::from(name.to_string_lossy().into_owned()))
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or(title);
-                (row, (label, id))
-            })
+            .map(|(folder, songs)| (folder, group_songs(songs)))
             .collect();
-        // Order each expanded folder's songs by filename, so the tree reads
-        // top to bottom like the folder on disk and a track's `pos` (what a
-        // play-from-here counts against) matches what's shown. Collapsed
-        // folders keep their scan order; only the counts read them.
-        let expanded_paths: Vec<String> = self
-            .folder_tracks
-            .keys()
-            .filter(|path| self.expanded.contains(*path))
-            .cloned()
-            .collect();
-        // Lower each label once up front rather than per comparison: the sort
-        // touched to_lowercase O(n log n) times per expanded folder on every
-        // keystroke, allocating a fresh String each call.
-        let sort_keys: HashMap<u32, String> = labels
-            .iter()
-            .map(|(&row, (label, _))| (row, label.to_lowercase()))
-            .collect();
-        for path in expanded_paths {
-            if let Some(rows) = self.folder_tracks.get_mut(&path) {
-                rows.sort_by(|a, b| {
-                    let name = |row: &u32| sort_keys.get(row).map(String::as_str).unwrap_or("");
-                    natural_cmp(name(a), name(b))
-                });
-            }
+        // Playback positions include children of collapsed images as well.
+        // Group explicitly by path before ordering, independent of scan order.
+        for (folder, groups) in &groups {
+            self.folder_tracks.insert(
+                folder.clone(),
+                groups
+                    .iter()
+                    .flat_map(|group| group.songs.iter().map(|song| song.row))
+                    .collect(),
+            );
         }
         let mut walk = Walk {
             expanded: &self.expanded,
             folder_tracks: &self.folder_tracks,
             dimmed_songs: &self.dimmed_songs,
             folder_hide: self.config.folders == FilterEffect::Hide,
-            labels,
+            groups,
+            expanded_cues: &self.expanded_cues,
             out: Vec::new(),
         };
         for root in &self.roots {
@@ -676,6 +813,9 @@ impl FolderTreePanel {
                 .map(|(folder, _)| folder.clone())
         }?;
         self.expand_to(&folder);
+        if let Some(key) = self.key_for(id, cx) {
+            reveal_cue(&mut self.expanded_cues, &key);
+        }
         self.flatten(cx);
         self.visible
             .iter()
@@ -769,18 +909,20 @@ impl FolderTreePanel {
         cx.notify();
     }
 
-    /// Fold one folder row open or shut.
+    /// Fold a directory or CUE image open or shut.
     fn toggle_expand(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(Row {
-            kind: RowKind::Folder { path, .. },
-            ..
-        }) = self.visible.get(ix)
-        else {
-            return;
-        };
-        let path = path.clone();
-        if !self.expanded.remove(&path) {
-            self.expanded.insert(path);
+        match self.visible.get(ix).map(|row| &row.kind) {
+            Some(RowKind::Folder { path, .. }) => {
+                if !self.expanded.remove(path) {
+                    self.expanded.insert(path.clone());
+                }
+            }
+            Some(RowKind::Cue { path, .. }) => {
+                if !self.expanded_cues.remove(path) {
+                    self.expanded_cues.insert(path.clone());
+                }
+            }
+            _ => return,
         }
         self.flatten(cx);
     }
@@ -811,13 +953,14 @@ impl FolderTreePanel {
         self.flatten(cx);
     }
 
-    /// Fold every branch shut, leaving only the root rows. The follow glide
-    /// stops too: its target index just moved under it.
+    /// Fold every directory and CUE image shut, leaving only the root rows.
+    /// The follow glide stops too: its target index just moved under it.
     fn collapse_all(&mut self, cx: &mut Context<Self>) {
-        if self.expanded.is_empty() {
+        if self.expanded.is_empty() && self.expanded_cues.is_empty() {
             return;
         }
         self.expanded.clear();
+        self.expanded_cues.clear();
         self.glide_to = None;
         self.flatten(cx);
     }
@@ -1054,6 +1197,16 @@ impl FolderTreePanel {
             }
             "left" => {
                 let Some(ix) = self.cursor else { return };
+                if let Some(Row {
+                    kind: RowKind::Cue { expanded, .. },
+                    ..
+                }) = self.visible.get(ix)
+                {
+                    if *expanded {
+                        self.toggle_expand(ix, cx);
+                    }
+                    return;
+                }
                 let Some(Row {
                     kind: RowKind::Folder { path, expanded, .. },
                     ..
@@ -1074,6 +1227,16 @@ impl FolderTreePanel {
             }
             "right" => {
                 let Some(ix) = self.cursor else { return };
+                if let Some(Row {
+                    kind: RowKind::Cue { expanded, .. },
+                    ..
+                }) = self.visible.get(ix)
+                {
+                    if !*expanded {
+                        self.toggle_expand(ix, cx);
+                    }
+                    return;
+                }
                 let Some(Row {
                     kind: RowKind::Folder { path, expanded, .. },
                     ..
@@ -1094,7 +1257,7 @@ impl FolderTreePanel {
                 let Some(ix) = self.cursor else { return };
                 match self.visible.get(ix) {
                     Some(Row {
-                        kind: RowKind::Folder { .. },
+                        kind: RowKind::Folder { .. } | RowKind::Cue { .. },
                         ..
                     }) => self.toggle_expand(ix, cx),
                     Some(Row {
@@ -1316,7 +1479,9 @@ impl FolderTreePanel {
                 continue;
             };
             let dimmed = match &row.kind {
-                RowKind::Folder { dimmed, .. } | RowKind::Track { dimmed, .. } => *dimmed,
+                RowKind::Folder { dimmed, .. }
+                | RowKind::Cue { dimmed, .. }
+                | RowKind::Track { dimmed, .. } => *dimmed,
             };
             let row_song_id = match &row.kind {
                 RowKind::Track { id, .. } => Some(*id),
@@ -1357,6 +1522,50 @@ impl FolderTreePanel {
                     }),
                 );
             let built = match &row.kind {
+                RowKind::Cue { expanded, ids, .. } => {
+                    base.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            window.focus(&this.focus);
+                            this.cursor = Some(ix);
+                            // A double click's second press must not undo the first
+                            // toggle or start playback as a side effect of expanding.
+                            if event.click_count == 1 {
+                                this.toggle_expand(ix, cx);
+                            }
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(16.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                svg()
+                                    .path(if *expanded {
+                                        icons::CHEVRON_DOWN
+                                    } else {
+                                        icons::CHEVRON_RIGHT
+                                    })
+                                    .size(px(12.)),
+                            ),
+                    )
+                    .child(
+                        svg()
+                            .path(icons::MUSIC)
+                            .size(px(12.))
+                            .flex_none()
+                            .text_color(palette::text_muted()),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(row.label.clone()))
+                    .child(
+                        div().text_xs().text_color(palette::text_muted()).child(
+                            SharedString::from(rox_i18n::format::format_int(ids.len() as i64)),
+                        ),
+                    )
+                }
                 RowKind::Folder {
                     path,
                     count,
@@ -1836,6 +2045,8 @@ impl Panel for FolderTreePanel {
         let mut config = self.config.clone();
         config.expanded = self.expanded.iter().cloned().collect();
         config.expanded.sort_unstable();
+        config.expanded_cues = self.expanded_cues.iter().cloned().collect();
+        config.expanded_cues.sort_unstable();
         state.info = rox_dock::PanelInfo::panel(
             serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
         );
@@ -1897,7 +2108,7 @@ impl Panel for FolderTreePanel {
         let menu = menu.item(
             PopupMenuItem::new(rox_i18n::t!("folder-tree-collapse-all"))
                 .icon(Icon::default().path(icons::MINIMIZE))
-                .disabled(self.expanded.is_empty())
+                .disabled(self.expanded.is_empty() && self.expanded_cues.is_empty())
                 .on_click(move |_, _, cx| {
                     let Some(this) = weak.upgrade() else { return };
                     this.update(cx, |this, cx| this.collapse_all(cx));
@@ -2164,6 +2375,7 @@ impl FolderTreePanel {
                 return menu;
             };
             enum Target {
+                Cue { ids: Vec<i64> },
                 Folder { path: String, scoped: bool },
                 Track { id: i64, folder: String, pos: usize },
             }
@@ -2171,6 +2383,7 @@ impl FolderTreePanel {
                 let panel = this.read(cx);
                 panel.menu_row.and_then(|ix| {
                     panel.visible.get(ix).map(|row| match &row.kind {
+                        RowKind::Cue { ids, .. } => Target::Cue { ids: ids.clone() },
                         RowKind::Folder { path, .. } => Target::Folder {
                             scoped: panel
                                 .state
@@ -2196,6 +2409,17 @@ impl FolderTreePanel {
             };
             let state = this.read(cx).state.clone();
             let menu = match target {
+                Target::Cue { ids } => {
+                    let label = rox_i18n::t!("folder-tree-play-songs", count = ids.len() as u64)
+                        .to_string();
+                    let play_ids = ids.clone();
+                    let play_panel = weak.clone();
+                    panel::track_actions(menu, state, ids, label, window, cx, move |_, cx| {
+                        if let Some(this) = play_panel.upgrade() {
+                            this.update(cx, |this, cx| this.play_ids(&play_ids, cx));
+                        }
+                    })
+                }
                 Target::Folder { path, scoped } => {
                     let ids: Vec<i64> = {
                         let panel = this.read(cx);
@@ -2308,5 +2532,192 @@ impl FolderTreePanel {
                 this.dropdown_menu(menu.separator(), window, cx)
             })
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn song(row: u32, path: &str, sub: u16, title: &str) -> SongRow {
+        SongRow {
+            row,
+            id: i64::from(row),
+            title: title.to_owned().into(),
+            key: Some(TrackKey {
+                path: path.into(),
+                sub,
+            }),
+        }
+    }
+
+    fn rows(groups: &[SongGroup], expanded: &[&str], dimmed: &[u32]) -> Vec<Row> {
+        let mut out = Vec::new();
+        append_songs(
+            &mut out,
+            groups,
+            "Mixes",
+            1,
+            &expanded.iter().map(PathBuf::from).collect(),
+            &dimmed.iter().copied().collect(),
+        );
+        out
+    }
+
+    fn labels(rows: &[Row]) -> Vec<&str> {
+        rows.iter().map(|row| row.label.as_ref()).collect()
+    }
+
+    #[test]
+    fn ordinary_file_keeps_filename_and_identity() {
+        let groups = group_songs(vec![song(7, "ordinary-song.mp3", 0, "Title")]);
+        let out = rows(&groups, &[], &[]);
+        assert_eq!(labels(&out), ["ordinary-song.mp3"]);
+        assert!(matches!(
+            out[0].kind,
+            RowKind::Track {
+                row: 7,
+                id: 7,
+                pos: 0,
+                ..
+            }
+        ));
+        assert_eq!(out[0].depth, 1);
+    }
+
+    #[test]
+    fn cue_children_use_subsong_numbers_and_titles() {
+        let groups = group_songs(vec![
+            song(8, "mix.mp3", 4, "Four"),
+            song(3, "mix.mp3", 1, "One"),
+            song(6, "mix.mp3", 2, "Two"),
+        ]);
+        let collapsed = rows(&groups, &[], &[]);
+        assert_eq!(labels(&collapsed), ["mix.mp3"]);
+        assert!(
+            matches!(&collapsed[0].kind, RowKind::Cue { ids, expanded: false, .. } if ids == &[3, 6, 8])
+        );
+        let out = rows(&groups, &["mix.mp3"], &[]);
+        assert_eq!(labels(&out), ["mix.mp3", "01. One", "02. Two", "04. Four"]);
+        assert_eq!(out[3].depth, 2);
+        assert!(matches!(
+            out[3].kind,
+            RowKind::Track {
+                row: 8,
+                id: 8,
+                pos: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn mixed_images_group_independent_of_input_order_and_sort_naturally() {
+        let groups = group_songs(vec![
+            song(0, "mix10.flac", 4, "Ten four"),
+            song(1, "mix2.flac", 2, "Two two"),
+            song(2, "mix3.mp3", 0, "Ordinary"),
+            song(3, "mix10.flac", 1, "Ten one"),
+            song(4, "mix2.flac", 1, "Two one"),
+        ]);
+        assert_eq!(groups.len(), 3);
+        let out = rows(&groups, &["mix2.flac", "mix10.flac"], &[]);
+        assert_eq!(
+            labels(&out),
+            [
+                "mix2.flac",
+                "01. Two one",
+                "02. Two two",
+                "mix3.mp3",
+                "mix10.flac",
+                "01. Ten one",
+                "04. Ten four"
+            ]
+        );
+        let collapsed = rows(&groups, &[], &[]);
+        // Hidden children still occupy the existing folder playback list.
+        assert!(matches!(
+            collapsed[1].kind,
+            RowKind::Track { id: 2, pos: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn grouping_uses_full_path_and_keeps_plain_tracks_separate() {
+        let groups = group_songs(vec![
+            song(0, "a/mix.flac", 1, "A"),
+            song(1, "b/mix.flac", 1, "B"),
+            song(2, "a/mix.flac", 0, "Plain"),
+        ]);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups.iter().filter(|group| group.cue.is_some()).count(), 2);
+    }
+
+    #[test]
+    fn filter_keeps_parent_of_matching_child_and_dims_only_misses() {
+        // Recount applies Hide before flattening; one surviving child is
+        // still a CUE image, even when its siblings have been filtered out.
+        let hidden = group_songs(vec![song(4, "mix.flac", 4, "Match")]);
+        assert_eq!(
+            labels(&rows(&hidden, &["mix.flac"], &[])),
+            ["mix.flac", "04. Match"]
+        );
+        let groups = group_songs(vec![
+            song(1, "mix.flac", 1, "Miss"),
+            song(4, "mix.flac", 4, "Match"),
+        ]);
+        let out = rows(&groups, &["mix.flac"], &[1]);
+        assert!(matches!(out[0].kind, RowKind::Cue { dimmed: false, .. }));
+        assert!(matches!(out[1].kind, RowKind::Track { dimmed: true, .. }));
+        assert!(matches!(out[2].kind, RowKind::Track { dimmed: false, .. }));
+        assert!(matches!(
+            rows(&groups, &[], &[1, 4])[0].kind,
+            RowKind::Cue { dimmed: true, .. }
+        ));
+    }
+
+    #[test]
+    fn reveal_opens_the_playing_image_before_locating_its_child() {
+        let groups = group_songs(vec![song(4, "mix.flac", 4, "Playing")]);
+        let mut expanded = HashSet::new();
+        let mut out = Vec::new();
+        append_songs(&mut out, &groups, "Mixes", 1, &expanded, &HashSet::new());
+        assert_eq!(out.len(), 1);
+        reveal_cue(
+            &mut expanded,
+            &TrackKey {
+                path: "mix.flac".into(),
+                sub: 4,
+            },
+        );
+        out.clear();
+        append_songs(&mut out, &groups, "Mixes", 1, &expanded, &HashSet::new());
+        assert_eq!(
+            out.iter()
+                .position(|row| matches!(row.kind, RowKind::Track { id: 4, .. })),
+            Some(1)
+        );
+        reveal_cue(
+            &mut expanded,
+            &TrackKey {
+                path: "plain.mp3".into(),
+                sub: 0,
+            },
+        );
+        assert!(!expanded.contains(&PathBuf::from("plain.mp3")));
+    }
+
+    #[test]
+    fn cue_expansion_config_is_backward_compatible_and_round_trips() {
+        let old: FolderTreeConfig = serde_json::from_str(r#"{"expanded":["Mixes"]}"#).unwrap();
+        assert!(old.expanded_cues.is_empty());
+        let config = FolderTreeConfig {
+            expanded_cues: vec!["Mixes/mix.flac".into()],
+            ..old
+        };
+        let saved = serde_json::to_string(&config).unwrap();
+        let restored: FolderTreeConfig = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.expanded, ["Mixes"]);
+        assert_eq!(restored.expanded_cues, [PathBuf::from("Mixes/mix.flac")]);
     }
 }

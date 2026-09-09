@@ -95,6 +95,10 @@ struct ViewInputs {
     similar: Option<(Arc<HashMap<i64, f32>>, bool)>,
     sort: Option<(rox_library::projection::SortKey, bool)>,
     group_by: GroupBy,
+    /// Whether an active text search keeps the current group headers. When
+    /// off the view pass receives no grouping while queried, restoring the
+    /// legacy flat search result without changing unsearched grouping.
+    group_search_results: bool,
     /// How many header rows open each run, None while headers are off.
     head_rows: Option<u8>,
 }
@@ -114,12 +118,24 @@ fn compute_rows(inputs: &ViewInputs) -> (Arc<Vec<Row>>, Vec<Group>) {
             GroupBy::Year => projection.year[i] as u64,
         }
     };
-    let grouping = inputs.head_rows.map(|head_rows| Grouping {
-        head_rows,
-        pre_sort: group_by.sort(),
-        key: &key,
-        discs: group_by == GroupBy::Album,
-    });
+    let grouping = inputs
+        .head_rows
+        .filter(|_| inputs.query.is_empty() || inputs.group_search_results)
+        .map(|head_rows| Grouping {
+            head_rows,
+            // Search returns projection row order, not the canonical browse
+            // order. Put the grouping key back first so one album/artist/etc.
+            // cannot split into several headers merely because its matching
+            // rows were scanned apart. An explicit column sort ignores this
+            // pre-sort and keeps its existing adjacency semantics.
+            pre_sort: if inputs.query.is_empty() {
+                group_by.sort()
+            } else {
+                Some(group_by.search_sort())
+            },
+            key: &key,
+            discs: group_by == GroupBy::Album,
+        });
     view::view_for(
         &inputs.projection,
         inputs.order.clone(),
@@ -228,8 +244,9 @@ struct TrackTable {
     /// The owning panel, for dispatching context menu actions back to it.
     panel: WeakEntity<LibraryPanel>,
     /// Rows currently displayed: the canonical order or a column sort's,
-    /// broken by group headers over whatever runs are adjacent, or flat
-    /// search hits.
+    /// broken by group headers over whatever runs are adjacent. Search hits
+    /// keep those headers when `group_search_results` is on, or render flat
+    /// when it is off.
     view: Arc<Vec<Row>>,
     /// The current view's groups, what header rows index; empty when the
     /// view renders flat. Swapped together with `view`, always.
@@ -240,6 +257,10 @@ struct TrackTable {
     /// panel.
     headers: Headers,
     group_by: GroupBy,
+    /// Whether an active text search retains the current grouping. Copied
+    /// from the owning panel because the background view pass is built from
+    /// the delegate without touching the panel entity.
+    group_search_results: bool,
     /// The track rows' height at the stock font size, copied here
     /// because the header block math needs it beside the line height
     /// below, and the widget's size is held outside the delegate.
@@ -1186,6 +1207,7 @@ impl TrackTable {
                 .as_ref()
                 .and_then(|(key, desc)| sort_key(key).map(|key| (key, *desc))),
             group_by: self.group_by,
+            group_search_results: self.group_search_results,
             head_rows: (self.headers != Headers::Off).then(|| self.head_rows()),
         })
     }
@@ -1941,6 +1963,9 @@ pub struct LibraryPanel {
     /// (the row context menu builds mid-table-update).
     headers: Headers,
     group_by: GroupBy,
+    /// Keep group headers while a text search is active; panel-local so two
+    /// Library views can choose different search presentation.
+    group_search_results: bool,
     /// The keys of the currently shown columns, copied off the delegate
     /// whenever the set changes so the Columns dropdown builds its checks
     /// without reading the table entity (the row context menu builds
@@ -2103,6 +2128,7 @@ impl LibraryPanel {
             groups: Vec::new(),
             headers: config.headers,
             group_by: config.group_by,
+            group_search_results: config.group_search_results,
             row_height,
             row_spacing: fold_margin(config.row_spacing, ROW_SPACING_MAX),
             head_height,
@@ -2237,6 +2263,7 @@ impl LibraryPanel {
             head_text_scrub: ScrubState::default(),
             headers: config.headers,
             group_by: config.group_by,
+            group_search_results: config.group_search_results,
             columns_shown: HashSet::new(),
             similar_watch: (
                 crate::settings::acoustic_source().id().to_string(),
@@ -3016,6 +3043,7 @@ impl LibraryPanel {
             density: None,
             headers: self.headers,
             group_by: self.group_by,
+            group_search_results: self.group_search_results,
             column_layout: self.column_specs(cx),
             sort_key: sort.as_ref().map(|(key, _)| key.to_string()),
             sort_desc: sort.is_some_and(|(_, desc)| desc),
@@ -3764,6 +3792,22 @@ impl LibraryPanel {
         self.refresh_title_bar(cx);
     }
 
+    /// Choose whether a text search keeps the current group headers. The
+    /// toggle changes presentation only: search matching and the underlying
+    /// projection are untouched, and turning it off restores the legacy flat
+    /// search list.
+    fn set_group_search_results(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.group_search_results == on {
+            return;
+        }
+        self.group_search_results = on;
+        self.table.update(cx, |table, _| {
+            table.delegate_mut().group_search_results = on;
+        });
+        self.refresh_view(cx);
+        cx.notify();
+    }
+
     /// The Layout page: what the group headers are and how their lines
     /// compose. The look knobs (heights, gaps, art) stay on Appearance,
     /// the column checklist on View.
@@ -3907,6 +3951,20 @@ impl panel::PanelSettings for LibraryPanel {
                     |this: &mut Self, source, cx| this.pick_query_source(source, cx),
                     cx,
                 ))
+                // Grouped search only changes the header presentation; when
+                // headers are off there is nothing for the knob to affect, so
+                // keep the behavior page free of a dead control.
+                .when(self.headers != Headers::Off, |d| {
+                    d.child(panel::setting_row(
+                        rox_i18n::t!("library-group-search-results"),
+                        Some(rox_i18n::t!("library-group-search-results.description")),
+                        panel::toggle(
+                            self.group_search_results,
+                            |this: &mut Self, on, cx| this.set_group_search_results(on, cx),
+                            cx,
+                        ),
+                    ))
+                })
                 .child(panel::tracking_section(
                     self.follow_playing,
                     rox_i18n::t!("library-follow-description"),
@@ -5039,12 +5097,19 @@ mod tests {
                 filter: &inputs.filter,
                 similar: None,
                 sort: inputs.sort,
-                grouping: inputs.head_rows.map(|head_rows| Grouping {
-                    head_rows,
-                    pre_sort: None,
-                    key: &key,
-                    discs: true,
-                }),
+                grouping: inputs
+                    .head_rows
+                    .filter(|_| inputs.query.is_empty() || inputs.group_search_results)
+                    .map(|head_rows| Grouping {
+                        head_rows,
+                        pre_sort: if inputs.query.is_empty() {
+                            None
+                        } else {
+                            Some(GroupBy::Album.search_sort())
+                        },
+                        key: &key,
+                        discs: true,
+                    }),
             },
         )
     }
@@ -5058,8 +5123,62 @@ mod tests {
             similar: None,
             sort: None,
             group_by: GroupBy::Album,
+            group_search_results: true,
             head_rows,
         }
+    }
+
+    /// The panel setting changes only searched presentation: with it on a
+    /// singleton hit keeps its album header, while off the same query is the
+    /// legacy one-row flat list.
+    #[test]
+    fn search_grouping_setting_controls_headers() {
+        let p = projection(&[
+            track("/m/a1.flac", "A", "One", 1),
+            track("/m/a2.flac", "A", "One", 2),
+            track("/m/b1.flac", "B", "Two", 1),
+        ]);
+        let mut grouped = inputs(&p, "a1", Some(1));
+        grouped.group_search_results = true;
+        let (rows, groups) = compute_rows(&grouped);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0], Row::Head(0, 0)));
+        assert!(matches!(rows[1], Row::Track(_)));
+
+        let mut flat = inputs(&p, "a1", Some(1));
+        flat.group_search_results = false;
+        let (rows, groups) = compute_rows(&flat);
+        assert!(groups.is_empty());
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0], Row::Track(_)));
+    }
+
+    /// An album-name search starts from projection row order, but grouped
+    /// results restore canonical order before they build headers. Matching
+    /// tracks from one album therefore stay under one header and keep their
+    /// track-number order even when their database rows were inserted apart.
+    #[test]
+    fn grouped_album_search_restores_canonical_order() {
+        let p = projection(&[
+            track("/m/a2.flac", "A", "Taking You Higher", 2),
+            track("/m/other.flac", "B", "Another Album", 1),
+            track("/m/a1.flac", "A", "Taking You Higher", 1),
+        ]);
+        let grouped = inputs(&p, "Taking You Higher", Some(1));
+        let (rows, groups) = compute_rows(&grouped);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].tracks, 2);
+        assert!(matches!(rows.first(), Some(Row::Head(0, 0))));
+        let track_nos: Vec<u16> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Track(row) => Some(p.track_no[*row as usize]),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(track_nos, vec![1, 2]);
     }
 
     /// The pass hands back the same view off the UI thread as it did on
@@ -5075,9 +5194,17 @@ mod tests {
             track("/m/b2.flac", "B", "Two", 2),
             track("/m/c1.flac", "C", "Three", 1),
         ]);
-        for (query, head_rows) in [("", Some(2u8)), ("", None), ("b", Some(2u8))] {
-            let direct = view_directly(&inputs(&p, query, head_rows));
-            let sent = inputs(&p, query, head_rows);
+        for (query, head_rows, group_search_results) in [
+            ("", Some(2u8), true),
+            ("", None, true),
+            ("b", Some(2u8), true),
+            ("b", Some(2u8), false),
+        ] {
+            let mut direct_inputs = inputs(&p, query, head_rows);
+            direct_inputs.group_search_results = group_search_results;
+            let direct = view_directly(&direct_inputs);
+            let mut sent = inputs(&p, query, head_rows);
+            sent.group_search_results = group_search_results;
             let off_thread = std::thread::spawn(move || compute_rows(&sent))
                 .join()
                 .expect("the pass");
