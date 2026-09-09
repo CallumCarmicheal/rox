@@ -1,7 +1,7 @@
 //! Acoustic embeddings: one feature vector per track per model, and the
 //! nearest-neighbour query over them. What produces the vectors is the app's
-//! business (`rox/src/embeddings.rs` runs the DSP extractor); this module
-//! only stores them and answers "what sounds like this".
+//! business (`rox_acoustic` holds the extractors and the pass that runs
+//! them); this module only stores them and answers "what sounds like this".
 //!
 //! Rows are keyed by model name rather than a version number, so a library
 //! can hold two models' worth at once and switching between them costs
@@ -607,7 +607,8 @@ const QUANT_FLOOR: f32 = 1e-20;
 /// How far apart two tempos are, in octaves, folded so a track and its own
 /// double count as the same tempo. Zero for a match and for 70 against 140,
 /// a third for 140 against 175, a half at the furthest two tempos can be
-/// from each other, which is a tempo and one and a half times it.
+/// from each other, which is a tempo and the one half an octave above it
+/// (100 against 141).
 ///
 /// Folding is the whole point. Half time and double time are the same music
 /// counted differently, and something has to count: taggers disagree with each
@@ -1338,7 +1339,8 @@ mod tests {
         // would mix, a third of an octave apart.
         close(140.0, 175.0, 0.322);
         close(120.0, 128.0, 0.093);
-        // The furthest apart two tempos get, a tempo and half again.
+        // The furthest apart two tempos get is half an octave, at 141.4;
+        // past that the fold brings them back together.
         close(100.0, 150.0, 0.415);
         close(100.0, 141.4, 0.5);
         // Nothing measurable earns no penalty rather than a wrong one, which

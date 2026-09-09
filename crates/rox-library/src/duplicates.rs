@@ -7,7 +7,7 @@
 //! The regroup is a sort, not a map. A `HashMap<key, Vec<row>>` over a
 //! ten-million-row library allocates a vector per distinct identity and
 //! runs out of memory long before it runs out of rows; hashing each row
-//! into a flat keyed vector and sorting that costs twelve bytes a row,
+//! into a flat keyed vector and sorting that costs sixteen bytes a row,
 //! one allocation, and splits across cores. The hash only decides
 //! adjacency: rows landing in the same run are compared on their real
 //! strings before they count as one identity, so a collision costs a

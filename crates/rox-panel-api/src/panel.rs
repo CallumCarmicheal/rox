@@ -984,10 +984,10 @@ fn panel_window(panel: Arc<dyn PanelView>, state: AppState, fresh: bool, cx: &mu
 /// Open a child window titled `title`, sized to `bounds`, hosting the view
 /// `build` returns wrapped in a Root. Carries the app id so the compositor
 /// groups it with the main window, and re-sets the title after creation
-/// because the Wayland backend ignores the creation-time titlebar title;
-/// this is the one place that workaround is now. `min_size` floors an interactive
-/// resize; None leaves a fixed-size modal free. The caller keeps its own
-/// singleton bookkeeping and stores the returned handle.
+/// because the Wayland backend ignores the creation-time titlebar title,
+/// the same workaround `panel_window` and the main window use. `min_size`
+/// floors an interactive resize; None leaves a fixed-size modal free. The
+/// caller keeps its own singleton bookkeeping and stores the returned handle.
 pub fn open_child_window<V: 'static + Render>(
     cx: &mut App,
     title: impl Into<SharedString>,
@@ -1094,8 +1094,8 @@ pub struct PanelChrome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_height: Option<f32>,
     /// Hold the panel's width to at least this many px, so a resize can't
-    /// squeeze it narrower. Raised over the panel's built-in floor, never
-    /// below it. None leaves the width at that floor.
+    /// squeeze it narrower. Taken as written, under the panel's built-in
+    /// floor included. None leaves the width at that floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_width: Option<f32>,
     /// Hold the panel's height to at least this many px, the vertical twin of
@@ -1112,8 +1112,9 @@ pub struct PanelChrome {
 impl PanelChrome {
     /// Whether the panel's in-place editing controls stay off this frame:
     /// its own [`hide_controls`](Self::hide_controls), or design mode being
-    /// off, which does the same for every panel at once. The one place
-    /// that decides, so a panel calls this rather than reading the field.
+    /// off, which does the same for every panel at once. A panel calls this
+    /// rather than reading the field; the metadata panel's edit toolbar is
+    /// the deliberate exception.
     pub fn controls_hidden(&self) -> bool {
         self.hide_controls || !settings::design_mode()
     }

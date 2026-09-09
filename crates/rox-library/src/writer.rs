@@ -436,7 +436,7 @@ fn unknown_item_excluded(key: ItemKey) -> bool {
 
 /// A file's tags the editor has no row for: the format's custom keys
 /// ([`read`]'s customs), the items lofty maps but rox has no field for
-/// (BPM, ISRC, the MusicBrainz ids, sort orders), and the ID3v2 frames
+/// (BPM, ISRC, the MusicBrainz ids), and the ID3v2 frames
 /// that hold bytes rather than text. Kept apart from [`read`]: that one's
 /// output supplies the editor's field lookups and the save diff, while
 /// this list shows as one ragged set and edits through
@@ -614,8 +614,8 @@ fn push_unknown(out: &mut Vec<(String, UnknownValue)>, key: String, value: Unkno
 /// Whether the writer can read and write this file's tags at all. The
 /// editor asks before it blames a read failure on the file: a wav is not
 /// a broken file, it's a format the writer hasn't grown a path for. Same
-/// for the one MP4 shape this turns down, a fragmented file (see
-/// [`file_type`]).
+/// for the one MP4 shape this turns down, a fragmented file placed by
+/// absolute offsets (see [`file_type`]).
 pub fn supported(path: &Path) -> bool {
     file_type(path).is_ok()
 }
@@ -1664,8 +1664,9 @@ fn verify_pictures(tmp: &Path, kind: FileType, expected: &[Vec<u8>]) -> Result<(
 }
 
 /// The formats the writer handles today, off the file's content. The rest
-/// of the library's matrix (wav) fails per file here until it gets its own
-/// write path, and a fragmented MP4 fails with a reason of its own.
+/// of the scanner's matrix (wav, Ogg, and the others) fails per file here
+/// until each gets its own write path, and one fragmented MP4 shape fails
+/// with a reason of its own.
 fn file_type(path: &Path) -> Result<FileType, String> {
     let kind = Probe::open(path)
         .map_err(|e| format!("open: {e}"))?
@@ -1675,22 +1676,27 @@ fn file_type(path: &Path) -> Result<FileType, String> {
         .ok_or_else(|| format!("unrecognized format: {}", path.display()))?;
     match kind {
         FileType::Mpeg | FileType::Flac => Ok(kind),
-        // Fragmented MP4 is turned down by name rather than by the generic
-        // message, because the reason is worth reading in the editor's
-        // per-file error. lofty patches the base data offset of exactly one
-        // `moof` when the tag resizes, and a file assembled out of DASH
-        // segments has one per fragment. Whether a real one survives a tag
-        // write is not something reading lofty's source can settle, and the
-        // audio hash can't catch it if it doesn't: stale offsets leave the
-        // mdat bytes exactly as they were, so the verify passes, the rename
-        // goes through, and the file is silently unplayable. Refusing is
-        // the conservative call on a path with that failure mode.
+        // A fragmented MP4 is fine to write as long as its fragments find
+        // their samples relative to their own `moof`: a resized tag shifts
+        // every fragment by the same amount and nothing inside them
+        // changes. That's the shape a DASH download comes in (checked on a
+        // real 42-fragment file: grow inside the padding, shrink, and grow
+        // past it all left the `moof`/`mdat` bytes identical and decoded
+        // the same through symphonia and ffmpeg), and the stream hash
+        // covers the `moof` payloads so a write that did patch one fails
+        // verify rather than landing.
         //
-        // Lifting this needs a real multi-fragment file and a decode after
-        // the write, not another pass over lofty's source. Don't simplify
-        // it away on a code read.
-        FileType::Mp4 if crate::mp4::is_fragmented(path) => Err(format!(
-            "writing tags into a fragmented MP4 is not supported: {}",
+        // The shape turned down is a fragment placed by an absolute file
+        // position, or a `sidx` index. lofty patches the base data offset
+        // of exactly one `moof` and never touches a `sidx`, so a file with
+        // more than one fragment comes out with stale offsets, and stale
+        // offsets leave every hashed byte exactly as it was: the verify
+        // passes, the rename goes through, and the file is silently
+        // unplayable. Refusing by name gives the editor's per-file error
+        // something to say. Lifting it needs the writer to patch every
+        // fragment itself, and a real file of that shape to prove it on.
+        FileType::Mp4 if crate::mp4::has_absolute_fragment_offsets(path) => Err(format!(
+            "writing tags into a fragmented MP4 with absolute offsets is not supported: {}",
             path.display()
         )),
         FileType::Mp4 => Ok(kind),
@@ -1795,8 +1801,10 @@ pub(crate) fn tmp_path(path: &Path) -> PathBuf {
 /// MP4 is the reason this is a list. Its audio sits in `mdat` boxes with
 /// the tag in a `moov` that can be either side of them, so a tag that
 /// grows moves the audio rather than the other way round, and a fragmented
-/// file has an `mdat` per fragment. One range would describe the first of
-/// them and hash right past the rest.
+/// file has an `mdat` per fragment with a `moof` in front of each. The
+/// spans cover the `moof` payloads too, since a fragment is only safe to
+/// shift if its header comes through untouched. One range would describe
+/// the first of them and hash right past the rest.
 fn audio_span(path: &Path, kind: FileType) -> Result<Vec<(u64, u64)>, String> {
     let mut file = fs::File::open(path).map_err(|e| format!("open: {e}"))?;
     let len = file.metadata().map_err(|e| format!("stat: {e}"))?.len();
@@ -1874,10 +1882,13 @@ fn audio_span(path: &Path, kind: FileType) -> Result<Vec<(u64, u64)>, String> {
         FileType::Mp4 => {
             // The spans are recomputed on the clone rather than reused
             // from the original, which is what lets a grown tag move the
-            // audio and still hash equal: same bytes, new offset. A file
-            // with no `mdat` at all is an error and not an empty list, or
-            // the verify would rubber stamp everything it couldn't parse.
-            let spans = crate::mp4::mdat_spans(path)
+            // audio and still hash equal: same bytes, new offset. On a
+            // fragmented file the `moof` headers are in the spans beside
+            // the `mdat`s, so a fragment that moved passes and a fragment
+            // lofty rewrote does not. A file with no `mdat` at all is an
+            // error and not an empty list, or the verify would rubber
+            // stamp everything it couldn't parse.
+            let spans = crate::mp4::stream_spans(path)
                 .ok_or_else(|| format!("no mp4 audio to hash: {}", path.display()))?;
             Ok(spans
                 .into_iter()
@@ -2026,6 +2037,32 @@ mod tests {
         let path = dir.join(name);
         fs::write(&path, m4a_bytes(&[m4a_mvhd()])).unwrap();
         path
+    }
+
+    /// A `moof` holding one `traf` with a `tfhd` of the given flags. Flag
+    /// 0x02_0000 is default-base-is-moof, the shape a DASH download has;
+    /// flag 1 is a base data offset, an absolute position the fragment's
+    /// samples are counted from, which follows as eight bytes.
+    fn m4a_moof(tfhd_flags: u32) -> Vec<u8> {
+        let mut tfhd = tfhd_flags.to_be_bytes().to_vec();
+        tfhd.extend_from_slice(&1u32.to_be_bytes());
+        if tfhd_flags & 1 != 0 {
+            tfhd.extend_from_slice(&[0u8; 8]);
+        }
+        m4a_atom(b"moof", &m4a_atom(b"traf", &m4a_atom(b"tfhd", &tfhd)))
+    }
+
+    /// A fragmented file: the `moov` carries an `mvex` and no sample
+    /// tables, and the audio sits in one `moof`/`mdat` pair behind it.
+    fn m4a_fragmented_bytes(tfhd_flags: u32) -> Vec<u8> {
+        let mvex = m4a_atom(b"mvex", &m4a_atom(b"mehd", &[0, 0, 0, 0, 0, 1, 0, 0]));
+        let mut moov = m4a_mvhd();
+        moov.extend(mvex);
+        let mut out = m4a_atom(b"ftyp", b"isom\0\0\0\0iso5");
+        out.extend(m4a_atom(b"moov", &moov));
+        out.extend(m4a_moof(tfhd_flags));
+        out.extend(m4a_atom(b"mdat", &m4a_audio()));
+        out
     }
 
     /// Every atom a file's tag holds under one key, for the tests that
@@ -2695,11 +2732,11 @@ mod tests {
     fn m4a_audio_hashes_the_same_after_the_tag_moves_it() {
         let dir = scratch("m4a-span");
         let path = m4a_file(&dir, "track.m4a");
-        let before = crate::mp4::mdat_spans(&path).unwrap();
+        let before = crate::mp4::stream_spans(&path).unwrap();
 
         commit(&path, &[set(Field::Comment, &"padding ".repeat(512))]).unwrap();
 
-        let after = crate::mp4::mdat_spans(&path).unwrap();
+        let after = crate::mp4::stream_spans(&path).unwrap();
         assert_eq!(after.len(), 1);
         assert!(
             after[0].start > before[0].start + 4000,
@@ -2712,23 +2749,72 @@ mod tests {
         assert_eq!(&bytes[after[0].start as usize..], &m4a_audio()[..]);
     }
 
-    /// A fragmented file is turned down before anything is written, with
-    /// its own reason rather than the generic one, because the editor
-    /// shows that string per file and "not supported yet" would send
-    /// someone looking for the wrong thing.
+    /// A fragmented file whose fragments count from their own `moof`
+    /// commits like a plain one. The tag grows past the `moov`'s end, so
+    /// the fragment has to move, and it has to move whole: the `moof`
+    /// bytes behind the shift are the ones that were there before, and
+    /// the audio is still at the end.
     #[test]
-    fn fragmented_m4a_is_refused_with_its_own_reason() {
-        let dir = scratch("m4a-fragmented");
+    fn fragmented_m4a_with_relative_offsets_commits() {
+        let dir = scratch("m4a-fragmented-relative");
         let path = dir.join("track.m4a");
-        let mvex = m4a_atom(b"mvex", &m4a_atom(b"mehd", &[0, 0, 0, 0, 0, 1, 0, 0]));
-        fs::write(&path, m4a_bytes(&[m4a_mvhd(), mvex])).unwrap();
+        fs::write(&path, m4a_fragmented_bytes(0x02_0000)).unwrap();
+        let before = crate::mp4::stream_spans(&path).unwrap();
+        assert_eq!(before.len(), 2);
 
-        assert!(!supported(&path));
-        let error = commit(&path, &[set(Field::Title, "Nope")]).unwrap_err();
-        assert!(error.contains("fragmented"), "{error}");
-        assert!(read(&path).is_err());
+        assert!(supported(&path));
+        commit(
+            &path,
+            &[
+                set(Field::Title, "Yesterwynde"),
+                set(Field::Comment, &"padding ".repeat(512)),
+            ],
+        )
+        .unwrap();
+
+        let fields = read(&path).unwrap();
+        assert!(fields.contains(&(Field::Title, "Yesterwynde".into())));
+        let after = crate::mp4::stream_spans(&path).unwrap();
+        assert_eq!(after.len(), 2);
+        assert!(
+            after[0].start > before[0].start + 4000,
+            "the tag has to actually move the fragment: {} to {}",
+            before[0].start,
+            after[0].start
+        );
+        let bytes = fs::read(&path).unwrap();
+        let moof = m4a_moof(0x02_0000);
+        assert_eq!(
+            &bytes[after[0].start as usize..after[0].end as usize],
+            &moof[8..]
+        );
+        assert!(bytes.ends_with(&m4a_audio()));
+    }
+
+    /// A fragment placed by an absolute file position is turned down
+    /// before anything is written, with its own reason rather than the
+    /// generic one, because the editor shows that string per file and
+    /// "not supported yet" would send someone looking for the wrong
+    /// thing. A `sidx` index is the same refusal.
+    #[test]
+    fn fragmented_m4a_with_absolute_offsets_is_refused() {
+        let dir = scratch("m4a-fragmented-absolute");
+        let offset = dir.join("offset.m4a");
+        fs::write(&offset, m4a_fragmented_bytes(0x02_0001)).unwrap();
+        let indexed = dir.join("indexed.m4a");
+        let mut bytes = m4a_fragmented_bytes(0x02_0000);
+        bytes.extend(m4a_atom(b"sidx", &[0u8; 32]));
+        fs::write(&indexed, &bytes).unwrap();
+
+        for path in [&offset, &indexed] {
+            assert!(!supported(path), "{}", path.display());
+            let error = commit(path, &[set(Field::Title, "Nope")]).unwrap_err();
+            assert!(error.contains("fragmented"), "{error}");
+            assert!(read(path).is_err());
+        }
         // The refusal costs the file nothing: it's still the file it was.
-        assert!(fs::read(&path).unwrap().ends_with(&m4a_audio()));
+        assert!(fs::read(&offset).unwrap().ends_with(&m4a_audio()));
+        assert_eq!(fs::read(&indexed).unwrap(), bytes);
     }
 
     /// Editing any field leaves a file's ReplayGain where it was. lofty

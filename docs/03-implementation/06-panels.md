@@ -215,8 +215,9 @@ is applied rather than every time a menu draws.
 
 The dock is the vendored `crates/rox-dock`: `panel.rs` (the `Panel` / `PanelView` traits,
 the registry), `state.rs` (`DockAreaState`, `PanelState`, `PanelInfo`). The app wires it
-in `crates/rox/src/workspace.rs` (the layout tree, persist and restore), `panel.rs`
-(`PanelChrome`, `AppState`, `pop_out`, `PopoutHost`), `panel_settings.rs` (the customize
-windows), `settings.rs` (`NamedLayout`, `WorkspaceBundle`), `design/palette.rs`
-(`PanelTheme`), and `workspaces.rs` (apply). Each panel's config is defined beside it
-under `crates/rox/src/panels/`.
+in `crates/rox/src/workspace.rs` (the layout tree, persist and restore),
+`crates/rox-panel-api/src/panel.rs` (`PanelChrome`, `AppState`, `pop_out`, `PopoutHost`),
+`crates/rox/src/panel_settings.rs` (the customize windows), `crates/rox-core/src/settings.rs`
+(`NamedLayout`, `WorkspaceBundle`), `crates/rox-design/src/palette.rs` (`PanelTheme`), and
+`crates/rox/src/workspaces.rs` (apply). Each panel's config is defined beside it under
+`crates/rox-panels/src/`.

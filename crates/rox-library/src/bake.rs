@@ -22,8 +22,9 @@
 //!
 //! ## What gets refused
 //!
-//! [`crate::writer`] handles MP3 and FLAC, so every other format keeps its
-//! row and nothing more. A cue subsong is refused for the reason
+//! [`crate::embed_tag::writable`] admits MP3 and FLAC, the two carriers the
+//! vector has a proven round trip on, so every other format keeps its row
+//! and nothing more. A cue subsong is refused for the reason
 //! [`crate::writer::writes_to_file`] gives: twelve tracks share one image, and
 //! writing one track's lyrics into it would caption the whole disc.
 
@@ -68,7 +69,7 @@ pub enum Skip {
     /// A cue track: a span inside an image the whole disc shares, so there
     /// is no file that means this track alone.
     Subsong,
-    /// Not one of the two formats the writer handles.
+    /// Not one of the two formats [`crate::embed_tag::writable`] admits.
     Format,
     /// The file's tag already has this, so writing it would rewrite the
     /// file to leave it as it was.

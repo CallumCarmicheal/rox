@@ -1101,10 +1101,6 @@ mod tests {
         }
     }
 
-    /// The trust pass has to find every shader in a bundle, wherever it's
-    /// stored: the pool, the screen shader, panel chrome inside a dump, and a
-    /// Shader panel's own config. One missed and that panel comes up blank on
-    /// a shipped look.
     /// The slug ties a shipped bundle to its message, so a name with
     /// brackets or spaces has to resolve to the key the locale files
     /// actually hold.
@@ -1144,6 +1140,10 @@ mod tests {
         }
     }
 
+    /// The trust pass has to find every shader in a bundle, wherever it's
+    /// stored: the pool, the screen shader, panel chrome inside a dump, and a
+    /// Shader panel's own config. One missed and that panel comes up blank on
+    /// a shipped look.
     #[test]
     fn shipped_trust_collects_every_shader_a_bundle_carries() {
         let bundle = WorkspaceBundle {

@@ -144,7 +144,7 @@ fn open_workspace_window(
                 WindowBounds::Windowed(bounds)
             }
         }
-        // A hair larger than the welcome window (1160x660) it opens under on
+        // A hair larger than the welcome window (1240x660) it opens under on
         // a first run, so that window nests inside it like a child. Sized to
         // still fit a 1366x768 laptop with margin to spare.
         None => WindowBounds::Windowed(Bounds::centered(None, size(px(1280.), px(720.)), cx)),

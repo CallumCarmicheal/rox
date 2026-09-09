@@ -3,9 +3,10 @@
 //!
 //! Three questions come off the same walk. The first is how long a
 //! fragmented file runs; the other two belong to the tag writer, and both
-//! are about the file's structure rather than its metadata. [`mdat_spans`]
-//! says where the audio actually sits, so a write that moves the audio can
-//! still be checked against it, and [`is_fragmented`] answers the question
+//! are about the file's structure rather than its metadata. [`stream_spans`]
+//! says where the audio and its fragment headers sit, so a write that moves
+//! them can still be checked against them, and
+//! [`has_absolute_fragment_offsets`] answers the question
 //! `writer::file_type` turns a file down on.
 //!
 //! A fragmented MP4, the shape anything assembled out of DASH segments
@@ -50,42 +51,97 @@ pub fn fragment_duration_secs(path: &Path) -> Option<f64> {
     (duration > 0 && timescale > 0).then(|| duration as f64 / f64::from(timescale))
 }
 
-/// Every top-level `mdat` payload, in file order: where an MP4 keeps its
-/// audio. None where the file isn't an MP4, holds no `mdat` at all, or
+/// Every top-level `mdat` and `moof` payload, in file order: where an MP4
+/// keeps its audio, and the headers that say where each fragment's samples
+/// start. None where the file isn't an MP4, holds no `mdat` at all, or
 /// stops parsing partway.
 ///
 /// One range would do for a plain file, which has a single `mdat` with the
 /// whole stream in it. A fragmented file has one per fragment with a
 /// `moof` between each pair, and hashing only the first would make the
-/// writer's verify step a rubber stamp over most of the audio.
-pub(crate) fn mdat_spans(path: &Path) -> Option<Vec<Range<u64>>> {
+/// writer's verify step a rubber stamp over most of the audio. The `moof`
+/// payloads are in the list because a tag write is only safe on a
+/// fragmented file if it leaves them alone: their sample offsets count
+/// from the `moof` itself, so shifting one is fine and patching one is
+/// not, and a hash over the payload tells the two apart.
+pub(crate) fn stream_spans(path: &Path) -> Option<Vec<Range<u64>>> {
     let mut file = File::open(path).ok()?;
     let end = file.seek(SeekFrom::End(0)).ok()?;
     let mut spans = Vec::new();
+    let mut audio = false;
     walk(&mut file, 0..end, |kind, body| {
-        if kind == b"mdat" {
+        if kind == b"mdat" || kind == b"moof" {
+            audio |= kind == b"mdat";
             spans.push(body);
         }
         ControlFlow::Continue(())
     })?;
-    (!spans.is_empty()).then_some(spans)
+    audio.then_some(spans)
 }
 
-/// Whether the file's samples live out in fragments rather than in the
-/// `moov` sample tables, the same `mvex` test
-/// [`fragment_duration_secs`] makes. A file this says yes to is one the
-/// tag writer turns down; a file it says no to (including anything that
-/// isn't an MP4 at all) is left to the caller's own checks.
-pub(crate) fn is_fragmented(path: &Path) -> bool {
+/// Whether any of the file's fragments locate their samples by an absolute
+/// file position, which a tag write that resizes the `moov` would leave
+/// stale. That's a `tfhd` with the base-data-offset flag, or a `sidx`
+/// index, whose references count from its own end but which nothing
+/// rewrites either. A fragment without the flag counts from its own
+/// `moof`, and moves with it.
+///
+/// A file this says yes to is one the tag writer turns down. A file it
+/// says no to, including a plain MP4 and anything that isn't an MP4 at
+/// all, is left to the caller's own checks; a walk that stops partway
+/// says no as well, since the writer's own parse and its stream hash both
+/// refuse a file they can't walk.
+pub(crate) fn has_absolute_fragment_offsets(path: &Path) -> bool {
     let Ok(mut file) = File::open(path) else {
         return false;
     };
     let Ok(end) = file.seek(SeekFrom::End(0)) else {
         return false;
     };
-    find(&mut file, 0..end, b"moov")
-        .and_then(|moov| find(&mut file, moov, b"mvex"))
-        .is_some()
+    // The fragments are collected first and looked into after, because
+    // the walk keeps its own place in the file and a seek from inside the
+    // visit would lose it.
+    let mut sidx = false;
+    let mut moofs = Vec::new();
+    let _ = walk(&mut file, 0..end, |kind, body| {
+        match kind {
+            b"sidx" => sidx = true,
+            b"moof" => moofs.push(body),
+            _ => {}
+        }
+        if sidx {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    sidx || moofs
+        .into_iter()
+        .any(|moof| moof_has_base_offset(&mut file, moof))
+}
+
+/// Whether any `tfhd` inside a `moof` carries the base-data-offset flag,
+/// the low bit of the three flag bytes behind the version byte.
+fn moof_has_base_offset(file: &mut File, moof: Range<u64>) -> bool {
+    let mut trafs = Vec::new();
+    let _ = walk(file, moof, |kind, body| {
+        if kind == b"traf" {
+            trafs.push(body);
+        }
+        ControlFlow::Continue(())
+    });
+    for traf in trafs {
+        let Some(tfhd) = find(file, traf, b"tfhd") else {
+            continue;
+        };
+        let Some(header) = head(file, tfhd, 4) else {
+            continue;
+        };
+        if header.get(3).is_some_and(|flags| flags & 1 != 0) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The payload range of the first box of type `want` sitting directly
@@ -231,6 +287,19 @@ mod tests {
         atom(b"mehd", &payload)
     }
 
+    /// A `moof` holding one `traf` with a `tfhd` of the given flags. The
+    /// flag word is the low three bytes of the box's first four; a flag
+    /// of 1 is a base data offset, which a real one follows with eight
+    /// bytes of position.
+    fn moof(tfhd_flags: u32) -> Vec<u8> {
+        let mut tfhd = tfhd_flags.to_be_bytes().to_vec();
+        tfhd.extend_from_slice(&1u32.to_be_bytes());
+        if tfhd_flags & 1 != 0 {
+            tfhd.extend_from_slice(&[0u8; 8]);
+        }
+        atom(b"moof", &atom(b"traf", &atom(b"tfhd", &tfhd)))
+    }
+
     /// A version 1 `mehd`, the one a long file needs.
     fn mehd64(duration: u64) -> Vec<u8> {
         let mut payload = vec![1u8, 0, 0, 0];
@@ -316,42 +385,75 @@ mod tests {
     }
 
     /// The writer's question about where the audio is. [`file`] writes one
-    /// fragment, so a second one has to show up as a second span rather
-    /// than being lost behind the first: a single range would describe
-    /// only a quarter of this file, and the hash taken over it would pass
-    /// no matter what happened to the rest.
+    /// fragment, so a second one has to show up as its own pair of spans
+    /// rather than being lost behind the first: a single range would
+    /// describe only a quarter of this file, and the hash taken over it
+    /// would pass no matter what happened to the rest. The `moof` in front
+    /// of each `mdat` is in the list too, in file order.
     #[test]
-    fn every_mdat_is_a_span_of_its_own() {
+    fn every_fragment_is_a_span_of_its_own() {
         let mut bytes = file(&[mvhd(44_100)]);
         let second = bytes.len() as u64;
         bytes.extend(atom(b"moof", &[0u8; 16]));
         bytes.extend(atom(b"mdat", &[1u8; 32]));
         let path = written("spans.m4a", &bytes);
 
-        let spans = mdat_spans(&path).expect("both fragments");
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[1], (second + 24 + 8)..(second + 24 + 8 + 32));
-        assert_eq!(spans[0].end - spans[0].start, 64);
+        let spans = stream_spans(&path).expect("both fragments");
+        assert_eq!(spans.len(), 4);
+        assert_eq!(spans[1].end - spans[1].start, 64);
+        assert_eq!(spans[2], (second + 8)..(second + 8 + 16));
+        assert_eq!(spans[3], (second + 24 + 8)..(second + 24 + 8 + 32));
     }
 
     /// A file with no audio box at all reads as nothing rather than an
     /// empty list, so the writer can tell it apart from a file it hashed.
+    /// A `moof` with no `mdat` behind it is the same nothing: headers for
+    /// samples that aren't there.
     #[test]
     fn no_mdat_is_no_span() {
         let path = written("tagless.m4a", &atom(b"ftyp", b"isom\0\0\0\0iso5"));
-        assert_eq!(mdat_spans(&path), None);
+        assert_eq!(stream_spans(&path), None);
+        let mut headless = atom(b"ftyp", b"isom\0\0\0\0iso5");
+        headless.extend(moof(0x02_0000));
+        assert_eq!(stream_spans(&written("headless.m4a", &headless)), None);
     }
 
-    /// The writer's other question. `mvex` is the whole test, the same one
-    /// the duration read makes, so the two can't disagree about what
-    /// fragmented means.
+    /// The writer's other question. A fragment that counts from its own
+    /// `moof` is fine to shift, so the common shape (default-base-is-moof,
+    /// no `sidx`) says no, and so does a plain file, which has no
+    /// fragments to ask about. The flag says yes wherever it turns up,
+    /// not only on the first fragment, since that's the one lofty would
+    /// have patched anyway.
     #[test]
-    fn fragmentation_is_the_mvex_test() {
+    fn absolute_offsets_are_the_tfhd_flag_or_a_sidx() {
         let mvex = atom(b"mvex", &mehd(5_722_380));
-        let fragmented = written("frag-check.m4a", &file(&[mvhd(44_100), mvex]));
-        let plain = written("plain-check.m4a", &file(&[mvhd(44_100)]));
-        assert!(is_fragmented(&fragmented));
-        assert!(!is_fragmented(&plain));
-        assert!(!is_fragmented(&written("junk-check.m4a", &[0xFFu8; 4096])));
+        let mut relative = file(&[mvhd(44_100), mvex.clone()]);
+        relative.extend(moof(0x02_0000));
+        relative.extend(atom(b"mdat", &[1u8; 32]));
+        assert!(!has_absolute_fragment_offsets(&written(
+            "relative.m4a",
+            &relative
+        )));
+
+        let mut later = relative.clone();
+        later.extend(moof(0x02_0001));
+        later.extend(atom(b"mdat", &[1u8; 32]));
+        assert!(has_absolute_fragment_offsets(&written("later.m4a", &later)));
+
+        let mut indexed = file(&[mvhd(44_100), mvex]);
+        indexed.extend(atom(b"sidx", &[0u8; 32]));
+        assert!(has_absolute_fragment_offsets(&written(
+            "indexed.m4a",
+            &indexed
+        )));
+
+        assert!(!has_absolute_fragment_offsets(&written(
+            "plain.m4a",
+            &file(&[mvhd(44_100)])
+        )));
+        assert!(!has_absolute_fragment_offsets(&written(
+            "junk-check.m4a",
+            &[0xFFu8; 4096]
+        )));
     }
 }

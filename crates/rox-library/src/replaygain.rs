@@ -27,8 +27,9 @@
 //! peaks and the engine's clamp falls back to its no-peak behaviour.
 //!
 //! Nothing rox measures goes back into an Opus file, either: the writer admits
-//! MP3 and FLAC only, so the R128 pass stores Opus results in the database and
-//! stops there, the same as every other format rox reads but doesn't write.
+//! MP3, FLAC and MP4 only, so the R128 pass stores Opus results in the
+//! database and stops there, the same as every other format rox reads but
+//! doesn't write.
 //!
 //! iTunes' own `iTunNORM` atom is out of scope entirely, since nothing else
 //! writes it and its per-channel millwatt figures are not a dB gain.

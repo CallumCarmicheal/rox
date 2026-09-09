@@ -150,9 +150,9 @@ impl MetadataSource {
 /// registry shape so the shared checklist and Fields submenu drive them.
 /// The file facts are off by default; the tag sheet is the stock face.
 ///
-/// The four sort names lead, mirroring the title-over-artist head the
-/// sheet puts above this list, and each other one sits under the field
-/// it sorts. They're on by default and cost a Latin-only library
+/// The title and artist sort names lead, mirroring the title-over-artist
+/// head the sheet puts above this list, and each other one sits under the
+/// field it sorts. They're on by default and cost a Latin-only library
 /// nothing, since a row whose value is empty is skipped like any other.
 ///
 /// `track_columns::checklist`/`columns_submenu` want a `'static` slice, so

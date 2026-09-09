@@ -3,7 +3,7 @@
 //! state, shared the way [`rox_services::selection::Selection`] is: a
 //! global-following panel publishes its box's text here and every other
 //! follower reads it back, so one box drives them all. [`QuerySource`] is the
-//! panel-config knob, own or shared, and [`QueryFilter`] is the trait a
+//! panel-config knob, own, shared, or the selection, and [`QueryFilter`] is the trait a
 //! searching panel implements to get the whole follow-and-mirror behavior for
 //! free; the library, the grids, and the art shelf all use it. Shared is the
 //! default, so a fresh panel follows the search box out of the box; a panel

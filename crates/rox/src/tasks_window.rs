@@ -18,11 +18,11 @@
 //!
 //! Dynamic jobs are the other kind. They're started somewhere else (the
 //! Last.fm loved-tracks import from the settings window, a conversion from
-//! the convert dialog), they're measured in seconds or minutes rather than
-//! afternoons, and there's nothing to say about them before someone sets
-//! one going. Those rows appear when one runs and stay
-//! for the session to report what it did, rather than standing in the list
-//! saying nothing for the rest of the time.
+//! the convert dialog, a bake from the embed dialog), they're measured in
+//! seconds or minutes rather than afternoons, and there's nothing to say
+//! about them before someone sets one going. Those rows appear when one
+//! runs and stay for the session to report what it did, rather than
+//! standing in the list saying nothing for the rest of the time.
 //!
 //! The scan keeps its menubar badge exactly as it was. The badge is a glance
 //! and this is the detail: the same walk with the estimate and the file under
@@ -326,10 +326,10 @@ enum Job {
     /// The romanization pass ([`crate::romanize_job`]): a Latin spelling
     /// for every title, album and artist that still has none.
     Romanize,
-    /// The dynamic one: Last.fm's loved tracks pulled in as hearts, started
-    /// from the settings window rather than from here.
+    /// The first dynamic one: Last.fm's loved tracks pulled in as hearts,
+    /// started from the settings window rather than from here.
     LovedImport,
-    /// The other dynamic one: a selection through ffmpeg into another
+    /// Another dynamic one: a selection through ffmpeg into another
     /// format, started from the convert dialog. Selection-scoped, so it has
     /// nothing to say before someone picks tracks and a folder.
     Convert,

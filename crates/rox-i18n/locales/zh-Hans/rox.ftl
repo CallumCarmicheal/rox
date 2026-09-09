@@ -62,10 +62,10 @@ signal-rate = 速率
 signal-reset-on-track = 换曲时重置
     .description = 新歌开始时回落到零，相位就不会从上一首的累加值接着算
 signal-flush = 清空
+    .description = 立刻回到零。它会花一小会儿排空而不是直接跳，跟着它的东西就不会抖
 signal-routes-in-panel = { $count ->
    *[other] 这个面板里有 { $count } 条路由
 }
-    .description = 立刻回到零。它会花一小会儿排空而不是直接跳，跟着它的东西就不会抖
 route-header = 路由
 route-signal = 信号
     .description = 这条路由跟随哪个共享信号；在这里调它，就是调这个信号上的每一条路由
@@ -1371,7 +1371,7 @@ health-desc-rating = 你还没有评分的曲目。
 health-desc-replaygain = 没有响度测量的曲目，播放时会比其他曲目更响或更轻。
 health-desc-sort-names = 有多少名称带有排序名，也就是决定名称排列位置的写法。
 health-desc-tempo = 没有速度的曲目，按 BPM 排序和匹配读的就是这个值。
-health-desc-writable = rox 能读取但无法写回标签的格式的曲目。分片 MP4 文件同样拒绝写入，但这里没有计入。
+health-desc-writable = rox 能读取但无法写回标签的格式的曲目。一种罕见的分片 MP4 布局同样拒绝写入，但这里没有计入。
 health-desc-year = 没有发行年份的曲目。
 health-drill = 显示这些
 health-fix-analyze = 分析缺失项
@@ -1521,7 +1521,7 @@ eq-flatten = 拉平
 eq-freq-label = 频率
 eq-gain-label = 增益
 eq-heading = 均衡器
-eq-help-text = 拖动某个频段来移动它，在它上面滚动可以变宽或变窄。处理发生在送往声卡的缓冲之前，所以一次调整最多要半秒才传到音箱。
+eq-help-text = 拖动某个频段来移动它，在它上面滚动可以变宽或变窄。处理发生在送往声卡的缓冲之前，所以这个窗口开着时，一次调整大约 120 毫秒就传到音箱。
 eq-hint-off = 点击关闭
 eq-hint-on = 点击开启
 eq-hint-open = 点击打开均衡器
@@ -2164,7 +2164,7 @@ pass-replaygain-lands-tags = 数字写回每个文件的标签里，其他播放
 pass-replaygain-title = { $count ->
    *[other] 测量 { $count } 首曲目？
 }
-pass-tempo-body = 每个文件解码两段半分钟的窗口并数拍子，媒体库就能显示曲目跑多快。它在跟点录制的音乐上最准，测不出来的会跳过。数字进媒体库数据库，你的文件不动。
+pass-tempo-body = 每个文件解码两段半分钟的窗口并数拍子，这两段对不上时再多读几段，媒体库就能显示曲目跑多快。它在跟点录制的音乐上最准，测不出来的会跳过。数字进媒体库数据库，你的文件不动。
 pass-tempo-retry-body = 这些曲目上一轮已经听过，没数出节拍。重试会把每一首重新解码一遍，所以只有在数拍子变好之后才值得跑。
 pass-tempo-retry-title = 重新听一遍这 { $count } 首数不出节拍的曲目？
 pass-tempo-title = { $count ->

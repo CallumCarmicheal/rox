@@ -62,11 +62,11 @@ signal-rate = Rate
 signal-reset-on-track = Bei Titelwechsel zurücksetzen
     .description = Auf null zurücklaufen, wenn ein neuer Titel beginnt, damit eine Phase nicht bei der Summe des letzten anfängt
 signal-flush = Leeren
+    .description = Jetzt auf null zurücksetzen. Es läuft über einen Moment leer statt zu springen, damit nichts, was daran hängt, ruckt
 signal-routes-in-panel = { $count ->
     [one] { $count } Route in diesem Panel
    *[other] { $count } Routen in diesem Panel
 }
-    .description = Jetzt auf null zurücksetzen. Es läuft über einen Moment leer statt zu springen, damit nichts, was daran hängt, ruckt
 route-header = Route
 route-signal = Signal
     .description = Welchem gemeinsamen Signal diese Route folgt; was du hier einstellst, gilt für jede Route an diesem Signal
@@ -1400,7 +1400,7 @@ health-desc-rating = Titel, die du noch nicht bewertet hast.
 health-desc-replaygain = Titel ohne Lautheitsmessung, sie spielen also lauter oder leiser als der Rest.
 health-desc-sort-names = Wie viele Namen einen Sortiernamen tragen, also die Schreibweise, die über die alphabetische Einordnung entscheidet.
 health-desc-tempo = Titel ohne Tempo, und genau das lesen Sortieren und Abgleichen nach BPM.
-health-desc-writable = Titel in Formaten, die rox lesen, aber nicht mit Tags beschreiben kann. Fragmentierte MP4-Dateien verweigern das Schreiben ebenfalls und sind hier nicht mitgezählt.
+health-desc-writable = Titel in Formaten, die rox lesen, aber nicht mit Tags beschreiben kann. Eine seltene Variante fragmentierter MP4-Dateien verweigert das Schreiben ebenfalls und ist hier nicht mitgezählt.
 health-desc-year = Titel ohne Erscheinungsjahr.
 health-drill = Diese anzeigen
 health-fix-analyze = Fehlende analysieren
@@ -1551,7 +1551,7 @@ eq-flatten = Flach stellen
 eq-freq-label = Freq
 eq-gain-label = Gain
 eq-heading = Equalizer
-eq-help-text = Zieh ein Band, um es zu bewegen, scroll darüber, um es breiter oder schmaler zu machen. Die Verarbeitung läuft vor dem Puffer, der die Soundkarte versorgt, also braucht eine Änderung bis zu einer halben Sekunde bis zu den Lautsprechern.
+eq-help-text = Zieh ein Band, um es zu bewegen, scroll darüber, um es breiter oder schmaler zu machen. Die Verarbeitung läuft vor dem Puffer, der die Soundkarte versorgt, also braucht eine Änderung etwa 120 ms bis zu den Lautsprechern, solange dieses Fenster offen ist.
 eq-hint-off = Klick zum Ausschalten
 eq-hint-on = Klick zum Einschalten
 eq-hint-open = Klick, um den Equalizer zu öffnen
@@ -2245,7 +2245,7 @@ pass-replaygain-title = { $count ->
     [one] 1 Titel messen?
    *[other] { $count } Titel messen?
 }
-pass-tempo-body = Zwei halbminütige Fenster jeder Datei werden dekodiert und die Schläge gezählt, damit die Bibliothek zeigen kann, wie schnell ein Titel läuft. Am besten klappt das bei Musik, die zum Klick eingespielt wurde; was sich nicht messen lässt, wird übersprungen. Die Werte landen in der Bibliotheksdatenbank, deine Dateien bleiben unangetastet.
+pass-tempo-body = Zwei halbminütige Fenster jeder Datei werden dekodiert und die Schläge gezählt; sind die beiden uneins, kommen weitere Fenster dazu, damit die Bibliothek zeigen kann, wie schnell ein Titel läuft. Am besten klappt das bei Musik, die zum Klick eingespielt wurde; was sich nicht messen lässt, wird übersprungen. Die Werte landen in der Bibliotheksdatenbank, deine Dateien bleiben unangetastet.
 pass-tempo-retry-body = Diese Titel hat ein früherer Durchlauf schon abgehört und keinen Beat darin gefunden. Ein neuer Versuch dekodiert jeden davon noch einmal, das lohnt sich also erst, wenn das Zählen der Schläge besser geworden ist.
 pass-tempo-retry-title = { $count ->
     [one] 1 abgelehnten Titel noch einmal abhören?

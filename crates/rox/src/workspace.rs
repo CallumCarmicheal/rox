@@ -1274,7 +1274,7 @@ pub fn init(cx: &mut App) {
         });
     });
     // The Library menu's operations. All routed through the front
-    // workspace: the four passes raise a prompt that has to land over a
+    // workspace: the five passes raise a prompt that has to land over a
     // workspace window, and the rescan and the duplicate finder read that
     // window's shared state.
     cx.on_action(|_: &RescanLibrary, cx| {
@@ -2250,7 +2250,7 @@ pub(crate) const MENUS: &[Menu] = &[
                 icon: icons::REFRESH_CW,
                 action: MenuAction::RescanLibrary,
             }),
-            // The four passes, each behind the start prompt: an afternoon
+            // The five passes, each behind the start prompt: an afternoon
             // of work is a choice made in front of an estimate, so the
             // trailing dots are honest about there being a step first.
             MenuEntry::Section("menu-section-analyze"),
@@ -2952,7 +2952,7 @@ pub struct Adopted {
     pub media: Option<Entity<MediaSession>>,
 }
 
-/// The pass prompt's host side. The Library menu's four pass rows raise it
+/// The pass prompt's host side. The Library menu's five pass rows raise it
 /// here, so the prompt lands over the workspace rather than pulling a
 /// window up in front of the one the pick was made in.
 impl pass_prompt::Host for Workspace {

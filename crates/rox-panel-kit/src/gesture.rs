@@ -443,7 +443,7 @@ pub fn glide_target_at(
     Some((origin - (viewport - extent) * 0.5).clamp(px(0.), max))
 }
 
-/// [`glide_snap`] on a plain scroll handle along `axis`: pin the offset to
+/// [`glide_step_axis`] without the easing: pin the offset to
 /// `target` in one move, true once already there. Offsets run negative as
 /// the list scrolls, so the stored position is the negated axis component.
 pub fn glide_snap_axis(handle: &ScrollHandle, axis: Axis, target: Pixels) -> bool {

@@ -3,7 +3,7 @@
 //! Most panels render out of [`rox_panels`] now. The ones that stay here
 //! call into [`crate::workspace::Workspace`] for real, and the workspace is
 //! the binary: the drawer, the group and overlay hosts, the slide and mini
-//! frames, the menubar, the window controls, and the queue widget.
+//! frames, the menu panel, the window controls, and the queue widget.
 
 pub mod drawer;
 pub mod group;

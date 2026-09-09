@@ -636,8 +636,11 @@ fn print_tasks(result: &Value) {
 
 /// What a started pass took on, the prompt's facts in one line.
 fn print_task_started(result: &Value) {
+    // The same unit the status line reads: sortnames takes on artists and
+    // romanize values, while the analysis passes send no unit at all.
+    let unit = result["unit"].as_str().unwrap_or("tracks");
     let mut line = format!(
-        "started  {} tracks on {} workers",
+        "started  {} {unit} on {} workers",
         result["missing"].as_u64().unwrap_or_default(),
         result["workers"].as_u64().unwrap_or_default(),
     );

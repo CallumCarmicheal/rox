@@ -4,7 +4,7 @@
 //! non-ASCII letter survives the trip instead of depending on the reader's
 //! guess about the file's encoding.
 //!
-//! The writer is hand-rolled because the document has six element types and
+//! The writer is hand-rolled because the document has seven element types and
 //! no attributes worth the name; a serializer crate would earn nothing here.
 //! The reader uses `roxmltree`, a read-only tree over the whole document,
 //! which a playlist file is comfortably small enough for.

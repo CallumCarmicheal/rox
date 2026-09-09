@@ -10,7 +10,8 @@
 //! section, `queue.*` for
 //! edits by stable entry id, `library.*` for search, now-playing tags,
 //! artwork, and kicking off a rescan, `tasks.*` for the long analysis
-//! passes the tasks window runs. `subscribe` turns on the push half: `event.*` frames for track
+//! passes the tasks window runs, `ai.status` for whether the AI gate and
+//! the MCP switch are on. `subscribe` turns on the push half: `event.*` frames for track
 //! turnover, play-state edges, and queue revision bumps, published off the
 //! player observer below so a front end never has to poll. The `debug.*`
 //! scope is the runtime test surface: the settings and panel dumps here,

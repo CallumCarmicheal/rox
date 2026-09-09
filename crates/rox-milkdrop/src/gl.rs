@@ -1,4 +1,4 @@
-//! The dozen OpenGL calls this crate makes for itself.
+//! The couple dozen OpenGL calls this crate makes for itself.
 //!
 //! libprojectM loads its own GL through its vendored glad, off the same proc
 //! address we hand it, so nothing here is about drawing. It's the plumbing on
@@ -8,10 +8,10 @@
 //! the log when something looks wrong.
 //!
 //! No `gl` or `glow` crate for this. Both generate tens of thousands of lines
-//! for an API we touch sixteen functions of, and the loader they bring is the
-//! part we already have from glutin. Sixteen `extern "system"` pointers
-//! resolved by name is the whole thing, and it makes the GL surface this
-//! crate depends on readable in one screen.
+//! for an API we touch a couple dozen functions of, and the loader they bring
+//! is the part we already have from glutin. A couple dozen `extern "system"`
+//! pointers resolved by name is the whole thing, and it makes the GL surface
+//! this crate depends on readable in one screen.
 
 use std::ffi::{c_void, CStr, CString};
 
@@ -103,7 +103,7 @@ impl Gl {
     /// story, and the difference matters to whoever reads the panel.
     /// The transmutes below carry no turbofish because their target type is
     /// the struct field each one is assigned to, declared above and checked
-    /// by the compiler. Spelling all twenty-seven signatures out a second
+    /// by the compiler. Spelling all twenty-eight signatures out a second
     /// time is what the lint would buy, and the only thing that buys is a
     /// chance for the two copies to disagree.
     #[allow(clippy::missing_transmute_annotations)]

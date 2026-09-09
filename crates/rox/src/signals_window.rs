@@ -254,8 +254,9 @@ impl SignalsWindow {
     }
 
     /// The four playback verbs under the spectrum, centered: a signal is
-    /// tuned against what's playing, so starting and skipping belongs in
-    /// this window rather than back in the workspace one.
+    /// tuned against what's playing, so starting it and nudging back over
+    /// the same passage belongs in this window rather than back in the
+    /// workspace one.
     fn transport(&self, cx: &mut Context<Self>) -> Option<Div> {
         let state = self.state.as_ref()?;
         let strip = panel::transport_strip(&state.player.clone(), &state.library.clone(), cx);

@@ -63,11 +63,11 @@ signal-rate = Cadence
 signal-reset-on-track = Réinitialiser au changement de piste
     .description = Redescendre à zéro quand un nouveau morceau commence, pour qu'une phase ne reparte pas du total du précédent
 signal-flush = Vider
+    .description = Le renvoyer à zéro maintenant ; il redescend progressivement plutôt que d'un coup, pour que rien de ce qui le suit ne saute
 signal-routes-in-panel = { $count ->
     [one] { $count } route dans ce panneau
    *[other] { $count } routes dans ce panneau
 }
-    .description = Le renvoyer à zéro maintenant ; il redescend progressivement plutôt que d'un coup, pour que rien de ce qui le suit ne saute
 route-header = Route
 route-signal = Signal
     .description = Quel signal partagé cette route suit ; le régler ici règle toutes les routes qui le suivent
@@ -1463,7 +1463,7 @@ health-desc-rating = Pistes que tu n'as pas encore notées.
 health-desc-replaygain = Pistes sans mesure de volume, elles sortent donc plus fort ou moins fort que le reste.
 health-desc-sort-names = Combien de noms portent un nom de tri, l'orthographe qui décide de leur place alphabétique.
 health-desc-tempo = Pistes sans tempo, et c'est exactement ce que lisent le tri et la correspondance par BPM.
-health-desc-writable = Pistes dans des formats que rox sait lire mais dans lesquels il ne peut pas réécrire les tags. Les fichiers MP4 fragmentés refusent aussi l'écriture, et ils ne sont pas comptés ici.
+health-desc-writable = Pistes dans des formats que rox sait lire mais dans lesquels il ne peut pas réécrire les tags. Une variante rare de MP4 fragmenté refuse aussi l'écriture, et elle n'est pas comptée ici.
 health-desc-year = Pistes sans année de sortie.
 health-drill = Afficher ceux-ci
 health-fix-analyze = Analyser les manquants
@@ -1614,7 +1614,7 @@ eq-flatten = Aplatir
 eq-freq-label = Fréq
 eq-gain-label = Gain
 eq-heading = Égaliseur
-eq-help-text = Fais glisser une bande pour la déplacer, la molette dessus pour l'élargir ou la resserrer. Le traitement se fait en amont du tampon qui alimente la carte son, donc un geste met jusqu'à une demi-seconde à atteindre les enceintes.
+eq-help-text = Fais glisser une bande pour la déplacer, la molette dessus pour l'élargir ou la resserrer. Le traitement se fait en amont du tampon qui alimente la carte son, donc un geste met environ 120 ms à atteindre les enceintes tant que cette fenêtre est ouverte.
 eq-hint-off = Clique pour le désactiver
 eq-hint-on = Clique pour l'activer
 eq-hint-open = Clique pour ouvrir l'égaliseur
@@ -2325,7 +2325,7 @@ pass-replaygain-title = { $count ->
     [one] Mesurer { $count } piste ?
    *[other] Mesurer { $count } pistes ?
 }
-pass-tempo-body = Deux fenêtres d'une demi-minute de chaque fichier sont décodées et les temps comptés, pour que la bibliothèque puisse montrer à quel tempo tourne une piste. Ça marche mieux sur de la musique enregistrée au clic et ça ignore tout ce qui ne se mesure pas. Les chiffres vont dans la base de données de la bibliothèque et tes fichiers ne sont pas touchés.
+pass-tempo-body = Deux fenêtres d'une demi-minute de chaque fichier sont décodées et les temps comptés, et d'autres fenêtres sont lues quand ces deux-là ne s'accordent pas, pour que la bibliothèque puisse montrer à quel tempo tourne une piste. Ça marche mieux sur de la musique enregistrée au clic et ça ignore tout ce qui ne se mesure pas. Les chiffres vont dans la base de données de la bibliothèque et tes fichiers ne sont pas touchés.
 pass-tempo-retry-body = Une passe précédente a déjà écouté ces pistes et n'y a trouvé aucun tempo. Réessayer les décode toutes une fois de plus, ça ne vaut donc le coup qu'une fois le comptage des temps amélioré.
 pass-tempo-retry-title = { $count ->
     [one] Réécouter { $count } piste refusée ?

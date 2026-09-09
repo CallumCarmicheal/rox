@@ -57,7 +57,7 @@ instead, stdio on one side, the socket on the other. Its tool surface is by
 construction a subset of the native one, which keeps a single contract to version and
 makes the MCP impossible to drift ahead of what the socket can do.
 
-The "Enable AI features" toggle is in behavior settings, off by default, and
+The "Enable AI features" toggle is on the Application settings page, off by default, and
 reveals the MCP page and the ML models page. It gates what talks to AI tooling: the
 MCP, and any future LLM-facing feature. The built-in acoustic analysis stands on its
 own and keeps running either way; with the toggle off the user stays on the

@@ -157,9 +157,9 @@ impl Prompt {
     }
 
     /// Whether the worker slider means anything for this pass. It doesn't
-    /// for the sort-name fill, and a slider that moves an estimate it
-    /// can't change would be a lie in the one dialog that exists to be
-    /// honest about cost.
+    /// for the sort-name fill or the romanization, and a slider that moves
+    /// an estimate it can't change would be a lie in the one dialog that
+    /// exists to be honest about cost.
     fn takes_workers(&self) -> bool {
         !matches!(self.pass, Pass::SortNames { .. } | Pass::Romanize)
     }
@@ -473,7 +473,7 @@ fn probe<V: Host>(this: &mut V, cx: &mut Context<V>) {
 
 /// What a probe measured, and where it belongs. The acoustic pace is kept
 /// per model because the built-in sketch and a network differ by most of an
-/// order of magnitude; the other two passes have no model behind them, so
+/// order of magnitude; the other three passes have no model behind them, so
 /// each is one number.
 enum Measured {
     Acoustic(String, f32),

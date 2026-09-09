@@ -63,11 +63,11 @@ signal-rate = Frequenza
 signal-reset-on-track = Azzera al cambio traccia
     .description = Torna a zero quando parte un nuovo brano, così una fase non riparte dal totale del brano precedente
 signal-flush = Svuota
+    .description = Riportalo a zero adesso; scende in un attimo invece che di colpo, così quello che lo segue non fa salti
 signal-routes-in-panel = { $count ->
     [one] { $count } route in questo pannello
    *[other] { $count } route in questo pannello
 }
-    .description = Riportalo a zero adesso; scende in un attimo invece che di colpo, così quello che lo segue non fa salti
 route-header = Route
 route-signal = Segnale
     .description = Quale segnale condiviso segue questa route; regolarlo qui regola ogni route che lo segue
@@ -1420,7 +1420,7 @@ health-desc-rating = Brani che non hai ancora valutato.
 health-desc-replaygain = Brani senza misurazione del volume, quindi suonano più forte o più piano degli altri.
 health-desc-sort-names = Quanti nomi hanno un nome di ordinamento, la grafia che decide il posto in ordine alfabetico.
 health-desc-tempo = Brani senza tempo, ed è proprio quello che leggono l'ordinamento e la corrispondenza per BPM.
-health-desc-writable = Brani in formati che rox sa leggere ma in cui non può riscrivere i tag. Anche i file MP4 frammentati rifiutano la scrittura, e qui non sono contati.
+health-desc-writable = Brani in formati che rox sa leggere ma in cui non può riscrivere i tag. Anche una rara variante di MP4 frammentato rifiuta la scrittura, e qui non è contata.
 health-desc-year = Brani senza anno di uscita.
 health-drill = Mostra questi
 health-fix-analyze = Analizza i mancanti
@@ -1571,7 +1571,7 @@ eq-flatten = Appiattisci
 eq-freq-label = Freq
 eq-gain-label = Guadagno
 eq-heading = Equalizzatore
-eq-help-text = Trascina una banda per spostarla, scorri sopra una per allargarla o stringerla. L'elaborazione avviene prima del buffer che passa l'audio alla scheda, quindi uno spostamento impiega fino a mezzo secondo per arrivare agli altoparlanti.
+eq-help-text = Trascina una banda per spostarla, scorri sopra una per allargarla o stringerla. L'elaborazione avviene prima del buffer che passa l'audio alla scheda, quindi uno spostamento impiega circa 120 ms per arrivare agli altoparlanti finché questa finestra è aperta.
 eq-hint-off = Clicca per spegnerlo
 eq-hint-on = Clicca per accenderlo
 eq-hint-open = Clicca per aprire l'equalizzatore
@@ -2301,7 +2301,7 @@ pass-replaygain-title = { $count ->
     [one] Misurare 1 traccia?
    *[other] Misurare { $count } tracce?
 }
-pass-tempo-body = Di ogni file vengono decodificate due finestre da mezzo minuto e contati i battiti, così la libreria può mostrare a che andatura va una traccia. Funziona meglio sulla musica registrata a click e salta tutto ciò che non riesce a misurare. I numeri vanno nel database della libreria e i tuoi file restano intatti.
+pass-tempo-body = Di ogni file vengono decodificate due finestre da mezzo minuto e contati i battiti, e se le due non concordano ne vengono lette altre, così la libreria può mostrare a che andatura va una traccia. Funziona meglio sulla musica registrata a click e salta tutto ciò che non riesce a misurare. I numeri vanno nel database della libreria e i tuoi file restano intatti.
 pass-tempo-retry-body = Un passaggio precedente ha già ascoltato queste tracce e non ci ha trovato battito. Riprovare le decodifica tutte da capo, quindi conviene solo dopo che il conteggio dei battiti è migliorato.
 pass-tempo-retry-title = { $count ->
     [one] Riascoltare 1 traccia rifiutata?

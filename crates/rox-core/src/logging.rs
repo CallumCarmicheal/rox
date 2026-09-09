@@ -1,6 +1,6 @@
 //! The app's logging backend behind the `log` facade: every `log::warn!`,
-//! `error!`, or `info!` in rox and rox-playback comes through here and fans
-//! three ways: stderr, so a debug run still prints as it always did; a
+//! `error!`, or `info!` in any crate of the workspace comes through here and
+//! fans three ways: stderr, so a debug run still prints as it always did; a
 //! rolling file under the data dir, so a crash or a weird session leaves a
 //! record a bug report can attach; and an in-memory ring the console window
 //! reads, so the same lines show live in the app without tailing a file.

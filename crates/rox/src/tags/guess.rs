@@ -36,7 +36,8 @@ pub struct Pattern {
 }
 
 /// The placeholder names a pattern may use, the help line's source of
-/// truth. Aliases share a row.
+/// truth. One spelling each; the aliases [`field_for`] also takes are not
+/// listed here.
 pub const PLACEHOLDERS: &[&str] = &[
     "%artist%",
     "%albumartist%",
@@ -122,8 +123,10 @@ fn fallback_for(field: &Field) -> &'static str {
         Field::TrackNo | Field::DiscNo => "00",
         Field::Year => "Unknown Year",
         Field::Genre => "Unknown Genre",
-        // No other field has a placeholder, so this is unreachable from
-        // a parsed pattern. Kept total rather than panicking.
+        // %comment% lands here: a track with no comment renders like the
+        // rest of them. No other field has a placeholder, so nothing else
+        // reaches this from a parsed pattern. Kept total rather than
+        // panicking.
         _ => "Unknown",
     }
 }

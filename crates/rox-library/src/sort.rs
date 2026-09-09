@@ -5,8 +5,9 @@
 use std::cmp::Ordering;
 
 /// Compare two names the way a file manager lists them: runs of digits
-/// compare as numbers, so "2" sorts before "10" and padded "02" reads the
-/// same as "2", and the rest byte by byte. Inputs come lowercased.
+/// compare as numbers, so "2" sorts before "10" and padded "02" ties "2"
+/// on magnitude before the padding breaks it apart, and the rest byte by
+/// byte. Inputs come lowercased.
 pub fn natural_cmp(a: &str, b: &str) -> Ordering {
     /// Drop leading zeros but keep one digit, so "007" compares as "7".
     fn magnitude(digits: &[u8]) -> &[u8] {

@@ -75,9 +75,10 @@ pub struct GainRule {
     pub fallback_db: f32,
 }
 
-/// The dB limit for either knob. Wide enough for any real tag
-/// plus a preamp, narrow enough that a garbage value in a file can't turn
-/// into a factor of a thousand.
+/// The dB limit on the gain that reaches the multiply, tag plus preamp or
+/// the fallback on its own. Wide enough for any real tag plus a preamp,
+/// narrow enough that a garbage value in a file can't turn into a factor of
+/// a thousand.
 const DB_LIMIT: f32 = 40.0;
 
 impl GainRule {
@@ -142,7 +143,8 @@ pub fn apply(buf: &mut [f32], gain: f32) {
 /// where amplitudes wouldn't, and a linear pair (both at 0.5 halfway)
 /// audibly dips in the middle. At 0.707 each the perceived level holds
 /// across the window. ADR 19 left the curve to the implementation; this is
-/// the pick, and the album-contiguous boundary never uses it.
+/// the pick, and an album-contiguous boundary skips it unless the album
+/// crossfade setting is on.
 pub fn crossfade(t: f32) -> (f32, f32) {
     let (sin, cos) = (t.clamp(0.0, 1.0) * FRAC_PI_2).sin_cos();
     (sin, cos)

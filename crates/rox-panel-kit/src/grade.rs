@@ -5,8 +5,8 @@
 //! theme that's the look. On the light theme it's a dark hole in a pale
 //! window, and no amount of fading toward the panel background fixes a
 //! frame whose own background is the wrong colour. So the frame gets a
-//! grade before it's composited: nothing on the dark theme, and one of
-//! two remaps on the light one.
+//! grade before it's composited: nothing at all, or one of three remaps,
+//! one of which only fires on the light theme.
 //!
 //! It lives here for the same reason [`crate::fade`] does: the Milkdrop
 //! panel and the app-wide backdrop both draw a frame through a one-pass
@@ -14,7 +14,7 @@
 //! one string prepended to each pass's own source, and [`Grade`] is the
 //! Rust side that fills the slots the string reads.
 //!
-//! ## The two remaps
+//! ## The three remaps
 //!
 //! `Theme` inverts the frame's Oklab lightness on the light theme and
 //! leaves the dark theme alone. Chroma and hue are kept, so a blue

@@ -36,12 +36,13 @@ it's a custom context server with that command. rox has to be running: the proxy
 connects to the socket on the first tool call and reconnects by itself when rox
 restarts.
 
-Two flags cover the non-default socket:
+Two flags cover the non-default socket, and a third opens the drive tools:
 
 | Flag                | Use                                                          |
 | ------------------- | ------------------------------------------------------------ |
 | `--data-dir <path>` | derive the socket for this data directory (a `--portable` rox) |
 | `--socket <path>`   | name the socket outright                                     |
+| `--dev`             | add the `ui_` drive tools                                    |
 
 ## Tools
 
@@ -49,16 +50,19 @@ Two flags cover the non-default socket:
 | ---------------- | ------------------------------------------------------------- | -------------------------------------------------------------------- |
 | `now_playing`    |                                                               | the playing track's tags, where its clock sits, whether audio moves   |
 | `transport`      | `action`: `toggle` `play` `pause` `next` `prev` `stop`        | the resulting player state                                           |
+| `ab_repeat`      | `action`: `mark` `clear` `set`; `set` takes `a` and `b` in seconds | the player state, with the repeating section in its `ab` field  |
 | `search_library` | `query`, optional `limit` (1..500)                            | matching tracks with tags; pins like `artist:name` narrow one field   |
 | `get_queue`      |                                                               | the play order with each entry's stable id and the one playing        |
 | `rescan_library` |                                                               | starts a background rescan of the library folders                     |
 | `get_tasks`      |                                                               | the analysis passes: switch state, tracks to do, progress while running |
-| `start_task`     | `pass`: `acoustic` `replaygain` `tempo`                       | starts the pass; answers with count, workers, estimate, and save mode |
-| `stop_task`      | `pass`: `acoustic` `replaygain` `tempo`                       | asks the pass to stop at the next file, keeping what's done           |
+| `start_task`     | `pass`: `acoustic` `replaygain` `tempo` `sortnames` `romanize` | starts the pass; answers with count, workers, estimate, and save mode |
+| `stop_task`      | `pass`: `acoustic` `replaygain` `tempo` `sortnames` `romanize` | asks the pass to stop at the next file, keeping what's done           |
 
-The socket does everything the tools do and more. Queue edits, seeking, volume,
-artwork, and the debug scope stay socket-only, reachable through `roxctl` or any
-JSON-RPC client.
+The socket does everything the tools do and more. Queue edits, seeking, volume, and
+artwork stay socket-only, reachable through `roxctl` or any JSON-RPC client. `--dev`
+lifts part of the debug scope into MCP as the `ui_` tools, which proxy `debug.windows`,
+`debug.panels`, `debug.actions`, `debug.action`, and the synthetic input methods; the
+rest of the debug scope stays on the socket.
 
 ## Protocol
 

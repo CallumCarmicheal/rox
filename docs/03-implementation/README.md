@@ -17,7 +17,7 @@ speculated ahead of the code. The set, one per domain:
   in-memory projection layout and interning, the scanner pipeline, the sharded cold-open
   load, and the rebuild-and-swap sequence that keeps store and projection consistent
 - `03-metadata.md` - the copy-verify-rename sequence step by step, per-format tag field
-  mapping (ID3v2 / Vorbis), batch semantics and failure shapes
+  mapping (ID3v2 / Vorbis / MP4 atoms), batch semantics and failure shapes
 - `04-artwork.md` - thumbnail DB schema and content-addressed keying, worker pool and
   texture LRU budgets, cancellation
 - [05-visualizer.md](05-visualizer.md) - the PCM tap and the analysis feed, the FFT and

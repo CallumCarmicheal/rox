@@ -8,11 +8,12 @@
 //! app rather than a window, so closing the Library page leaves it running
 //! and reopening it picks the count back up.
 //!
-//! The database is the only place a tempo gets written. Unlike the other two
-//! passes there's no tags mode to choose: writing TBPM back into the audio
-//! files would mean rewriting them to record an estimate the file's own
-//! tagger never made, and a cue subsong shares its file with every other
-//! track on the disc, which has nowhere to put a per-track number.
+//! The database is the only place a tempo gets written. Unlike the
+//! ReplayGain and acoustic passes there's no tags mode to choose: writing
+//! TBPM back into the audio files would mean rewriting them to record an
+//! estimate the file's own tagger never made, and a cue subsong shares its
+//! file with every other track on the disc, which has nowhere to put a
+//! per-track number.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

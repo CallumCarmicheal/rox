@@ -5,7 +5,7 @@
 //! It runs as a task rather than a button that blocks: fetching steps
 //! through pages of an account's whole loved history, and an account with a
 //! decade behind it has thousands. The task is dynamic, unlike the scan
-//! and the two analysis passes, so it only appears in the tasks window
+//! and the analysis passes, so it only appears in the tasks window
 //! while it's running or has just finished. It's started from Settings,
 //! it takes seconds rather than an afternoon, and a permanent row for it
 //! would be a row that spends its life saying nothing.

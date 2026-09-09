@@ -64,10 +64,12 @@ pub fn is_key(key: &str) -> bool {
 
 /// Whether a path is one the writer can put a vector into. Extension rather
 /// than content, because this is the cheap pre-check that keeps an
-/// unsupported format's skip quiet: the writer handles MP3 and FLAC only,
-/// and probing every OGG in a library to be told so again would cost a file
-/// open per track. A file whose extension lies still fails in the writer,
-/// where it's a real error worth logging.
+/// unsupported format's skip quiet: the vector has a proven round trip on
+/// MP3 and FLAC only (the writer handles MP4 too, but the atom it would use
+/// is a round trip of its own to prove), and probing every OGG in a library
+/// to be told so again would cost a file open per track. A file whose
+/// extension lies still fails in the writer, where it's a real error worth
+/// logging.
 pub fn writable(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -243,7 +245,7 @@ mod tests {
         assert!(decode(&poisoned, 4).is_none());
     }
 
-    /// The formats the writer can reach, off the name alone. Everything else
+    /// The formats a vector may go into, off the name alone. Everything else
     /// keeps its database row and skips the tag without a word.
     #[test]
     fn only_the_two_writable_formats_are_offered_a_tag() {

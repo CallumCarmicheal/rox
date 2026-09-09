@@ -153,8 +153,9 @@ pub struct ConvertDialog {
     /// and the spawn under it, which is how a burst of typing costs one
     /// process rather than one per keystroke.
     check_task: Option<Task<()>>,
-    /// Where the files go. None until one is picked, which is also the one
-    /// thing that keeps the Convert button inert.
+    /// Where the files go. None until one is picked, which is one of the
+    /// four things that keep the Convert button inert; [`Self::status`]
+    /// holds the rest.
     dest: Option<PathBuf>,
     pattern: Entity<InputState>,
     /// The current plan, rebuilt when the pattern, the preset or the

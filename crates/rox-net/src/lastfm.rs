@@ -3,7 +3,7 @@
 //! app runs it on the background executor. The api key and secret come
 //! from the build's own identity ([`keys`]), with the settings file's
 //! pair as the override for builds that ship none. The scrobbler built
-//! on top of this, the part that tracks player state, is in rox.
+//! on top of this, the part that tracks player state, is in rox-services.
 //!
 //! The protocol isn't Last.fm's alone: Libre.fm serves the same methods
 //! at its own host, so the call takes its root as an argument and

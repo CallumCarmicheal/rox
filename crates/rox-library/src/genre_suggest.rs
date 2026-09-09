@@ -106,7 +106,7 @@ pub struct Suggestion {
     /// The genre value as it would be written, one value (never a "; " list),
     /// passed through `crate::genre::resolve`.
     pub genre: String,
-    /// Normalized weight in 0..=1: the best candidate's share of the total
+    /// Normalized weight in 0..=1: this candidate's share of the total
     /// weight of all candidates. Sorted descending, ties by name.
     pub score: f32,
     /// Live rows on the same album (same album symbol and same folder) that

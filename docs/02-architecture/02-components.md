@@ -106,8 +106,8 @@ Contract:
 
 Responsibility: read and write tags across the format matrix, safely, in bulk. Wraps
 lofty with an atomic-write layer, because lofty rewrites files in place and a crash
-mid-write can leave a file unrecoverable. The core formats both write through lofty:
-ID3v2 for MP3, Vorbis comments for FLAC.
+mid-write can leave a file unrecoverable. The core formats all write through lofty:
+ID3v2 for MP3, Vorbis comments for FLAC, `ilst` atoms for MP4.
 
 Boundary: this is the only component that writes audio files. Every write goes through
 copy, verify, atomic rename. Reads are isolated per file so a malformed file that panics

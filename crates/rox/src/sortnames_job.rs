@@ -383,7 +383,7 @@ mod tests {
 
     /// A table built by hand rather than through a projection: the fill is
     /// a question about symbols and their sort names, and a scratch
-    /// database would only be a slower way to write these four rows.
+    /// database would only be a slower way to write a handful of rows.
     fn table(rows: &[(&str, &str)]) -> SymTable {
         let strings: Vec<String> = rows.iter().map(|(name, _)| name.to_string()).collect();
         let sort: Vec<String> = rows.iter().map(|(_, sort)| sort.to_string()).collect();

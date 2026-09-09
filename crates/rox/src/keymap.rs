@@ -60,9 +60,10 @@ const PLAYBACK: Option<&str> =
 
 /// [`PLAYBACK`] minus the panels whose own left and right mean something:
 /// a tile wall moving its cursor across a row, a folder tree folding a
-/// branch. Only the seek pair sits here, since it's the only bare chord
-/// that collides; space stays on [`PLAYBACK`] so play/pause still works
-/// with a wall focused.
+/// branch. The seek pair is the only bare chord that actually collides;
+/// the step pair rides along with it, for the reason noted where it's
+/// bound. Space stays on [`PLAYBACK`] so play/pause still works with a
+/// wall focused.
 const SEEK: Option<&str> =
     Some("Workspace && !SearchInput && !TypeAhead && !MenuNav && !PanelNav && !FocusedControl");
 
@@ -84,9 +85,10 @@ const TYPE_AHEAD: Option<&str> = Some(rox_panel_kit::TYPE_AHEAD_CYCLE_CONTEXT);
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Group {
     Playback,
-    /// The library's own operations: the scan, the four analysis passes,
-    /// the duplicate finder, and the health report they feed. Everything
-    /// the Library menu holds, in the order it holds it. Tasks and Stats
+    /// The library's own operations: the scan, the five analysis passes,
+    /// the duplicate finder, the genre tagger, and the health report and
+    /// power search they feed. Everything the Library menu holds, with the
+    /// report and the search last here rather than leading. Tasks and Stats
     /// stay in Windows, since neither is only about the library.
     Library,
     Windows,
@@ -496,13 +498,13 @@ pub static COMMANDS: LazyLock<Vec<Command>> = LazyLock::new(|| {
             VolumeDown,
             rox_i18n::t_static("keymap-volume-down.description")
         ),
-        // The library's operations, in the Library menu's own order: the
-        // scan, then the four passes, then the duplicate finder, then the
-        // health report they all feed. Everything here ships unbound
-        // except the report, which keeps the chord it had in the Windows
-        // group: an operation that costs an afternoon is not something to
-        // reach by accident, and there's no chord a user expects for it
-        // either.
+        // The library's operations: the scan, then the five passes, then
+        // the duplicate finder and the genre tagger, then the health report
+        // and the power search they feed. Everything here ships unbound
+        // except those last two, which keep the chords they had in the
+        // Windows group: an operation that costs an afternoon is not
+        // something to reach by accident, and there's no chord a user
+        // expects for it either.
         command!(
             "rescan_library",
             rox_i18n::t_static("keymap-rescan-library"),

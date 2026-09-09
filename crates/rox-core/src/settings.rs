@@ -1,8 +1,9 @@
 //! Persisted app settings, in the app's data directory next to the library
-//! database. Three pieces: `settings.json` holds the machine state (playback,
-//! library folders, accounts, window frames), `workspace.json` holds the look
-//! the app is currently using, and `workspaces/` holds the saved workspaces,
-//! one file each. Writers each own a few fields (the player its playback
+//! database. `settings.json` holds the preferences and the library setup,
+//! `workspace.json` the look the app is currently using, `windows.json`,
+//! `session.json`, and `accounts.json` a shard each (window frames, playback
+//! state, account connections), and `workspaces/` the saved workspaces, one
+//! file each. Writers each own a few fields (the player its playback
 //! state, the workspace its window and layout) and write through
 //! [`Settings::update`], which reloads first so one writer's save never
 //! reverts another's fields to what they were at startup.
@@ -430,7 +431,7 @@ fn write_shard<T: Serialize>(
 }
 
 /// The preferences and the library setup, `settings.json`'s own contents,
-/// plus the four states stored in files of their own. Unknown fields are
+/// plus the states stored in files of their own. Unknown fields are
 /// dropped on load and missing ones take defaults, so every file tolerates
 /// version drift in both directions. The shards below are skipped here and
 /// written separately; this struct holds them so callers still see one
@@ -971,7 +972,8 @@ pub struct AccountsState {
     /// The online enrichment providers and their knobs (ADR 14), the
     /// settings window's Providers page.
     pub providers: Providers,
-    /// Discord Rich Presence options (enable toggle, timestamps, details).
+    /// Discord Rich Presence options (enable toggle, the Last.fm and
+    /// YouTube buttons).
     pub discord: DiscordSettings,
 }
 
@@ -2567,8 +2569,8 @@ pub struct Providers {
     pub deezer: bool,
     /// Search Last.fm for cover art when the cover lookup asks.
     pub lastfm_art: bool,
-    /// Fetch artist biographies from Last.fm, a Deezer portrait along,
-    /// when the biography panel asks.
+    /// Fetch artist biographies from Last.fm, a Deezer portrait and
+    /// theaudiodb's banner and fanart along, when the biography panel asks.
     pub artist: bool,
 }
 
@@ -2707,8 +2709,8 @@ pub enum AcousticSave {
     /// file and never bumps an mtime.
     #[default]
     Database,
-    /// The database and the file's own tags. MP3 and FLAC only, since those
-    /// are the formats the writer handles; every other format keeps its
+    /// The database and the file's own tags. MP3 and FLAC only, the two
+    /// formats the vector has a tag path for; every other format keeps its
     /// database row and nothing else.
     Tags,
 }
@@ -2773,7 +2775,7 @@ pub struct OutputSettings {
     #[serde(default)]
     pub format: Option<String>,
     /// The exclusive device's period in milliseconds, or None for the
-    /// backend's 10 ms. Lower wakes the writer thread more often, which
+    /// backend's default. Lower wakes the writer thread more often, which
     /// starts crackling on a loaded machine.
     #[serde(default)]
     pub period_ms: Option<f64>,
@@ -2846,7 +2848,7 @@ impl Default for DiscordSettings {
 }
 
 /// A dock layout the user saved as a named preset: a full dock dump under
-/// a name. The dump stays raw JSON like [`Settings::layout`] so the file
+/// a name. The dump stays raw JSON like [`LookState::layout`] so the file
 /// still loads when the layout schema moves; the workspace validates it on
 /// apply.
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -2895,7 +2897,7 @@ pub struct LayoutSize {
 }
 
 /// A layout's unsaved working state: the dock dump plus the window size it
-/// was last at, kept in [`Settings::layout_edits`] so switching back restores
+/// was last at, kept in [`LookState::layout_edits`] so switching back restores
 /// both the arrangement and the size without touching the saved preset.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LayoutEdit {

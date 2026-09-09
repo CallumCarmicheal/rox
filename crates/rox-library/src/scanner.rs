@@ -666,8 +666,9 @@ fn cue_rows(
                 .len_ms()
                 .unwrap_or_else(|| image_tags.duration_ms.saturating_sub(track.span.start_ms));
             let artist = track.performer.clone();
-            // A sheet that named no title leaves the row the same
-            // filename fallback an unreadable file would get.
+            // A sheet that named no title leaves the row the image's own
+            // title, which is the filename stem only when the image itself
+            // wouldn't parse.
             let title = if track.title.is_empty() {
                 image_tags.title.clone()
             } else {
@@ -767,8 +768,10 @@ fn cue_rows(
 /// the generic tags below match the old probe path byte for byte. MP4 is
 /// here for the same reason: its rating sits in a freeform atom the
 /// generic tag drops, and a rating rox wrote that a scan couldn't see
-/// again would read as data loss. Any other format keeps the plain
-/// probe; those have no rating rox reads anyway.
+/// again would read as data loss. Opus is here for its R128 ReplayGain
+/// levels, unmapped Vorbis keys the generic tag drops the same way, and
+/// takes its rating off that parse while the comments are open. Any other
+/// format keeps the plain probe; rox reads no rating off those.
 fn read_tags(path: &Path) -> Option<TrackRow> {
     let source = crate::tag_source::open(path).ok()?;
     let (file, rating, r128) = catch_unwind(AssertUnwindSafe(move || {
@@ -1235,6 +1238,35 @@ mod tests {
         assert_eq!(combined, 75);
         assert_eq!(standalone, 75);
         assert_eq!(combined, standalone);
+    }
+
+    /// The same parity for Opus, which the writer can't tag: the rating
+    /// goes in through lofty the way another tagger would put it there,
+    /// and the scanner's native parse and the standalone reader both
+    /// have to find it.
+    #[test]
+    fn opus_rating_matches_across_read_paths() {
+        use lofty::config::{ParseOptions, WriteOptions};
+        use lofty::file::AudioFile;
+
+        let dir =
+            std::env::temp_dir().join(format!("rox-scanner-opus-rating-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tone.opus");
+        std::fs::copy(opus_fixture(), &path).unwrap();
+
+        let mut file = std::fs::File::open(&path).unwrap();
+        let mut opus = OpusFile::read_from(&mut file, ParseOptions::new()).unwrap();
+        opus.vorbis_comments_mut()
+            .push(crate::rating::FMPS_KEY.to_string(), "0.75".to_string());
+        opus.save_to_path(&path, WriteOptions::default()).unwrap();
+
+        let combined = read_one(&path).unwrap().rating;
+        let standalone = crate::rating::read_path(&path);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(combined, 75);
+        assert_eq!(standalone, Some(75));
     }
 
     /// A file with multiple genre values (the writer lays them down as

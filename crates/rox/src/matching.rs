@@ -67,7 +67,7 @@ pub fn note(text: impl Into<SharedString>) -> Div {
 
 /// A `Global` holding the live windows for one editor or matcher kind,
 /// keyed so a second request for the same subject focuses the open window
-/// instead of stacking a twin. Each kind keeps its own newtype (so the six
+/// instead of stacking a twin. Each kind keeps its own newtype (so the
 /// registries never cross-talk); the key is whatever tells one window from
 /// another: sorted track ids, a path, or a path plus the opening editor's
 /// id where the window binds to a specific editor.

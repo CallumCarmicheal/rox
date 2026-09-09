@@ -160,7 +160,7 @@ pub enum DockEvent {
 /// The main area of the dock.
 pub struct DockArea {
     id: SharedString,
-    /// The version is used to special the default layout, this is like the `panel_version` in [`Panel`](Panel).
+    /// The version is used to special the default layout.
     version: Option<usize>,
     pub(crate) bounds: Bounds<Pixels>,
 
@@ -189,7 +189,7 @@ pub struct DockArea {
     /// Lock panels layout, but allow to resize.
     locked: bool,
 
-    /// The panel style, default is [`PanelStyle::Default`](PanelStyle::Default).
+    /// The panel style, default is [`PanelStyle::Auto`](PanelStyle::Auto).
     pub(crate) panel_style: PanelStyle,
 
     /// A panel move driven by the middle mouse button or Alt+Left, see

@@ -63,11 +63,11 @@ signal-rate = Taxa
 signal-reset-on-track = Zerar a cada faixa
     .description = Voltar a zero quando uma música nova começa, para que uma fase não comece a partir do total da anterior
 signal-flush = Esvaziar
+    .description = Mandar de volta a zero agora. Ele escoa aos poucos em vez de saltar, para que nada que o siga dê um pulo
 signal-routes-in-panel = { $count ->
     [one] { $count } rota neste painel
    *[other] { $count } rotas neste painel
 }
-    .description = Mandar de volta a zero agora. Ele escoa aos poucos em vez de saltar, para que nada que o siga dê um pulo
 route-header = Rota
 route-signal = Sinal
     .description = Qual sinal compartilhado esta rota segue; ajustar aqui ajusta todas as rotas nele
@@ -1409,7 +1409,7 @@ health-desc-rating = Faixas que você ainda não avaliou.
 health-desc-replaygain = Faixas sem medição de volume, então tocam mais alto ou mais baixo que o resto.
 health-desc-sort-names = Quantos nomes têm nome de ordenação, a grafia que decide o lugar deles na ordem alfabética.
 health-desc-tempo = Faixas sem andamento, e é justamente o que a ordenação e a correspondência por BPM leem.
-health-desc-writable = Faixas em formatos que o rox lê mas nos quais não consegue gravar tags. Arquivos MP4 fragmentados também recusam a gravação e não entram nesta conta.
+health-desc-writable = Faixas em formatos que o rox lê mas nos quais não consegue gravar tags. Uma variante rara de MP4 fragmentado também recusa a gravação e não entra nesta conta.
 health-desc-year = Faixas sem ano de lançamento.
 health-drill = Mostrar estes
 health-fix-analyze = Analisar o que falta
@@ -1560,7 +1560,7 @@ eq-flatten = Aplanar
 eq-freq-label = Freq
 eq-gain-label = Ganho
 eq-heading = Equalizador
-eq-help-text = Arraste uma banda para movê-la, role o mouse sobre ela para alargar ou estreitar. O processamento roda antes do buffer que alimenta a placa de som, então uma mudança leva até meio segundo para chegar às caixas.
+eq-help-text = Arraste uma banda para movê-la, role o mouse sobre ela para alargar ou estreitar. O processamento roda antes do buffer que alimenta a placa de som, então uma mudança leva cerca de 120 ms para chegar às caixas enquanto esta janela está aberta.
 eq-hint-off = Clique para desligar
 eq-hint-on = Clique para ligar
 eq-hint-open = Clique para abrir o equalizador
@@ -2263,7 +2263,7 @@ pass-replaygain-title = { $count ->
     [one] Medir 1 faixa?
    *[other] Medir { $count } faixas?
 }
-pass-tempo-body = Duas janelas de meio minuto de cada arquivo são decodificadas e as batidas contadas, para que a biblioteca possa mostrar a que velocidade uma faixa corre. Funciona melhor com música gravada no clique e pula o que não consegue medir. Os números vão para o banco de dados da biblioteca e seus arquivos ficam intactos.
+pass-tempo-body = Duas janelas de meio minuto de cada arquivo são decodificadas e as batidas contadas, e mais janelas são lidas quando essas duas discordam, para que a biblioteca possa mostrar a que velocidade uma faixa corre. Funciona melhor com música gravada no clique e pula o que não consegue medir. Os números vão para o banco de dados da biblioteca e seus arquivos ficam intactos.
 pass-tempo-retry-body = Uma passagem anterior já ouviu essas faixas e não achou batida em nenhuma. Tentar de novo decodifica cada uma outra vez, então só vale a pena depois que a contagem de batidas melhorar.
 pass-tempo-retry-title = { $count ->
     [one] Ouvir de novo 1 faixa recusada?

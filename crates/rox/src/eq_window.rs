@@ -472,8 +472,9 @@ impl EqWindow {
         Some(div().flex().flex_row().justify_center().child(strip))
     }
 
-    /// The enable switch and Flatten, the two controls that act on the whole
-    /// curve rather than one band.
+    /// The row under the plot: Flatten and Reset Bands, the analyzer's style
+    /// and its window size, and the enable switch. Everything that acts on
+    /// the whole curve or on what's drawn over it, rather than one band.
     fn controls(&self, cx: &mut Context<Self>) -> Div {
         div()
             .flex()

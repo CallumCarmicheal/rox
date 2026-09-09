@@ -44,7 +44,8 @@ pub fn set_aliases(map: HashMap<String, String>) {
 }
 
 /// A value through the alias map: the canonical display it folds into,
-/// or itself untouched. The common no-alias library never allocates.
+/// or itself untouched. The common no-alias library skips the lookup and
+/// hands back a copy.
 pub fn resolve(value: &str) -> String {
     let Some(map) = ALIASES.read().expect("alias lock never poisons").clone() else {
         return value.to_string();

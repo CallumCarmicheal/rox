@@ -140,7 +140,7 @@
   },
   "$defs": {
     "NamedLayout": {
-      "description": "A dock layout the user saved as a named preset: a full dock dump under\na name. The dump stays raw JSON like [`Settings::layout`] so the file\nstill loads when the layout schema moves; the workspace validates it on\napply.",
+      "description": "A dock layout the user saved as a named preset: a full dock dump under\na name. The dump stays raw JSON like [`LookState::layout`] so the file\nstill loads when the layout schema moves; the workspace validates it on\napply.",
       "type": "object",
       "properties": {
         "name": {

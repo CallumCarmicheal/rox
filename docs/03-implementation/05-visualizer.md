@@ -144,7 +144,7 @@ little-endian throughout:
 
 ```
 offset  bytes  field
-0       8      magic  b"roxwave1"
+0       8      magic  b"roxwave2"
 8       8      source size   (u64)
 16      8      source mtime  (u64, unix seconds)
 24      4      path length N (u32)
@@ -213,8 +213,8 @@ into the shared slot with a sequence number. Failure at any step is a
 no usable GL keeps every other panel working.
 
 The GL the crate calls for itself (framebuffer, texture storage, the PBOs, `glGetString`
-for the log) is sixteen `extern "system"` pointers in `gl.rs`, resolved by name off the
-same load proc. No `gl` or `glow` crate for sixteen functions.
+for the log) is twenty-eight `extern "system"` pointers in `gl.rs`, resolved by name off
+the same load proc. No `gl` or `glow` crate for twenty-eight functions.
 
 Preset switches are the one reentrant path: projectM's callbacks fire from inside its
 own render call, so they only record what happened and the actual load runs on the
@@ -295,15 +295,16 @@ cold on a 32-thread machine and cached after that.
 
 The shared analysis is in `crates/rox-viz`: `feed.rs` (`AudioFeed`, the tap-to-view
 seam), `analysis.rs` (`Analyzer`, the Hann-windowed FFT and `log_bands`), `lib.rs`
-(exports). The panels and the on-disk pieces are in `crates/rox`: `panels/spectrum.rs`
-(`SpectrumPanel`, `SpectrumConfig`, the `Bars` state machine), `panels/waveform.rs`
-(`WaveformPanel`, the peaks load and the morphing strip), `peaks.rs` (the cache format),
-`player.rs` (`drain_tap`, `prime_feed`). The tap producer and the offline decoders
+(exports). The panels and the on-disk pieces sit across three crates:
+`crates/rox-panels/src/spectrum.rs` (`SpectrumPanel`, `SpectrumConfig`, the `Bars` state
+machine), `crates/rox-panels/src/waveform.rs` (`WaveformPanel`, the peaks load and the
+morphing strip), `crates/rox-library/src/peaks.rs` (the cache format), and
+`crates/rox-services/src/player.rs` (`drain_tap`, `prime_feed`). The tap producer and the offline decoders
 (`decode_peaks`, `decode_window`) are in `crates/rox-playback`: `output.rs`, `engine.rs`.
 Milkdrop is three crates: `crates/rox-milkdrop-sys` (`build.rs` runs cmake on
 `vendor/projectm`, `src/lib.rs` is the FFI surface), `crates/rox-milkdrop` (`lib.rs` for
 `Engine`, `Frame`, `Command`, `Status`; `worker.rs` the render thread; `context.rs` the
-headless GL context per platform; `gl.rs` the sixteen raw GL calls; `library.rs`
+headless GL context per platform; `gl.rs` the twenty-eight raw GL calls; `library.rs`
 `PresetLibrary` and `Rotation`; `examples/headless.rs` the cost baseline), and
 `crates/rox-panels/src/milkdrop.rs` (`MilkdropPanel`, `MilkdropConfig`, `FRAME_WGSL`, the
 paint closure and the settings pages). `AudioFeed::since` in `crates/rox-viz/src/feed.rs`

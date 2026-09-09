@@ -1266,11 +1266,13 @@ impl HealthWindow {
     /// `writer::readable` and `writer::supported` are the real source of
     /// truth for "can retag", and they answer per file rather than per
     /// extension. The gap is deliberate and worth knowing about: a
-    /// fragmented MP4 is refused at write time even though `.m4a` counts as
-    /// writable here, and catching those would mean opening every file in the
-    /// library, a scan-shaped cost for a diagnostic. So this tile reads as
-    /// "formats rox has a writer for", not "files rox will definitely
-    /// retag", and it undercounts on a library full of DASH-assembled m4a.
+    /// fragmented MP4 whose fragments sit at absolute file offsets is
+    /// refused at write time even though `.m4a` counts as writable here,
+    /// and catching those would mean opening every file in the library, a
+    /// scan-shaped cost for a diagnostic. So this tile reads as "formats
+    /// rox has a writer for", not "files rox will definitely retag". The
+    /// common fragmented shape, a DASH-assembled m4a, writes fine and isn't
+    /// part of the gap.
     fn formats_tile(&self, cx: &mut Context<Self>) -> AnyElement {
         let (value, caption, bar) = self.pass_cell(
             Stage::Formats,
@@ -1545,9 +1547,9 @@ fn albums_worded(count: u64) -> String {
 /// under them for a control.
 ///
 /// The icon sits on the value's row, muted, so a reader scanning the page
-/// picks a tile out by shape before reading a word of it: the four sections
-/// hold twelve numbers between them, and twelve identical boxes are twelve
-/// things to read in order.
+/// picks a tile out by shape before reading a word of it: the sections hold
+/// eleven numbers between them, and eleven identical boxes are eleven things
+/// to read in order.
 ///
 /// The description is the reason this window is readable by someone who
 /// didn't build it: "82" over "Album Art" is a number and a noun, and every

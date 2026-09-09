@@ -895,9 +895,10 @@ pub fn bpm_breakdown(conn: &Connection) -> rusqlite::Result<BpmCoverage> {
 ///
 /// An extension is a guess about a container, not a promise about a file.
 /// The writer probes the bytes, and it turns one shape down that no
-/// extension can show: a fragmented MP4 is refused at write time even though
-/// `.m4a` is on this list. A count built from here reads as "formats rox has
-/// a writer for", not "files rox will definitely retag".
+/// extension can show: a fragmented MP4 whose fragments sit at absolute
+/// file offsets is refused at write time even though `.m4a` is on this
+/// list. A count built from here reads as "formats rox has a writer for",
+/// not "files rox will definitely retag".
 pub const WRITABLE_EXTENSIONS: &[&str] = &["flac", "m4a", "m4b", "mp3", "mp4"];
 
 /// A path's lowered filename extension, in SQL. SQLite has no suffix
@@ -2184,7 +2185,7 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(album_artist, "", "the added column defaults empty");
+        assert_eq!(album_artist, "", "the new album_artist column reads empty");
         assert!(added > 0, "the added backfill stamped the old row");
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))

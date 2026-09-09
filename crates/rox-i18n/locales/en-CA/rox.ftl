@@ -68,12 +68,12 @@ signal-rate = Rate
 signal-reset-on-track = Reset on Track
     .description = Drain back to zero when a new song starts, so a phase doesn't begin from the last one's total
 signal-flush = Flush
+    .description = Send it back to zero now. It drains over a moment rather than snapping, so nothing following it jumps
 ## How many of a panel's bindings use one signal.
 signal-routes-in-panel = { $count ->
     [one] { $count } route in this panel
    *[other] { $count } routes in this panel
 }
-    .description = Send it back to zero now. It drains over a moment rather than snapping, so nothing following it jumps
 route-header = Route
 route-signal = Signal
     .description = Which shared signal this route follows; tuning it here tunes every route on it
@@ -1476,7 +1476,7 @@ health-desc-rating = Tracks you haven't rated yet.
 health-desc-replaygain = Tracks with no loudness measurement, so they play louder or quieter than the rest.
 health-desc-sort-names = How many names carry a sort name, the spelling that decides where they file alphabetically.
 health-desc-tempo = Tracks with no tempo, which is what sorting and matching by BPM read.
-health-desc-writable = Tracks in formats rox can read but can't write tags back into. Fragmented MP4 files refuse a write too, and they aren't counted here.
+health-desc-writable = Tracks in formats rox can read but can't write tags back into. A rare fragmented MP4 layout refuses a write too, and those aren't counted here.
 health-desc-year = Tracks with no release year.
 health-drill = Show These
 health-fix-analyze = Analyze Missing
@@ -1632,7 +1632,7 @@ eq-flatten = Flatten
 eq-freq-label = Freq
 eq-gain-label = Gain
 eq-heading = Equalizer
-eq-help-text = Drag a band to move it, scroll over one to widen or narrow it. The processing runs ahead of the buffer that feeds the sound card, so a move takes up to half a second to reach the speakers.
+eq-help-text = Drag a band to move it, scroll over one to widen or narrow it. The processing runs ahead of the buffer that feeds the sound card, so a move takes about 120 ms to reach the speakers while this window is open.
 eq-hint-off = Click to turn it off
 eq-hint-on = Click to turn it on
 eq-hint-open = Click to open the equalizer
@@ -2305,7 +2305,7 @@ pass-replaygain-title = { $count ->
     [one] Measure 1 track?
    *[other] Measure { $count } tracks?
 }
-pass-tempo-body = Two half-minute windows of each file are decoded and the beats counted, so the library can show what a track runs at. It works best on music recorded to a click and skips anything it can't measure. The numbers go in the library database and your files are untouched.
+pass-tempo-body = Two half-minute windows of each file are decoded and the beats counted, with more windows read when those two disagree, so the library can show what a track runs at. It works best on music recorded to a click and skips anything it can't measure. The numbers go in the library database and your files are untouched.
 pass-tempo-retry-body = An earlier pass already listened to these tracks and heard no beat in any of them. Retrying decodes every one again, so it's worth the wait only once the beat counting has improved.
 pass-tempo-retry-title = { $count ->
     [one] Listen to 1 refused track again?

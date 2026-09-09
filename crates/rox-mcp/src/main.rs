@@ -124,11 +124,11 @@ fn initialize(params: &Value) -> Value {
     })
 }
 
-/// The tool surface: now-playing, transport, library search, the queue,
-/// the rescan kick, and the long analysis passes, each a straight proxy
-/// of one socket method. `--dev` adds the
-/// drive tools over the socket's debug scope, for agents working on rox
-/// itself; a user-facing MCP config leaves them out.
+/// The tool surface: now-playing, transport, A-B repeat, library search, the
+/// queue, the rescan kick, and the long analysis passes, each a straight
+/// proxy of one socket method. `--dev` adds the drive tools over the socket's
+/// debug scope, for agents working on rox itself; a user-facing MCP config
+/// leaves them out.
 fn tools(dev: bool) -> Value {
     let mut tools = base_tools();
     if dev {
@@ -183,8 +183,8 @@ fn base_tools() -> Value {
         {
             "name": "search_library",
             "description": "Search the music library. Free terms match title, artist, \
-                            album, and genre; a field: prefix narrows to one, as in \
-                            artist:name or year:1990. Fields: title, artist, \
+                            album artist, album, and genre; a field: prefix narrows to \
+                            one, as in artist:name or year:1990. Fields: title, artist, \
                             albumartist, album, genre, year, folder, codec, rating, \
                             plays, added.",
             "inputSchema": {

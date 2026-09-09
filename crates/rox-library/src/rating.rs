@@ -14,7 +14,7 @@ use lofty::flac::FlacFile;
 use lofty::id3::v2::{Frame, Id3v2Tag};
 use lofty::mp4::{AtomData, AtomIdent, Ilst, Mp4File};
 use lofty::mpeg::MpegFile;
-use lofty::ogg::VorbisComments;
+use lofty::ogg::{OpusFile, VorbisComments};
 use lofty::probe::Probe;
 
 /// The exact-value key, the FreeDesktop media player spec's 0.0-1.0
@@ -140,6 +140,14 @@ fn read_inner(path: &Path, kind: FileType) -> Option<u8> {
                 .ilst()
                 .cloned()?;
             from_ilst(&tag)
+        }
+        // Opus keeps its comments in the same shape FLAC does, and the
+        // scanner reads a rating off them on its native parse, so the
+        // standalone reader has to agree with it.
+        FileType::Opus => {
+            let mut source = std::fs::File::open(path).ok()?;
+            let opus = OpusFile::read_from(&mut source, opts).ok()?;
+            from_vorbis(opus.vorbis_comments())
         }
         _ => None,
     }

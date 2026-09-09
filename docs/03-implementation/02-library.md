@@ -177,9 +177,9 @@ pipeline, per ADR 4's single metadata layer:
 
 1. Load the change key map: every local path with its stored `(mtime, size)`.
 2. Walk `root` recursively, keeping files whose extension is in `scanner::EXTENSIONS`
-   (flac, mp3, wav, ogg, oga, m4a, m4b, aac, aif, aiff, aifc, mka, caf, case-insensitive,
-   the one list an external open uses too), and sort the list so scan order is
-   deterministic.
+   (flac, mp3, wav, ogg, oga, opus, m4a, m4b, aac, aif, aiff, aifc, mka, caf,
+   case-insensitive, the one list an external open uses too), and sort the list so scan
+   order is deterministic.
 3. Per file: stat it, and if `(mtime, size)` matches the stored row, skip it without
    opening the file. That's why a rescan of an unchanged library is cheap.
 4. Otherwise read tags through lofty, wrapped in `catch_unwind`: a malformed file

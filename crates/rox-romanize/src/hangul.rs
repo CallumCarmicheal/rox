@@ -13,7 +13,7 @@
 //! boundary the way they're actually pronounced (신라 is Silla, not
 //! Sinla), which needs the sound-change table and a lookahead. What comes
 //! out of here is the syllable-by-syllable transliteration instead, so
-//! that name reads `sinla`. For a search key that's the better trade in
+//! that name reads `sinra`. For a search key that's the better trade in
 //! both directions: it's deterministic, and somebody typing what they see
 //! written is as likely to type the letters as the sounds.
 
@@ -21,7 +21,7 @@
 /// index is measured from.
 const BASE: u32 = 0xAC00;
 
-/// The nineteen initial consonants, in codepoint order. The eleventh is
+/// The nineteen initial consonants, in codepoint order. The twelfth is
 /// ㅇ, which is silent in this position and so spells nothing.
 const INITIAL: [&str; 19] = [
     "g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "", "j", "jj", "ch", "k", "t", "p",

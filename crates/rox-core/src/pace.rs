@@ -1,12 +1,13 @@
 //! Rough time arithmetic for the library passes: how fast a pass is going,
 //! how long the rest should take, and how to say so like a person.
 //!
-//! Both long passes (ReplayGain measurement, acoustic analysis) share the
-//! shape: a work list of tracks, a counter the workers bump, an afternoon of
-//! wall time nobody can see the end of from a bare "132 of 41,000". This
-//! module is the missing end: a [`Pace`] embedded in a pass's progress turns
-//! the counter into "about 2 hours left", and a rate persisted from the last
-//! pass (`SessionState`) prices the next one before it starts.
+//! The long passes (ReplayGain measurement, acoustic analysis, tempo,
+//! romanization) share the shape: a work list of tracks, a counter the
+//! workers bump, an afternoon of wall time nobody can see the end of from a
+//! bare "132 of 41,000". This module is the missing end: a [`Pace`] embedded
+//! in a pass's progress turns the counter into "about 2 hours left", and a
+//! rate persisted from the last pass (`SessionState`) prices the next one
+//! before it starts.
 //!
 //! Everything here is rough and says so in its wording. The only source is
 //! the pass itself, measured on this machine over these files; nothing is

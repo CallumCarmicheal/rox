@@ -457,8 +457,9 @@ pub fn run(
 /// Whether this track's vector may go into its own file.
 ///
 /// Three things have to hold, and all three fail quietly: the pass was asked
-/// for tags, the file is a format the writer handles ([`embed_tag::writable`]
-/// is MP3 and FLAC), and the track is a file rather than a slice of one. A
+/// for tags, the file is a format the vector has a tag path for
+/// ([`embed_tag::writable`] is MP3 and FLAC), and the track is a file rather
+/// than a slice of one. A
 /// cue subsong is the interesting refusal: twelve tracks share one image, so
 /// the last one to finish would leave the whole disc claiming to sound like
 /// itself. Those tracks keep their database row and nothing more, which is

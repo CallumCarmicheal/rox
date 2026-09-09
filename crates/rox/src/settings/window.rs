@@ -10,9 +10,10 @@
 //! song theming is on the editor locks, because the track is driving.
 //! Palettes import and export as the settings map's role-to-hex JSON,
 //! so a file, the settings entry, and a shared theme are one shape.
-//! Layout shows the opening workspace's dock tree (every split, tab
-//! group, and panel) with each panel's settings a click away, and
-//! moves whole compositions in and out as the layout dump's JSON.
+//! The Workspace page's composition section shows the opening
+//! workspace's dock tree (every split, tab group, and panel) with each
+//! panel's settings a click away, and moves whole compositions in and
+//! out as the layout dump's JSON.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -111,7 +112,7 @@ impl Global for OpenSettings {}
 /// Open the settings window, or bring the open one to the front. The
 /// state holds the library for the Library page, which edits it live,
 /// and the shared art bake for the window's own backdrop. The workspace
-/// and its window handle are the Layout page's subject: the tree renders
+/// and its window handle are the Workspace page's subject: the tree renders
 /// its dock, and an imported layout rebuilds in its window. The dock is
 /// passed separately as its own handle because open runs inside a
 /// workspace update, where the workspace entity can't be read.
@@ -492,7 +493,7 @@ struct SettingsWindow {
     /// The app-wide signal pool, for the screen shader's route editor: the
     /// routes it edits are the app's, and so are the signals they read.
     signals: Arc<rox_viz::signal::SignalHub>,
-    /// The workspace that opened this window, the Layout page's subject:
+    /// The workspace that opened this window, the Workspace page's subject:
     /// the tree renders its dock and imports rebuild it. Weak, so the
     /// settings window never keeps a closed workspace alive.
     workspace: WeakEntity<Workspace>,
@@ -613,7 +614,7 @@ struct SettingsWindow {
     workspace_authors: BTreeMap<String, String>,
     /// The Appearance page's new-icon-pack name field.
     pack_name: Entity<InputState>,
-    /// The mini-player roles the Layout page assigns, by preset name, kept
+    /// The mini-player roles the Workspace page assigns, by preset name, kept
     /// beside the settings file so the badges reflect edits without a
     /// reload; pushed back to the workspace so its button follows along.
     primary_layout: Option<String>,
@@ -836,7 +837,7 @@ struct SettingsWindow {
     /// This window pumps its own frames, so the backdrop needs its own
     /// wake on a new bake.
     _backdrop_changed: Subscription,
-    /// The Layout page's tree follows the dock: layout events catch
+    /// The Workspace page's tree follows the dock: layout events catch
     /// drags and resizes, the observe catches an import's set_center,
     /// which notifies without an event.
     _dock_changes: Vec<Subscription>,
