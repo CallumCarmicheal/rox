@@ -363,7 +363,9 @@ pub enum Density {
 /// album together over the canonical order as-is; the rest key one
 /// field, and genre and year re-sort the list by that field first
 /// (canonical inside each group), since the canonical order doesn't
-/// keep their runs contiguous.
+/// keep their runs contiguous. Search starts from projection row order,
+/// so [`GroupBy::search_sort`] names the corresponding sort for every
+/// grouping before searched runs are headed.
 #[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GroupBy {
@@ -383,6 +385,18 @@ impl GroupBy {
             GroupBy::Album | GroupBy::Artist => None,
             GroupBy::Genre => Some(SortKey::Genre),
             GroupBy::Year => Some(SortKey::Year),
+        }
+    }
+
+    /// The sort that makes a searched subset's groups contiguous. Search
+    /// starts in projection row order rather than the canonical browse
+    /// order, so album and artist need their leading canonical key put
+    /// back explicitly; `sort_view` supplies the rest as its tie-break.
+    pub fn search_sort(self) -> SortKey {
+        match self {
+            GroupBy::Album | GroupBy::Artist => SortKey::AlbumArtist,
+            GroupBy::Genre => SortKey::Genre,
+            GroupBy::Year => SortKey::Year,
         }
     }
 }
@@ -465,6 +479,11 @@ pub struct LibraryConfig {
     /// What the headers group on while they show.
     #[serde(default)]
     pub group_by: GroupBy,
+    /// Keep the current group headers while a text search is active. On by
+    /// default: search narrows the tracks but does not change the view's
+    /// structure. Off restores the legacy flat search result.
+    #[serde(default = "default_true")]
+    pub group_search_results: bool,
     /// The shown columns in display order, each with its width. Empty
     /// restores the registry default set. Named apart from the old
     /// index-keyed `columns` field so pre-registry layouts drop their
@@ -563,7 +582,8 @@ pub struct LibraryConfig {
     pub sort_on_click: bool,
 }
 
-// Hand-written over derived for the one default-true knob.
+// Hand-written rather than derived because several knobs intentionally
+// default on instead of taking bool's false default.
 impl Default for LibraryConfig {
     fn default() -> Self {
         LibraryConfig {
@@ -578,6 +598,7 @@ impl Default for LibraryConfig {
             density: None,
             headers: Headers::default(),
             group_by: GroupBy::default(),
+            group_search_results: true,
             column_layout: Vec::new(),
             sort_key: None,
             sort_desc: false,
@@ -953,6 +974,21 @@ mod tests {
             "the cover column shows, it sorts on nothing"
         );
         assert!(of("favourite").is_none(), "and the heart toggles");
+    }
+
+    /// Layouts saved before grouped search existed inherit the new on-by-
+    /// default behaviour, while an explicit off value survives a round trip.
+    #[test]
+    fn grouped_search_config_defaults_on_and_round_trips_off() {
+        let old: LibraryConfig = serde_json::from_str("{}").unwrap();
+        assert!(old.group_search_results);
+
+        let off: LibraryConfig =
+            serde_json::from_str(r#"{"group_search_results": false}"#).unwrap();
+        assert!(!off.group_search_results);
+        let saved = serde_json::to_value(&off).unwrap();
+        let restored: LibraryConfig = serde_json::from_value(saved).unwrap();
+        assert!(!restored.group_search_results);
     }
 
     /// A layout saved before composition folds its year and details
