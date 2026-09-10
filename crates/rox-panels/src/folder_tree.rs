@@ -1523,14 +1523,19 @@ impl FolderTreePanel {
                 );
             let built = match &row.kind {
                 RowKind::Cue { expanded, ids, .. } => {
+                    let image_ids = ids.clone();
                     base.on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             window.focus(&this.focus);
+                            this.type_ahead.clear();
                             this.cursor = Some(ix);
-                            // A double click's second press must not undo the first
-                            // toggle or start playback as a side effect of expanding.
-                            if event.click_count == 1 {
+                            // The folder row's split: a double click plays the
+                            // image whole, so its second press must not undo
+                            // the toggle the first one made.
+                            if event.click_count > 1 {
+                                this.play_ids(&image_ids, cx);
+                            } else {
                                 this.toggle_expand(ix, cx);
                             }
                         }),

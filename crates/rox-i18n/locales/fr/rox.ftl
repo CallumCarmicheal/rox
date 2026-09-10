@@ -1959,7 +1959,7 @@ tags-rename-move-errors = { $count ->
 }
 tags-rename-moving = Déplacement { $done }/{ $total }...
 tags-rename-nothing-to-move = Rien à déplacer
-tags-rename-pattern-help = { $placeholders } ; / crée un dossier, l'extension suit le fichier
+tags-rename-pattern-help = { $placeholders } ; / crée un dossier depuis la racine de la bibliothèque, sans / le fichier est renommé sur place, l'extension suit le fichier
 tags-rename-pattern-section = Motif
 tags-rename-preview-section = Aperçu
 tags-rename-unchanged = inchangé
@@ -2254,6 +2254,8 @@ lyrics-edit-hint-after-stamp = pour horodater
 lyrics-edit-hint-or = ou
 lyrics-edit-loading = Chargement de la feuille...
 lyrics-edit-lyrics = Modifier les paroles
+lyrics-edit-offset = Décalage
+lyrics-edit-offset-unit = s
 lyrics-edit-saving = Enregistrement...
 lyrics-edit-section = Paroles
 lyrics-edit-stamp = Horodater

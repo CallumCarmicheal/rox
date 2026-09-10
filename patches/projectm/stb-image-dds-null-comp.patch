@@ -1,0 +1,60 @@
+--- a/vendor/stb_image/stbi_DDS_c.h
++++ b/vendor/stb_image/stbi_DDS_c.h
+@@ -285,14 +285,12 @@
+ 	*x = header.dwWidth;
+ 	*y = header.dwHeight;
+ 
+-	if ( !is_compressed ) {
+-		*comp = 3;
++	if ( comp ) {
++		*comp = 4;
+ 
+-		if ( has_alpha )
+-			*comp = 4;
++		if ( !is_compressed && !has_alpha )
++			*comp = 3;
+ 	}
+-	else
+-		*comp = 4;
+ 
+ 	if ( iscompressed )
+ 		*iscompressed = is_compressed;
+@@ -385,7 +383,10 @@
+ 	/*	let the user know what's going on	*/
+ 	*x = s->img_x;
+ 	*y = s->img_y;
+-	*comp = s->img_n;
++	/*	rox patch: comp is optional, as it is for every loader in
++		stb_image.h itself. libprojectM's TextureManager passes nullptr,
++		so an unguarded write here was a segfault on every DDS texture.	*/
++	if( comp ) *comp = s->img_n;
+ 	/*	is this uncompressed?	*/
+ 	if( is_compressed )
+ 	{
+@@ -484,7 +485,7 @@
+ 		{
+ 			s->img_n = 4;
+ 		}
+-		*comp = s->img_n;
++		if( comp ) *comp = s->img_n;
+ 		sz = s->img_x*s->img_y*s->img_n*cubemap_faces;
+ 		dds_data = (unsigned char*)malloc( sz );
+ 		/*	do this once for each face	*/
+@@ -541,7 +542,7 @@
+ 		if( req_comp != s->img_n )
+ 		{
+ 			dds_data = stbi__convert_format( dds_data, s->img_n, req_comp, s->img_x, s->img_y );
+-			*comp = req_comp;
++			if( comp ) *comp = req_comp;
+ 		}
+ 	} else
+ 	{
+@@ -549,7 +550,7 @@
+ 		if( (has_alpha == 0) && (s->img_n == 4) )
+ 		{
+ 			dds_data = stbi__convert_format( dds_data, 4, 3, s->img_x, s->img_y );
+-			*comp = 3;
++			if( comp ) *comp = 3;
+ 		}
+ 	}
+ 	//	OK, done

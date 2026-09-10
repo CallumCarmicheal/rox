@@ -1902,7 +1902,7 @@ tags-rename-move-errors = { $count ->
 }
 tags-rename-moving = Movendo { $done }/{ $total }...
 tags-rename-nothing-to-move = Nada para mover
-tags-rename-pattern-help = { $placeholders }; / cria uma pasta, a extensão segue o arquivo
+tags-rename-pattern-help = { $placeholders }; / cria uma pasta a partir da raiz da biblioteca, sem / renomeia no lugar, a extensão segue o arquivo
 tags-rename-pattern-section = Padrão
 tags-rename-preview-section = Prévia
 tags-rename-unchanged = sem alteração
@@ -2192,6 +2192,8 @@ lyrics-edit-hint-after-stamp = para marcar
 lyrics-edit-hint-or = ou
 lyrics-edit-loading = Carregando a letra...
 lyrics-edit-lyrics = Editar letra
+lyrics-edit-offset = Deslocamento
+lyrics-edit-offset-unit = s
 lyrics-edit-saving = Salvando...
 lyrics-edit-section = Letra
 lyrics-edit-stamp = Marcar

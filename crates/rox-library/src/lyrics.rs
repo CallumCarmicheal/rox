@@ -251,9 +251,98 @@ pub fn default_sidecar(path: &Path) -> PathBuf {
 /// Format a position in seconds as an LRC time tag, `[mm:ss.xx]`, the
 /// stamp the editor prepends to a line.
 pub fn format_stamp(secs: f64) -> String {
-    let secs = secs.max(0.0);
-    let mins = (secs / 60.0).floor();
-    format!("[{:02}:{:05.2}]", mins as u64, secs - mins * 60.0)
+    format!("[{}]", stamp_body(secs, 2))
+}
+
+/// The `mm:ss.xx` inside a time tag, to `decimals` places. Rounded in
+/// whole units of the last place before the split into minutes, so a
+/// position a hair under the minute rounds to the next minute rather
+/// than to sixty seconds.
+fn stamp_body(secs: f64, decimals: usize) -> String {
+    let unit = 10_u64.pow(decimals as u32);
+    let total = (secs.max(0.0) * unit as f64).round() as u64;
+    let mins = total / (60 * unit);
+    let rest = total % (60 * unit);
+    if decimals == 0 {
+        format!("{mins:02}:{rest:02}")
+    } else {
+        format!(
+            "{mins:02}:{:02}.{:0width$}",
+            rest / unit,
+            rest % unit,
+            width = decimals
+        )
+    }
+}
+
+/// `text` with every time tag moved by `delta` seconds, the editor's
+/// offset nudge. The leading `[mm:ss.xx]` line stamps move, and so do the
+/// `<mm:ss.xx>` word stamps of enhanced LRC, so a sheet timed at both
+/// levels stays in step with itself. Id tags and the words stay as they
+/// were, every other byte of the text included, and a stamp keeps its own
+/// precision: a three-decimal sheet doesn't come back rounded to two. No
+/// stamp moves before zero.
+pub fn shift_stamps(text: &str, delta: f64) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find(['[', '<']) {
+        out.push_str(&rest[..open]);
+        rest = &rest[open..];
+        let close = if rest.starts_with('[') { ']' } else { '>' };
+        let Some(end) = rest.find(close) else {
+            break;
+        };
+        let inner = &rest[1..end];
+        match parse_time(inner) {
+            Some(secs) => {
+                // A whole-second stamp still needs the places the nudge
+                // moves by, so it grows to two.
+                let decimals = inner
+                    .split_once('.')
+                    .map_or(0, |(_, frac)| frac.trim().len())
+                    .max(2);
+                out.push_str(&rest[..1]);
+                out.push_str(&stamp_body(secs + delta, decimals));
+                out.push(close);
+            }
+            None => out.push_str(&rest[..=end]),
+        }
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Every stamp in `text` as (row, seconds): the line's index in the text
+/// as an editor counts rows, and the time the stamp sounds at, with an
+/// `[offset:ms]` tag applied the way [`parse`] applies it. A line
+/// carrying several stamps appears once per stamp. Time order, stable,
+/// so [`row_at`] can stop at the first stamp past the playhead the way
+/// [`active_line`] does, and two rows sharing a time keep their order.
+pub fn stamp_rows(text: &str) -> Vec<(usize, f64)> {
+    let offset = text.lines().find_map(offset_tag).unwrap_or(0.0) / 1000.0;
+    let mut rows: Vec<(usize, f64)> = text
+        .lines()
+        .enumerate()
+        .flat_map(|(row, raw)| {
+            scan_times(raw)
+                .0
+                .into_iter()
+                .map(move |at| (row, (at - offset).max(0.0)))
+        })
+        .collect();
+    rows.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    rows
+}
+
+/// The row under the playhead among [`stamp_rows`]: the row of the last
+/// stamp at or before `position`, with the same grace [`active_line`]
+/// gives. None before the first stamp, so nothing lights during an intro.
+pub fn row_at(rows: &[(usize, f64)], position: f64) -> Option<usize> {
+    rows.iter()
+        .take_while(|(_, at)| *at <= position + 0.05)
+        .last()
+        .map(|(row, _)| *row)
 }
 
 /// Strip a line's leading LRC time tags, returning the lyric text after
@@ -509,6 +598,48 @@ mod tests {
         assert_eq!(strip_leading_stamps("[00:12.00]hello"), "hello");
         assert_eq!(strip_leading_stamps("[00:01.00][00:05.00]hi"), "hi");
         assert_eq!(strip_leading_stamps("[ti:Song]"), "[ti:Song]");
+    }
+
+    #[test]
+    fn stamps_round_at_the_last_place_not_at_sixty_seconds() {
+        assert_eq!(format_stamp(59.999), "[01:00.00]");
+        assert_eq!(format_stamp(119.996), "[02:00.00]");
+        assert_eq!(format_stamp(-3.0), "[00:00.00]");
+    }
+
+    #[test]
+    fn shifting_moves_every_stamp_and_nothing_else() {
+        let sheet = "[ti:Song]\r\n[00:10.00][00:20.50]chorus <00:10.20>word\n\n[00:00.10]early\n[01:59.900]late\nplain [Chorus] line\n";
+        assert_eq!(
+            shift_stamps(sheet, 0.25),
+            "[ti:Song]\r\n[00:10.25][00:20.75]chorus <00:10.45>word\n\n[00:00.35]early\n[02:00.150]late\nplain [Chorus] line\n"
+        );
+        // Back the other way lands where it started, and a stamp can't
+        // go negative: the early line pins to zero instead.
+        assert_eq!(
+            shift_stamps(sheet, -0.25),
+            "[ti:Song]\r\n[00:09.75][00:20.25]chorus <00:09.95>word\n\n[00:00.00]early\n[01:59.650]late\nplain [Chorus] line\n"
+        );
+        // A whole-second stamp gains the places the nudge needs.
+        assert_eq!(shift_stamps("[00:05]hi", 0.25), "[00:05.25]hi");
+        // An unclosed bracket is text like any other.
+        assert_eq!(shift_stamps("[00:05.00]a [b", 1.0), "[00:06.00]a [b");
+    }
+
+    /// The editor lights the row under the playhead, so the lookup has to
+    /// answer in the text's own line indices: id tags and blank lines
+    /// count, a line with two stamps lights at both, an out-of-order
+    /// sheet resolves by time, and the offset tag moves the whole sheet.
+    #[test]
+    fn stamp_rows_keep_editor_line_indices() {
+        let sheet = "[offset:500]\n\n[00:10.00][00:30.00]chorus\n[00:20.00]verse\n";
+        let rows = stamp_rows(sheet);
+        assert_eq!(rows, [(2, 9.5), (3, 19.5), (2, 29.5)]);
+        assert_eq!(row_at(&rows, 0.0), None);
+        assert_eq!(row_at(&rows, 9.46), Some(2));
+        assert_eq!(row_at(&rows, 19.5), Some(3));
+        assert_eq!(row_at(&rows, 40.0), Some(2));
+        assert!(stamp_rows("no stamps\n[ti:x]").is_empty());
     }
 
     #[test]

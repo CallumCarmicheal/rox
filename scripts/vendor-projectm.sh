@@ -24,11 +24,9 @@ eval_sha256="48002253353392393a1a5a4d2b0fc04497cfff774f3a9df084ef5078aa4f28ee"
 
 out="vendor/projectm"
 stamp="$out/.rox-stamp"
-want="$projectm_commit-$eval_commit"
-
-if [[ -f $stamp && $(<"$stamp") == "$want" ]]; then
-    exit 0
-fi
+# Ordered by LC_ALL=C, see the pin at the top of the script. flake.nix applies
+# the same directory to its own fetch of the source.
+patches=(patches/projectm/*.patch)
 
 checksum() {
     if command -v sha256sum >/dev/null; then
@@ -37,6 +35,12 @@ checksum() {
         shasum -a 256
     fi | cut -d' ' -f1
 }
+
+want="$projectm_commit-$eval_commit-$(cat "${patches[@]}" | checksum)"
+
+if [[ -f $stamp && $(<"$stamp") == "$want" ]]; then
+    exit 0
+fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -62,5 +66,11 @@ fetch projectm "$projectm_commit" "$projectm_sha256" "$out"
 # directory here is a link error a long way downstream.
 fetch projectm-eval "$eval_commit" "$eval_sha256" "$out/vendor/projectm-eval"
 
+for p in "${patches[@]}"; do
+    # -F0 forbids fuzz, for the reason vendor-gpui.sh spells out: a hunk that
+    # drifted must fail here, not land wherever the search stops.
+    patch -p1 -F0 -d "$out" --no-backup-if-mismatch --quiet <"$p"
+done
+
 echo "$want" >"$stamp"
-echo "vendor-projectm: projectM $projectm_commit vendored into $out"
+echo "vendor-projectm: projectM $projectm_commit patched into $out"

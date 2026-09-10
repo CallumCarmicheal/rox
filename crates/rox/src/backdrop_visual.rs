@@ -942,9 +942,14 @@ fn start(visual: &mut Visual, player: &Entity<Player>, size: (u32, u32), cx: &Ap
     // Dropping the old engine joins its thread, so the two contexts are
     // never alive at once.
     visual.engine = None;
+    // The preset that was picked or locked last time comes back up, and it
+    // goes in with the spawn so the worker doesn't shuffle one first. An
+    // unlocked backdrop moves on from it after the duration, which is
+    // what unlocked means; it still starts where it was left.
     let engine = Engine::spawn(EngineOptions {
         feed: player.read(cx).feed(),
         library,
+        preset: config.preset.clone().filter(|path| path.is_file()),
         fps: config.fps,
         width: size.0,
         height: size.1,
@@ -957,15 +962,6 @@ fn start(visual: &mut Visual, player: &Entity<Player>, size: (u32, u32), cx: &Ap
     engine.send(Command::SetLocked(config.locked));
     let rotation = rotation(visual, &config);
     engine.send(Command::SetRotation(rotation));
-    // The preset that was picked or locked last time comes back up. An
-    // unlocked backdrop moves on from it after the duration, which is
-    // what unlocked means; it still starts where it was left.
-    if let Some(path) = config.preset.clone().filter(|path| path.is_file()) {
-        engine.send(Command::LoadPreset {
-            path,
-            smooth: false,
-        });
-    }
     visual.applied = Some(Applied::of(&config));
     visual.engine = Some(engine);
     visual.driving = Some(player.entity_id());

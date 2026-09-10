@@ -19,7 +19,7 @@ use gpui::{
 };
 use gpui_component::{Root, Sizable as _};
 
-use rox_core::settings::{self as core_settings, LayoutSize, Settings};
+use rox_core::settings::{self as core_settings, MilkdropPickerWindowState, Settings};
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel;
@@ -66,14 +66,16 @@ fn open_fresh_with(host: Box<dyn PresetHost>, cx: &mut App) {
     let player =
         rox_panel_api::windows::front_workspace(cx).map(|(_, state)| state.player.entity_id());
     let min = settings_ui::MIN_SIZE;
-    let (width, height) = Settings::load()
-        .windows
-        .milkdrop_picker
+    let saved = Settings::load().windows.milkdrop_picker;
+    let (width, height) = saved
         .filter(|s| s.width >= f32::from(min.width) && s.height >= f32::from(min.height))
         .map(|s| (s.width, s.height))
         // Tall rather than wide: it's a list, and a preset name runs to
         // about sixty characters.
         .unwrap_or((560., 640.));
+    // The switches come back where they were left; a first run starts
+    // on every preset with the folders showing.
+    let switches = saved.unwrap_or_default();
     let bounds = Bounds::centered(None, size(gpui::px(width), gpui::px(height)), cx);
     // The build runs inside the open, so the view comes back out through
     // a cell the closure and this frame share.
@@ -86,7 +88,7 @@ fn open_fresh_with(host: Box<dyn PresetHost>, cx: &mut App) {
         {
             let built = built.clone();
             move |window, cx| {
-                let view = cx.new(|cx| PickerWindow::new(host, player, window, cx));
+                let view = cx.new(|cx| PickerWindow::new(host, player, switches, window, cx));
                 *built.borrow_mut() = Some(view.downgrade());
                 view
             }
@@ -118,32 +120,54 @@ impl PickerWindow {
     fn new(
         host: Box<dyn PresetHost>,
         player: Option<EntityId>,
+        switches: MilkdropPickerWindowState,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // The frame persists on the OS close button, which never runs
         // remove_window, so write the size in the should-close hook, the
-        // settings window's move.
+        // settings window's move. The switches write as they flip, which
+        // is why this edits the entry in place rather than replacing it.
         window.on_window_should_close(cx, |window, _| {
             let frame = window.window_bounds().get_bounds();
             Settings::update(move |s| {
-                s.windows.milkdrop_picker = Some(LayoutSize {
-                    width: frame.size.width.into(),
-                    height: frame.size.height.into(),
-                });
+                let saved = s
+                    .windows
+                    .milkdrop_picker
+                    .get_or_insert_with(MilkdropPickerWindowState::default);
+                saved.width = frame.size.width.into();
+                saved.height = frame.size.height.into();
             });
             true
         });
         let browser = cx.new(|cx| {
             let mut browser = PresetBrowser::new(None, window, cx);
             browser.set_thumbs(rox_panels::milkdrop::thumbnails(), cx);
+            browser.set_favorites_only(switches.favorites_only, cx);
+            browser.set_nested(switches.nested, cx);
             browser
         });
-        let _browser_events = cx.subscribe(&browser, |this, _, event: &BrowserEvent, cx| {
-            let BrowserEvent::Pick(path) = event;
-            this.host.pick(path.clone(), cx);
-            cx.notify();
-        });
+        let _browser_events =
+            cx.subscribe(&browser, |this, _, event: &BrowserEvent, cx| match event {
+                BrowserEvent::Pick(path) => {
+                    this.host.pick(path.clone(), cx);
+                    cx.notify();
+                }
+                BrowserEvent::Switched {
+                    favorites_only,
+                    nested,
+                } => {
+                    let (favorites_only, nested) = (*favorites_only, *nested);
+                    Settings::update(move |s| {
+                        let saved = s
+                            .windows
+                            .milkdrop_picker
+                            .get_or_insert_with(MilkdropPickerWindowState::default);
+                        saved.favorites_only = favorites_only;
+                        saved.nested = nested;
+                    });
+                }
+            });
         let _host_events = Self::watch(&*host, cx);
         PickerWindow {
             host,

@@ -32,6 +32,7 @@ fn main() {
     let engine = Engine::spawn(EngineOptions {
         feed: Arc::clone(&feed),
         library,
+        preset: None,
         fps: 60,
         width: WIDTH,
         height: HEIGHT,

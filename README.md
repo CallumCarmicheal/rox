@@ -201,7 +201,7 @@ Run both vendor scripts once before building (the nix shell does this on entry):
 
 ```sh
 ./scripts/vendor-gpui.sh      # gpui and gpui-component, plus the patches under patches/
-./scripts/vendor-projectm.sh  # the pinned libprojectM that rox-milkdrop-sys compiles
+./scripts/vendor-projectm.sh  # the pinned libprojectM that rox-milkdrop-sys compiles, plus patches/projectm/
 ```
 
 Neither tree is checked in, and both are hard requirements: `[patch.crates-io]` points at

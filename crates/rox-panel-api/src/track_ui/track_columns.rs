@@ -164,6 +164,7 @@ pub fn cell(
             .text_color(color)
             .child(crate::panel::named(value, reading, readings))
     };
+    let numeric = |width: f32, value: String| numeric_cell(width, palette::text_muted(), value);
     Some(match key {
         "cover" => cover_cell(&c.cover, row_height),
         // The compact face shrinks the count and hangs a faint bar beside
@@ -182,10 +183,7 @@ pub fn cell(
                 ))
                 .child(div().text_xs().text_color(palette::text_faint()).child("|"))
             }),
-        "plays" => div()
-            .flex_none()
-            .text_color(palette::text_muted())
-            .child(SharedString::from(fmt_plays(c.plays))),
+        "plays" => numeric(PLAYS_WIDTH, fmt_plays(c.plays)),
         "number" => div()
             .flex_none()
             .w(px(22.))
@@ -204,27 +202,25 @@ pub fn cell(
         // The genre column takes no reading: genres are interned without
         // sort names, so there would never be one to draw.
         "genre" => text(c.genre, "", palette::text_muted()),
-        "year" => div()
-            .flex_none()
-            .text_color(palette::text_muted())
-            .child(SharedString::from(if c.year == 0 {
+        "year" => numeric(
+            YEAR_WIDTH,
+            if c.year == 0 {
                 String::new()
             } else {
                 c.year.to_string()
-            })),
+            },
+        ),
         // A zero length reads as unknown, not a real 0:00 (the scanner
         // leaves it zero when it can't read a file's tags), so the slot
         // stays blank like the year does, keeping its width for alignment.
-        "duration" => {
-            div()
-                .flex_none()
-                .text_color(palette::text_muted())
-                .child(SharedString::from(if c.duration_ms == 0 {
-                    String::new()
-                } else {
-                    fmt_ms(c.duration_ms)
-                }))
-        }
+        "duration" => numeric(
+            DURATION_WIDTH,
+            if c.duration_ms == 0 {
+                String::new()
+            } else {
+                fmt_ms(c.duration_ms)
+            },
+        ),
         "rating" => crate::track_ui::track_cells::rating(state.clone(), c.track_id, c.rating),
         "favourite" => {
             crate::track_ui::track_cells::favourite(state.clone(), c.track_id, c.favourite)
@@ -277,6 +273,34 @@ pub fn cover_cell(cover: &Option<Thumb>, row_height: f32) -> Div {
             .into_any_element(),
     };
     div().flex_none().flex().items_center().child(content)
+}
+
+/// The set widths of the readout cells, px at the stock font size: the
+/// library table's defaults for the same columns, so a track reads the
+/// same width in either surface. A content-sized cell would take a
+/// different width on every row ("8m ago" against "21m ago"), and since
+/// the text columns flex to fill what's left, every column after the first
+/// would drift with it. [`numeric_cell`] scales these with the app font.
+pub const PLAYS_WIDTH: f32 = 56.;
+pub const YEAR_WIDTH: f32 = 56.;
+pub const DURATION_WIDTH: f32 = 64.;
+pub const LAST_PLAYED_WIDTH: f32 = 84.;
+
+/// A fixed-width, right-aligned readout cell: a count, a year, a clock, or
+/// an age. The width holds across rows so the flexible text columns before
+/// it line up, and the right edge lines the digits up like the library
+/// table's numeric columns do. Anything wider than its slot clips rather
+/// than pushing the cells beside it.
+pub fn numeric_cell(width: f32, color: gpui::Rgba, value: String) -> Div {
+    div()
+        .flex_none()
+        .w(palette::scaled_px(width))
+        .flex()
+        .justify_end()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_color(color)
+        .child(SharedString::from(value))
 }
 
 /// A play count as a short readout, blank when never played.

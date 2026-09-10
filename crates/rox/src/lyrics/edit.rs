@@ -8,16 +8,23 @@
 //! save it rings the app-wide lyrics signal so every panel re-reads, then
 //! closes. Nothing is written until Save; closing leaves the file untouched.
 //!
+//! While the edited track plays, the row under the playhead lights in the
+//! input, so a sheet's timing can be judged against the song without
+//! leaving the editor. A pulled sheet that's timed right but runs early or
+//! late as a whole gets the header's offset control: a step in seconds and
+//! an arrow each way, and a press moves every stamp by the step, rewriting
+//! the tags in place.
+//!
 //! One window per track path, registered like the match window, so asking
 //! again focuses the open one instead of stacking a twin.
 
 use std::path::PathBuf;
 
 use gpui::{
-    actions, div, prelude::*, px, size, App, Bounds, Context, Div, Entity, Focusable, Global,
-    KeyBinding, KeyDownEvent, SharedString, Subscription, Window, WindowHandle,
+    actions, div, prelude::*, px, size, AnyElement, App, Bounds, Context, Div, Entity, Focusable,
+    Global, KeyBinding, KeyDownEvent, SharedString, Subscription, Window, WindowHandle,
 };
-use gpui_component::input::{Input, InputState, Position};
+use gpui_component::input::{Input, InputEvent, InputState, Position};
 use gpui_component::{Root, Sizable};
 
 use rox_library::cue::TrackKey;
@@ -28,7 +35,7 @@ use rox_core::settings::lyrics_dir;
 use rox_design::assets::icons;
 use rox_design::{palette, tokens};
 use rox_panel_api::panel::AppState;
-use rox_panel_kit::ui::{self as settings_ui, kbd_line, section, Seg};
+use rox_panel_kit::ui::{self as settings_ui, icon_button, kbd_line, section, Seg};
 use rox_panels::lyrics::StampLine;
 use rox_services::backdrop::{NowPlayingArt, WindowBackdrop};
 use rox_services::player::fmt_time;
@@ -36,6 +43,14 @@ use rox_services::player::fmt_time;
 /// The default window size: tall enough for a verse or two at a glance,
 /// and wide enough that a timestamped line rarely wraps.
 const DEFAULT_SIZE: (f32, f32) = (575., 620.);
+
+/// The wash behind the row under the playhead: the accent, thin enough
+/// that the stamp and the words read through it.
+const MARK_ALPHA: u8 = 48;
+
+/// The offset step the header opens with, in seconds: a quarter second,
+/// small enough to creep up on the beat and large enough to hear.
+const DEFAULT_STEP: &str = "0.25";
 
 actions!(lyrics_edit, [Save]);
 
@@ -110,15 +125,34 @@ struct LyricsEdit {
     error: Option<SharedString>,
     /// A save is in flight; the buttons hold still until it finishes.
     saving: bool,
+    /// Where the sheet's stamps sit, by row and time, kept current with
+    /// the text. The playhead mark and the offset arrows both read it.
+    rows: Vec<(usize, f64)>,
+    /// The offset step in seconds, as typed in the header; the arrows
+    /// move the sheet by it.
+    step: Entity<InputState>,
+    /// The whole second the stamp button last showed, so a playback tick
+    /// repaints the window only when that readout would change.
+    shown_secs: Option<u64>,
     now_art: Entity<NowPlayingArt>,
     backdrop: WindowBackdrop,
     _backdrop_changed: Subscription,
+    _player_changed: Subscription,
+    _input_changed: Subscription,
+    _step_changed: Subscription,
 }
 
 impl LyricsEdit {
     fn new(state: AppState, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).multi_line(true));
         window.focus(&input.read(cx).focus_handle(cx));
+        // The step takes only what parses as seconds, so a slip of the
+        // finger can't leave the arrows pointing at nothing.
+        let step = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(DEFAULT_STEP)
+                .validate(|s, _| s.trim().is_empty() || s.trim().parse::<f64>().is_ok())
+        });
         // The header names the track off its library tags, so the window
         // says what it is even before the file read comes in.
         let query =
@@ -129,6 +163,23 @@ impl LyricsEdit {
             format!("{} - {}", query.title, query.artist)
         };
         let _backdrop_changed = cx.observe(&state.now_art, |_, _, cx| cx.notify());
+        // The pump notifies the player on every tick; the window takes a
+        // frame from it only when the lit row or the stamp readout moves.
+        let _player_changed = cx.observe(&state.player, |this: &mut Self, _, cx| this.tick(cx));
+        // Every edit, stamp, and nudge lands as a change on the input, so
+        // one hook keeps the stamp index honest.
+        let _input_changed = cx.subscribe(&input, |this: &mut Self, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.reindex(cx);
+            }
+        });
+        // The arrows go inert on an empty or zero step, so the header
+        // repaints as it's typed.
+        let _step_changed = cx.subscribe(&step, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
         let now_art = state.now_art.clone();
         let this = LyricsEdit {
             state,
@@ -139,9 +190,15 @@ impl LyricsEdit {
             baseline: None,
             error: None,
             saving: false,
+            rows: Vec::new(),
+            step,
+            shown_secs: None,
             now_art,
             backdrop: WindowBackdrop::default(),
             _backdrop_changed,
+            _player_changed,
+            _input_changed,
+            _step_changed,
         };
         this.load(window, cx);
         this
@@ -188,6 +245,113 @@ impl LyricsEdit {
             .now_playing()
             .filter(|now| now.path() == self.path)
             .map(|now| now.position_secs)
+    }
+
+    /// Re-read where the stamps sit after the text changes, and re-light
+    /// the playhead row against them. The header's arrows go inert with
+    /// nothing to move, so the window takes a frame too.
+    fn reindex(&mut self, cx: &mut Context<Self>) {
+        self.rows = lyrics::stamp_rows(&self.input.read(cx).value());
+        self.mark(cx);
+        cx.notify();
+    }
+
+    /// A playback tick: move the lit row with the playhead, and repaint
+    /// the stamp readout when its second turns over. Every other frame the
+    /// pump would ask for is left alone.
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        self.mark(cx);
+        let secs = self.playback_position(cx).map(|secs| secs as u64);
+        if secs != self.shown_secs {
+            self.shown_secs = secs;
+            cx.notify();
+        }
+    }
+
+    /// Light the row under the playhead in the input, or none while
+    /// another track (or nothing) plays. The input repaints itself when
+    /// the row moves, so this costs no frame of the window's own.
+    fn mark(&mut self, cx: &mut Context<Self>) {
+        let row = self
+            .playback_position(cx)
+            .and_then(|position| lyrics::row_at(&self.rows, position));
+        let wash = palette::alpha(palette::accent(), MARK_ALPHA);
+        self.input.update(cx, |input, cx| {
+            input.set_marked_line(row.map(|row| (row, wash.into())), cx);
+        });
+    }
+
+    /// The header's step as seconds, or None while it's empty or zero:
+    /// nothing for the arrows to move by.
+    fn step_secs(&self, cx: &App) -> Option<f64> {
+        let secs: f64 = self.step.read(cx).value().trim().parse().ok()?;
+        (secs.is_finite() && secs > 0.0).then_some(secs)
+    }
+
+    /// Move every stamp in the sheet by the header's step, later for a
+    /// positive `direction` and earlier for a negative one: the arrows,
+    /// for a sheet whose lines are timed right against each other but run
+    /// early or late as a whole. The tags are rewritten in the text, so
+    /// what's saved is what any player reads, and the cursor stays on its
+    /// line.
+    fn nudge(&mut self, direction: f64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.saving || self.baseline.is_none() || self.rows.is_empty() {
+            return;
+        }
+        let Some(step) = self.step_secs(cx) else {
+            return;
+        };
+        let delta = step * direction;
+        let input = self.input.clone();
+        let (text, cursor) = {
+            let state = input.read(cx);
+            (state.value(), state.cursor_position())
+        };
+        let shifted = lyrics::shift_stamps(&text, delta);
+        input.update(cx, |state, cx| {
+            state.set_value(shifted, window, cx);
+            state.set_cursor_position(cursor, window, cx);
+        });
+    }
+
+    /// The header's offset control: the step in seconds, then an arrow
+    /// each way that moves the sheet by it. The arrows sit inert until
+    /// the sheet is in, while it has no stamps to move, and while the
+    /// step is empty or zero.
+    fn offset_control(&self, ready: bool, cx: &mut Context<Self>) -> AnyElement {
+        let inert = !ready || self.rows.is_empty() || self.step_secs(cx).is_none();
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(tokens::SPACE_XS)
+            .text_xs()
+            .child(
+                div()
+                    .text_color(palette::text_muted())
+                    .child(rox_i18n::t!("lyrics-edit-offset")),
+            )
+            .child(
+                // Room for a sign and three places; the field frames
+                // itself, so it reads as the one typed thing in the header.
+                div().w(px(56.)).child(Input::new(&self.step).xsmall()),
+            )
+            .child(
+                div()
+                    .text_color(palette::text_muted())
+                    .child(rox_i18n::t!("lyrics-edit-offset-unit")),
+            )
+            .child(icon_button(
+                icons::CHEVRON_LEFT,
+                inert,
+                cx.listener(|this, _, window, cx| this.nudge(-1.0, window, cx)),
+            ))
+            .child(icon_button(
+                icons::CHEVRON_RIGHT,
+                inert,
+                cx.listener(|this, _, window, cx| this.nudge(1.0, window, cx)),
+            ))
+            .into_any_element()
     }
 
     /// Advance to the next line, stamping the current one with the playback
@@ -421,7 +585,7 @@ impl Render for LyricsEdit {
                     .child(
                         section(
                             rox_i18n::t!("lyrics-edit-section"),
-                            None,
+                            Some(self.offset_control(ready, cx)),
                             div()
                                 .flex_1()
                                 .min_h_0()

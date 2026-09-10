@@ -191,6 +191,12 @@ fn match_tokens(tokens: &[Token], text: &str, out: &mut Vec<(Field, String)>) ->
 }
 
 impl Pattern {
+    /// Whether the pattern has a folder part at all: `%track% - %title%`
+    /// is a file name alone, `%album%/%title%` names a folder above it.
+    pub fn has_folders(&self) -> bool {
+        self.components.len() > 1
+    }
+
     /// Run the pattern over `path`: the last component against the file
     /// stem, earlier ones against the folders above it. A field captured
     /// twice keeps the deepest hit, so the filename outranks the folder

@@ -478,6 +478,7 @@ fn start(inner: &Inner) -> Result<(Engine, Arc<rox_viz::AudioFeed>), String> {
     let engine = Engine::spawn(EngineOptions {
         feed: Arc::clone(&feed),
         library,
+        preset: None,
         fps: FPS,
         width: WIDTH,
         height: HEIGHT,

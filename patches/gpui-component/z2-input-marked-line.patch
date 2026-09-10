@@ -1,0 +1,81 @@
+--- a/src/input/element.rs
++++ b/src/input/element.rs
+@@ -1329,6 +1329,27 @@
+             }
+         }
+ 
++        // rox patch: the marked row's background, under the selection and
++        // the text like the active line above, but keyed off the state's
++        // marked_line rather than the cursor. See InputState::set_marked_line.
++        if let Some((marked_row, color)) = state.marked_line {
++            let mut offset_y = invisible_top_padding;
++            for (ix, line) in prepaint.last_layout.lines.iter().enumerate() {
++                let height = line.size(line_height).height;
++                if visible_range.start + ix == marked_row {
++                    window.paint_quad(fill(
++                        Bounds::new(
++                            point(input_bounds.origin.x, origin.y + offset_y),
++                            size(bounds.size.width, height),
++                        ),
++                        color,
++                    ));
++                    break;
++                }
++                offset_y += height;
++            }
++        }
++
+         // Paint indent guides
+         if let Some(path) = prepaint.indent_guides_path.take() {
+             window.paint_path(path, cx.theme().border.opacity(0.85));
+--- a/src/input/state.rs
++++ b/src/input/state.rs
+@@ -5,7 +5,7 @@
+ use anyhow::Result;
+ use gpui::{
+     Action, App, AppContext, Bounds, ClipboardItem, Context, Entity, EntityInputHandler,
+-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
++    EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, KeyBinding,
+     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+     Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
+     Task, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _, px,
+@@ -279,6 +279,9 @@
+     /// The marked range is the temporary insert text on IME typing.
+     pub(super) ime_marked_range: Option<Selection>,
+     pub(super) last_layout: Option<LastLayout>,
++    /// rox patch: a row painted with a background of its own, apart from
++    /// the cursor's row. See [`Self::set_marked_line`].
++    pub(super) marked_line: Option<(usize, Hsla)>,
+     pub(super) last_cursor: Option<usize>,
+     /// The input container bounds
+     pub(super) input_bounds: Bounds<Pixels>,
+@@ -389,6 +392,7 @@
+             validate: None,
+             mode: InputMode::default(),
+             last_layout: None,
++            marked_line: None,
+             last_bounds: None,
+             last_selected_range: None,
+             last_cursor: None,
+@@ -549,6 +553,21 @@
+         self.mode.diagnostics_mut()
+     }
+ 
++    /// rox patch: mark a row (0-based, unwrapped) to paint with `color`
++    /// behind its text, independent of where the cursor is. Upstream only
++    /// paints the cursor's row, and only in code editor mode; rox's lyrics
++    /// editor lights the line under the playhead while the sheet is being
++    /// edited, which is a different row from the one being typed on.
++    /// `None` clears the mark. Repaints when the row changes; a color
++    /// change alone waits for the next frame something else asks for.
++    pub fn set_marked_line(&mut self, marked: Option<(usize, Hsla)>, cx: &mut Context<Self>) {
++        let moved = self.marked_line.map(|(row, _)| row) != marked.map(|(row, _)| row);
++        self.marked_line = marked;
++        if moved {
++            cx.notify();
++        }
++    }
++
+     /// Set placeholder
+     pub fn set_placeholder(
+         &mut self,

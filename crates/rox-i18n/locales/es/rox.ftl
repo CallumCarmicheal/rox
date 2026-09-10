@@ -1941,7 +1941,7 @@ tags-rename-move-errors = { $count ->
 }
 tags-rename-moving = Moviendo { $done }/{ $total }...
 tags-rename-nothing-to-move = No hay nada que mover
-tags-rename-pattern-help = { $placeholders }; / crea una carpeta, la extensión sigue al archivo
+tags-rename-pattern-help = { $placeholders }; / crea una carpeta desde la raíz de la biblioteca, sin / se renombra en el sitio, la extensión sigue al archivo
 tags-rename-pattern-section = Patrón
 tags-rename-preview-section = Vista previa
 tags-rename-unchanged = sin cambios
@@ -2258,6 +2258,8 @@ lyrics-edit-hint-after-stamp = para marcar
 lyrics-edit-hint-or = o
 lyrics-edit-loading = Cargando la letra...
 lyrics-edit-lyrics = Editar la letra
+lyrics-edit-offset = Desfase
+lyrics-edit-offset-unit = s
 lyrics-edit-saving = Guardando...
 lyrics-edit-section = Letras
 lyrics-edit-stamp = Marcar

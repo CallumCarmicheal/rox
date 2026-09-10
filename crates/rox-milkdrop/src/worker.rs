@@ -207,9 +207,12 @@ impl Worker {
             seq: 0,
         };
 
+        // A restored preset goes straight up, with no shuffle before it.
         // Nothing to load is a normal state: projectM renders its built-in
         // idle preset, so the panel is never blank.
-        if !worker.library.is_empty() {
+        if let Some(path) = options.preset {
+            worker.load(path, false);
+        } else if !worker.library.is_empty() {
             worker.advance(false);
         }
         worker.publish_status();
@@ -264,15 +267,7 @@ impl Worker {
                     pm::projectm_set_window_size(self.instance, width as usize, height as usize)
                 };
             }
-            Command::LoadPreset { path, smooth } => {
-                let index = self.library.index_of(&path);
-                match index {
-                    Some(index) => self.load_index(index, smooth),
-                    // A preset outside the scanned roots is still loadable;
-                    // the panel restores a remembered path this way.
-                    None => self.load_path(path, smooth),
-                }
-            }
+            Command::LoadPreset { path, smooth } => self.load(path, smooth),
             // Next and Previous only ever come from somebody clicking, and
             // the lock is about the visual not changing on its own. Refusing
             // an explicit ask made the menu items look broken. The automatic
@@ -513,6 +508,16 @@ impl Worker {
             self.advance(false);
         }
         self.publish_status();
+    }
+
+    /// Load a preset by path, through its rotation index when the library
+    /// holds it. A preset outside the scanned roots is still loadable; the
+    /// panel restores a remembered path this way.
+    fn load(&mut self, path: PathBuf, smooth: bool) {
+        match self.library.index_of(&path) {
+            Some(index) => self.load_index(index, smooth),
+            None => self.load_path(path, smooth),
+        }
     }
 
     fn load_index(&mut self, index: usize, smooth: bool) {
@@ -965,6 +970,7 @@ mod tests {
         let engine = Engine::spawn(EngineOptions {
             feed: Arc::clone(&feed),
             library: PresetLibrary::default(),
+            preset: None,
             fps: 60,
             width: 64,
             height: 64,
@@ -1057,6 +1063,7 @@ mod tests {
             let engine = Engine::spawn(EngineOptions {
                 feed: Arc::new(rox_viz::AudioFeed::new()),
                 library: PresetLibrary::default(),
+                preset: None,
                 fps: 60,
                 width: 64,
                 height: 64,
@@ -1199,6 +1206,7 @@ mod tests {
         let engine = Engine::spawn(EngineOptions {
             feed: Arc::new(rox_viz::AudioFeed::new()),
             library,
+            preset: None,
             fps: 60,
             width: 64,
             height: 64,
@@ -1293,6 +1301,7 @@ mod tests {
         let engine = Engine::spawn(EngineOptions {
             feed: Arc::new(rox_viz::AudioFeed::new()),
             library: PresetLibrary::default(),
+            preset: None,
             fps: 60,
             width: 64,
             height: 64,
@@ -1365,6 +1374,7 @@ mod tests {
         let engine = Engine::spawn(EngineOptions {
             feed: Arc::new(rox_viz::AudioFeed::new()),
             library: PresetLibrary::scan(&[dir.path().to_path_buf()], None),
+            preset: None,
             fps: 60,
             width: 64,
             height: 64,
@@ -1414,5 +1424,61 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
+    }
+
+    /// A restored preset is the first and only thing the worker loads. It
+    /// used to shuffle one in the constructor and take the restore as a
+    /// command after, so the owner saw two switches at start. The backdrop
+    /// writes what it sees to settings while locked, kept the random one
+    /// out of that pair, and came up somewhere else on every restart.
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs a GL driver")]
+    fn a_worker_spawned_with_a_preset_comes_up_on_it_without_a_shuffle_first() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a.milk", "b.milk", "c.milk"] {
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
+        let restore = dir.path().join("b.milk");
+
+        let engine = Engine::spawn(EngineOptions {
+            feed: Arc::new(rox_viz::AudioFeed::new()),
+            library: PresetLibrary::scan(&[dir.path().to_path_buf()], None),
+            preset: Some(restore.clone()),
+            fps: 60,
+            width: 64,
+            height: 64,
+        });
+        engine.send(Command::SetLocked(true));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match engine.status() {
+                Status::Running { .. } => break,
+                Status::Failed(message) => {
+                    eprintln!("no usable OpenGL here, skipping: {message}");
+                    return;
+                }
+                Status::Starting => {
+                    assert!(Instant::now() < deadline, "the engine never came up");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+        // Long enough for a stray shuffle to have been announced too.
+        std::thread::sleep(Duration::from_millis(100));
+
+        let changed: Vec<_> = engine
+            .take_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::PresetChanged(path) => Some(path),
+                Event::PresetFailed { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            changed,
+            vec![restore],
+            "the restored preset should be the one and only load at start"
+        );
     }
 }

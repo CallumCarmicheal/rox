@@ -95,15 +95,24 @@
       # the shellHook's scripts/vendor-projectm.sh downloads arrives as a
       # fetch here instead. The commit is duplicated from that script, bump
       # both together. fetchSubmodules pulls vendor/projectm-eval, which the
-      # build needs since ENABLE_SYSTEM_PROJECTM_EVAL is off.
+      # build needs since ENABLE_SYSTEM_PROJECTM_EVAL is off. The patches
+      # under patches/projectm/ go on top, no fuzz, as the script applies them.
       projectmSrc =
         pkgs:
-        pkgs.fetchFromGitHub {
-          owner = "projectM-visualizer";
-          repo = "projectm";
-          rev = "88f23c76743a38c6d8456a8c354c62186270f661";
-          fetchSubmodules = true;
-          hash = "sha256-vWVT5SF6SueykBX0NM5LLJGwWzxXsXzis2uMorBmN9w=";
+        pkgs.applyPatches {
+          name = "projectm-88f23c76-patched";
+          src = pkgs.fetchFromGitHub {
+            owner = "projectM-visualizer";
+            repo = "projectm";
+            rev = "88f23c76743a38c6d8456a8c354c62186270f661";
+            fetchSubmodules = true;
+            hash = "sha256-vWVT5SF6SueykBX0NM5LLJGwWzxXsXzis2uMorBmN9w=";
+          };
+          patches = lib.filesystem.listFilesRecursive ./patches/projectm;
+          patchFlags = [
+            "-p1"
+            "-F0"
+          ];
         };
 
       # Linux only: on macOS gpui's build script compiles Metal shaders with

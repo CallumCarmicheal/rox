@@ -11,7 +11,8 @@ GPU shader), plus the one panel that takes the other side of that trade: Milkdro
 [ADR 28](../02-architecture/decisions/28-adr-milkdrop.md). Version-sensitive: the tap
 ring is rtrb, the FFT is hand-rolled, the paint path is gpui's `canvas()`, and the
 Milkdrop engine is libprojectM pinned to master commit `88f23c76` (CMake version 4.2.0;
-the pin is in `scripts/vendor-projectm.sh` and `flake.nix`, bumped together).
+the pin is in `scripts/vendor-projectm.sh` and `flake.nix`, bumped together), with the
+patches under `patches/projectm/` applied on top by both.
 
 ## From the tap to the feed
 
@@ -230,9 +231,10 @@ the upload, and the worker takes the buffer back once the last handle drops, so 
 steady state allocates nothing on either side.
 
 **The panel.** `MilkdropPanel` (`crates/rox-panels/src/milkdrop.rs`) spawns the engine
-lazily on the first paint with a real size and pushes its config down as commands
-(duration, beat sensitivity, hard cuts, lock, rotation, the saved preset) so a restored
-layout comes up as it was left. The paint closure runs in order:
+lazily on the first paint with a real size, hands the saved preset in with the spawn
+so the worker comes up on it instead of shuffling one first, and pushes the rest of its
+config down as commands (duration, beat sensitivity, hard cuts, lock, rotation) so a
+restored layout comes up as it was left. The paint closure runs in order:
 
 1. Work out the render size: the panel's device pixels times the config's `scale`,
    each side clamped to 128..=4096. A new size is only acted on when it's seen for a

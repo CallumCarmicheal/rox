@@ -833,10 +833,13 @@ impl MilkdropPanel {
     /// alternative is a lock on the hot path of a render loop.
     fn start(&mut self, size: (u32, u32), cx: &mut Context<Self>) {
         let library = self.library().clone();
-        let restore = self.restore_path();
+        // The saved preset goes in with the spawn so the worker comes up
+        // on it rather than shuffling one and switching a frame later.
+        let preset = self.restore_path();
         let engine = Engine::spawn(EngineOptions {
             feed: self.state.player.read(cx).feed(),
             library,
+            preset,
             fps: self.config.fps,
             width: size.0,
             height: size.1,
@@ -852,12 +855,6 @@ impl MilkdropPanel {
         // draws its folder pick on the page while the worker quietly walks
         // the whole library.
         engine.send(Command::SetRotation(self.rotation()));
-        if let Some(path) = restore {
-            engine.send(Command::LoadPreset {
-                path,
-                smooth: false,
-            });
-        }
         self.engine = Some(engine);
     }
 

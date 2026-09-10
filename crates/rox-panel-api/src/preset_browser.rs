@@ -9,7 +9,9 @@
 //! presets exist and which one is up come from the host through
 //! [`PresetBrowser::set_presets`] and [`PresetBrowser::set_current`]; a
 //! click on a row goes back out as [`BrowserEvent::Pick`], and the host
-//! decides what a pick means. Stars are the one write the browser makes
+//! decides what a pick means. The favorites and nesting switches go out
+//! as [`BrowserEvent::Switched`] for a host that remembers them across
+//! opens. Stars are the one write the browser makes
 //! itself, straight to the app-wide favorites list, since a star means the
 //! same thing whoever's looking.
 //!
@@ -637,6 +639,9 @@ impl PresetTree {
 pub enum BrowserEvent {
     /// A row was clicked: put this preset up.
     Pick(PathBuf),
+    /// A switch flipped: where the favorites and nesting switches stand
+    /// now, for a host that brings them back on the next open.
+    Switched { favorites_only: bool, nested: bool },
 }
 
 /// One grid cell: a folder to step into, or a preset.
@@ -872,6 +877,7 @@ impl PresetBrowser {
     pub fn set_favorites_only(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.favorites_only != on {
             self.favorites_only = on;
+            self.switched(cx);
             cx.notify();
         }
     }
@@ -905,8 +911,17 @@ impl PresetBrowser {
         if self.nested != on {
             self.nested = on;
             self.reveal = true;
+            self.switched(cx);
             cx.notify();
         }
+    }
+
+    /// Tell the host where the switches stand.
+    fn switched(&self, cx: &mut Context<Self>) {
+        cx.emit(BrowserEvent::Switched {
+            favorites_only: self.favorites_only,
+            nested: self.nested,
+        });
     }
 
     /// How many presets the tree holds.

@@ -152,6 +152,14 @@ pub enum Command {
 pub struct EngineOptions {
     pub feed: Arc<rox_viz::AudioFeed>,
     pub library: PresetLibrary,
+    /// The preset to come up on, if the caller is restoring one. With
+    /// `None` the worker shuffles one from the library. A restored preset
+    /// sent as a command after spawn would land behind that shuffle, and
+    /// the owner would see two switches at start: the random one, then
+    /// the restore. The backdrop writes the preset it sees to settings
+    /// while locked, and with both events in one drain it kept the random
+    /// one, so every restart came up somewhere else.
+    pub preset: Option<PathBuf>,
     pub fps: u32,
     pub width: u32,
     pub height: u32,

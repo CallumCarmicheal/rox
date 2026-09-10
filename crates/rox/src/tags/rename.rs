@@ -2,7 +2,9 @@
 //! guesser run backwards. A pattern like `%albumartist%/%album%/%track% -
 //! %title%` renders each selected track's tags into a path under the
 //! library root that track is already under, keeps the file's own
-//! extension, and shows every move before any of them happen. Apply moves
+//! extension, and shows every move before any of them happen. A pattern
+//! with no `/` in it is a file name alone, so it renames the file where
+//! it sits instead of hoisting it to the root. Apply moves
 //! the files and moves the rows with [`Library::rename_files`], so ids,
 //! ratings, play counts, and playlist membership all persist across the move.
 //!
@@ -230,10 +232,21 @@ fn plan(tracks: &[Track], pattern: &guess::Pattern, exists: &dyn Fn(&Path) -> bo
             });
             continue;
         }
-        let root = track.root.clone().unwrap_or_default();
+        // A pattern that names folders lays them out from the root. One
+        // that's only a file name keeps the file in its own folder: the
+        // root is where the layout starts, and a plain rename has none.
+        let base = if pattern.has_folders() {
+            track.root.clone().unwrap_or_default()
+        } else {
+            track
+                .from
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default()
+        };
         let values = track.values.as_deref().unwrap_or_default();
         let to = match pattern.render(values) {
-            Ok(rendered) => with_extension(root.join(rendered), track.from.extension()),
+            Ok(rendered) => with_extension(base.join(rendered), track.from.extension()),
             Err(e) => {
                 moves.push(Move {
                     from: track.from.clone(),
@@ -1010,6 +1023,20 @@ mod tests {
         let got = run(
             &[album("/m/old/thing.flac", "Julie", "4")],
             "%albumartist%/%album%/%track% - %title%",
+            &[],
+        );
+        assert_eq!(
+            got[0].to,
+            PathBuf::from("/m/Boards/Geogaddi/04 - Julie.flac")
+        );
+        assert!(got[0].moves());
+    }
+
+    #[test]
+    fn a_pattern_without_folders_renames_in_place() {
+        let got = run(
+            &[album("/m/Boards/Geogaddi/Julie.flac", "Julie", "4")],
+            "%track% - %title%",
             &[],
         );
         assert_eq!(

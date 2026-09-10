@@ -1887,7 +1887,7 @@ tags-rename-move-errors = { $count ->
 }
 tags-rename-moving = Verschiebe { $done }/{ $total }...
 tags-rename-nothing-to-move = Nichts zu verschieben
-tags-rename-pattern-help = { $placeholders }; / macht einen Ordner, die Endung folgt der Datei
+tags-rename-pattern-help = { $placeholders }; / macht einen Ordner ab dem Bibliotheksordner, ohne / wird an Ort und Stelle umbenannt, die Endung folgt der Datei
 tags-rename-pattern-section = Muster
 tags-rename-preview-section = Vorschau
 tags-rename-unchanged = unverändert
@@ -2174,6 +2174,8 @@ lyrics-edit-hint-after-stamp = zum Stempeln
 lyrics-edit-hint-or = oder
 lyrics-edit-loading = Lade das Blatt...
 lyrics-edit-lyrics = Songtext bearbeiten
+lyrics-edit-offset = Versatz
+lyrics-edit-offset-unit = s
 lyrics-edit-saving = Speichere...
 lyrics-edit-section = Songtext
 lyrics-edit-stamp = Stempeln

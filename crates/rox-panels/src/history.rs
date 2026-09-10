@@ -16,6 +16,7 @@ use gpui::{
     Stateful, Subscription, UniformListScrollHandle, WeakEntity, Window,
 };
 use gpui_component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
+use gpui_component::scroll::Scrollbar;
 use gpui_component::Icon;
 use rox_core::fmt::fmt_ago;
 use rox_core::QUEUE_CAP;
@@ -971,11 +972,15 @@ impl HistoryPanel {
                 // Last Played is the record's own column; the rest, plays
                 // included, are shared. Blank when there is nothing to say.
                 None => match col.key {
-                    "lastplayed" => muted_cell(if t.last_played == 0 {
-                        String::new()
-                    } else {
-                        fmt_ago(now - t.last_played)
-                    }),
+                    "lastplayed" => track_columns::numeric_cell(
+                        track_columns::LAST_PLAYED_WIDTH,
+                        palette::text_muted(),
+                        if t.last_played == 0 {
+                            String::new()
+                        } else {
+                            fmt_ago(now - t.last_played)
+                        },
+                    ),
                     _ => continue,
                 },
             };
@@ -1481,14 +1486,27 @@ impl HistoryPanel {
                         .child(self.config.view.label()),
                 )
                 .child(
-                    uniform_list("history-rows", self.rows.len(), move |range, _, cx| {
-                        this.upgrade()
-                            .map(|this| this.update(cx, |this, cx| this.list_rows(range, cx)))
-                            .unwrap_or_default()
-                    })
-                    .track_scroll(self.scroll.clone())
-                    .flex_1()
-                    .w_full(),
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .child(
+                            uniform_list("history-rows", self.rows.len(), move |range, _, cx| {
+                                this.upgrade()
+                                    .map(|this| {
+                                        this.update(cx, |this, cx| this.list_rows(range, cx))
+                                    })
+                                    .unwrap_or_default()
+                            })
+                            .track_scroll(self.scroll.clone())
+                            .size_full(),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .child(Scrollbar::vertical(&self.scroll)),
+                        ),
                 )
         };
         // A right press arrives here in the capture phase, before any row's
@@ -1544,13 +1562,4 @@ impl HistoryPanel {
             })
         }))
     }
-}
-
-/// A trailing muted column: the record's own Plays and Last Played, right
-/// of the flexible text columns.
-fn muted_cell(text: String) -> Div {
-    div()
-        .flex_none()
-        .text_color(palette::text_muted())
-        .child(SharedString::from(text))
 }

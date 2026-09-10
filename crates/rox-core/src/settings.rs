@@ -823,11 +823,11 @@ pub struct WindowsState {
     /// shapes audio whether or not the window is ever opened.
     #[serde(alias = "eq_window", deserialize_with = "lenient::option")]
     pub eq: Option<LayoutSize>,
-    /// The Milkdrop preset picker's last size, shared between the backdrop
-    /// and the panels it serves, restored on the next open. None until the
-    /// window closes.
+    /// The Milkdrop preset picker's last size and its browser switches,
+    /// shared between the backdrop and the panels it serves, restored on
+    /// the next open. None until the window closes or a switch flips.
     #[serde(deserialize_with = "lenient::option")]
-    pub milkdrop_picker: Option<LayoutSize>,
+    pub milkdrop_picker: Option<MilkdropPickerWindowState>,
     /// The signals window's last size and the fold state of its explainer,
     /// restored on the next open. None until the window closes. The pool it
     /// edits is stored in the look bundle, since it travels with a workspace.
@@ -3847,6 +3847,30 @@ impl Default for SignalsWindowState {
     }
 }
 
+/// The Milkdrop preset picker's remembered shape: size in logical pixels,
+/// written on close, and the browser's two switches, written when they
+/// flip. An older file with only the size reads back with the switches
+/// where a first run starts them: every preset, folders showing.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MilkdropPickerWindowState {
+    pub width: f32,
+    pub height: f32,
+    pub favorites_only: bool,
+    pub nested: bool,
+}
+
+impl Default for MilkdropPickerWindowState {
+    fn default() -> Self {
+        MilkdropPickerWindowState {
+            width: 0.,
+            height: 0.,
+            favorites_only: false,
+            nested: true,
+        }
+    }
+}
+
 /// A window frame in logical pixels, plus whether the window was maximized
 /// (the frame is then the restore size).
 #[derive(Clone, Copy, Default, Serialize, Deserialize)]
@@ -4198,6 +4222,19 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A picker entry written before the switches were remembered is the
+    /// size alone. It reads back with the switches at their first-run
+    /// positions rather than failing the whole windows file.
+    #[test]
+    fn milkdrop_picker_state_reads_size_only_entry() {
+        let state: MilkdropPickerWindowState =
+            serde_json::from_str(r#"{"width": 560.0, "height": 640.0}"#).unwrap();
+        assert_eq!(state.width, 560.0);
+        assert_eq!(state.height, 640.0);
+        assert!(!state.favorites_only);
+        assert!(state.nested);
+    }
 
     /// A settings object with a look worth capturing, the source every
     /// bundle test snapshots from.
