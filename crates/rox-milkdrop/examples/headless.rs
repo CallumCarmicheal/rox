@@ -58,9 +58,13 @@ fn main() {
     loop {
         match engine.status() {
             Status::Running {
-                projectm_version, ..
+                projectm_version,
+                renderer,
+                gl_version,
+                ..
             } => {
                 println!("projectM version: {projectm_version}");
+                println!("renderer: {renderer} ({gl_version})");
                 break;
             }
             Status::Failed(message) => {

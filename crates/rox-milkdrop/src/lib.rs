@@ -90,6 +90,11 @@ pub enum Status {
     Running {
         preset: Option<PathBuf>,
         projectm_version: String,
+        /// `GL_RENDERER` and `GL_VERSION` as the driver reports them. The
+        /// panel names them when the engine runs but no frame arrives, so
+        /// a bug report carries the one fact that decides most of them.
+        renderer: String,
+        gl_version: String,
     },
     /// No usable OpenGL, or projectM refused to start. The string names the
     /// platform and the step, and is meant to be shown to the user.

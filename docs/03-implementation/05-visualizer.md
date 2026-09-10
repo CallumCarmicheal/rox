@@ -211,7 +211,27 @@ while frame N-1 is mapped out of the other, one frame of latency spent on not st
 the pipeline. The mapped rows are flipped top-first into a publish buffer and swapped
 into the shared slot with a sequence number. Failure at any step is a
 `Status::Failed(message)` the panel shows as body text, never a panic: a machine with
-no usable GL keeps every other panel working.
+no usable GL keeps every other panel working. A readback the driver refuses to map is
+a failure too, after `MAP_MISS_LIMIT` refusals in a row (thirty, half a second at sixty
+frames), since one refusal is a hiccup the next frame covers and a run of them is a
+driver that never will. The status a running worker publishes carries `GL_RENDERER`
+and `GL_VERSION` beside the projectM version.
+
+libprojectM's own log goes through `projectm_set_log_callback`, set once per process
+before the first engine and forwarded to `log` under a `projectm:` prefix, error and
+fatal as `error`, warn as `warn`, info as `info`. Without the callback every `LOG_*` in
+the library is a no-op, and the GL probe's summary line, shader compile errors and
+texture loads that failed went nowhere; a Windows release build has no stderr to catch
+them either.
+
+The panel says something in two states that are not failures but look like one from
+the chair. A worker still `Starting` past `STALL_GRACE` (five seconds, counted from
+the spawn or the latest resume) gets "still starting" over the body; a `Running`
+worker that has never put a frame up as a texture gets "no frame has arrived" with the
+renderer and GL version named. Both keep the transport controls, since pressing Next
+and watching a preset name land is how a reader tells a live worker from a dead one.
+Until this, both states were a black panel with no word, which on the machine it
+happens on looks exactly like the feature working with the lights off.
 
 The GL the crate calls for itself (framebuffer, texture storage, the PBOs, `glGetString`
 for the log) is twenty-eight `extern "system"` pointers in `gl.rs`, resolved by name off
@@ -318,5 +338,7 @@ headless GL context per platform; `gl.rs` the twenty-eight raw GL calls; `librar
 `PresetLibrary` and `Rotation`; `examples/headless.rs` the cost baseline), and
 `crates/rox-panels/src/milkdrop.rs` (`MilkdropPanel`, `MilkdropConfig`, `FRAME_WGSL`, the
 paint closure and the settings pages). `AudioFeed::since` in `crates/rox-viz/src/feed.rs`
-is the worker's audio pull, and `patches/gpui/z4-dynamic-user-textures.patch` adds
-the three window calls the panel draws through.
+is the worker's audio pull, `patches/gpui/z4-dynamic-user-textures.patch` adds
+the three window calls the panel draws through, and
+`patches/gpui/z6-dynamic-texture-registration-errors.patch` makes the registration
+report a device that refused the allocation instead of keeping an id over nothing.

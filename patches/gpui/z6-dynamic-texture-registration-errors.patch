@@ -1,0 +1,198 @@
+Dynamic texture registration reports a device that refused the allocation.
+
+`register_dynamic_texture` on the platform window returned nothing, so a
+`CreateTexture2D` that failed on DirectX left the window holding an id
+over no texture: `update_user_texture` accepted every frame for it and
+the chain sampled an unbound slot, which reads as black. The only trace
+was the HRESULT `log_err` wrote. The platform call now returns
+`Result<(), String>`, DirectX answers with the size it was refused (and
+`unsupported` below the feature level, the same word the chain path
+uses), and `Window::register_dynamic_texture` forgets the id and hands
+the message to the caller, who already shows registration errors. Blade
+and Metal don't fail here, so their windows wrap the call in `Ok`.
+
+Diffed against the tree with z1 through z5 applied.
+
+diff -ruN -x .rox-stamp -x target a/src/platform/linux/wayland/window.rs b/src/platform/linux/wayland/window.rs
+--- a/src/platform/linux/wayland/window.rs	2026-09-10 10:01:25.501678741 -0600
++++ b/src/platform/linux/wayland/window.rs	2026-09-10 10:02:38.281489374 -0600
+@@ -1153,10 +1153,16 @@
+             .register_user_texture(id, width, height, rgba8);
+     }
+ 
+-    fn register_dynamic_texture(&self, id: u32, width: u32, height: u32) {
++    fn register_dynamic_texture(
++        &self,
++        id: u32,
++        width: u32,
++        height: u32,
++    ) -> std::result::Result<(), String> {
+         self.borrow_mut()
+             .renderer
+             .register_dynamic_texture(id, width, height);
++        Ok(())
+     }
+ 
+     fn update_user_texture(&self, id: u32, rgba8: std::sync::Arc<Vec<u8>>) {
+diff -ruN -x .rox-stamp -x target a/src/platform/linux/x11/window.rs b/src/platform/linux/x11/window.rs
+--- a/src/platform/linux/x11/window.rs	2026-09-10 10:01:25.501957853 -0600
++++ b/src/platform/linux/x11/window.rs	2026-09-10 10:02:38.281790766 -0600
+@@ -1694,12 +1694,18 @@
+             .register_user_texture(id, width, height, rgba8);
+     }
+ 
+-    fn register_dynamic_texture(&self, id: u32, width: u32, height: u32) {
++    fn register_dynamic_texture(
++        &self,
++        id: u32,
++        width: u32,
++        height: u32,
++    ) -> std::result::Result<(), String> {
+         self.0
+             .state
+             .borrow_mut()
+             .renderer
+             .register_dynamic_texture(id, width, height);
++        Ok(())
+     }
+ 
+     fn update_user_texture(&self, id: u32, rgba8: std::sync::Arc<Vec<u8>>) {
+diff -ruN -x .rox-stamp -x target a/src/platform/mac/window.rs b/src/platform/mac/window.rs
+--- a/src/platform/mac/window.rs	2026-09-10 10:01:25.502251875 -0600
++++ b/src/platform/mac/window.rs	2026-09-10 10:02:38.282480641 -0600
+@@ -1610,11 +1610,17 @@
+     }
+ 
+     #[cfg(feature = "macos-blade")]
+-    fn register_dynamic_texture(&self, id: u32, width: u32, height: u32) {
++    fn register_dynamic_texture(
++        &self,
++        id: u32,
++        width: u32,
++        height: u32,
++    ) -> std::result::Result<(), String> {
+         self.0
+             .lock()
+             .renderer
+             .register_dynamic_texture(id, width, height);
++        Ok(())
+     }
+ 
+     #[cfg(feature = "macos-blade")]
+diff -ruN -x .rox-stamp -x target a/src/platform/windows/directx_renderer.rs b/src/platform/windows/directx_renderer.rs
+--- a/src/platform/windows/directx_renderer.rs	2026-09-10 10:01:25.503043451 -0600
++++ b/src/platform/windows/directx_renderer.rs	2026-09-10 10:02:38.282838274 -0600
+@@ -2234,15 +2234,29 @@
+     /// Allocates a texture the caller means to overwrite. `DEFAULT` usage so
+     /// `update_user_texture` can write it, and zeros at creation so it starts
+     /// as transparent black. Registering an id twice is a no-op.
+-    pub(crate) fn register_dynamic_texture(&mut self, id: u32, width: u32, height: u32) {
+-        if !self.shaders.supported || self.shaders.textures.contains_key(&id) {
+-            return;
++    pub(crate) fn register_dynamic_texture(
++        &mut self,
++        id: u32,
++        width: u32,
++        height: u32,
++    ) -> std::result::Result<(), String> {
++        if !self.shaders.supported {
++            return Err("unsupported".to_string());
++        }
++        if self.shaders.textures.contains_key(&id) {
++            return Ok(());
+         }
+         let zeros = vec![0u8; width as usize * height as usize * 4];
+-        if let Some(texture) =
+-            create_user_texture(&self.devices.device, width, height, &zeros, true)
+-        {
+-            self.shaders.textures.insert(id, texture);
++        match create_user_texture(&self.devices.device, width, height, &zeros, true) {
++            Some(texture) => {
++                self.shaders.textures.insert(id, texture);
++                Ok(())
++            }
++            // The HRESULT is already in the log from `create_user_texture`;
++            // this is the line the caller can put on screen.
++            None => Err(format!(
++                "Direct3D 11 would not create a {width}x{height} texture for the frame"
++            )),
+         }
+     }
+ 
+diff -ruN -x .rox-stamp -x target a/src/platform/windows/window.rs b/src/platform/windows/window.rs
+--- a/src/platform/windows/window.rs	2026-09-10 10:01:25.503043451 -0600
++++ b/src/platform/windows/window.rs	2026-09-10 10:02:38.282838274 -0600
+@@ -1012,12 +1012,17 @@
+             .register_user_texture(id, width, height, rgba8);
+     }
+ 
+-    fn register_dynamic_texture(&self, id: u32, width: u32, height: u32) {
++    fn register_dynamic_texture(
++        &self,
++        id: u32,
++        width: u32,
++        height: u32,
++    ) -> std::result::Result<(), String> {
+         self.0
+             .state
+             .borrow_mut()
+             .renderer
+-            .register_dynamic_texture(id, width, height);
++            .register_dynamic_texture(id, width, height)
+     }
+ 
+     fn update_user_texture(&self, id: u32, rgba8: std::sync::Arc<Vec<u8>>) {
+diff -ruN -x .rox-stamp -x target a/src/platform.rs b/src/platform.rs
+--- a/src/platform.rs	2026-09-10 10:01:25.504716444 -0600
++++ b/src/platform.rs	2026-09-10 10:02:38.284064303 -0600
+@@ -594,7 +594,16 @@
+     fn register_user_shader(&self, _id: u32, _source: &str, _decorated: &str) {}
+     fn register_screen_shader(&self, _id: u32, _chain: &[ChainPassDesc]) {}
+     fn register_user_texture(&self, _id: u32, _width: u32, _height: u32, _rgba8: &[u8]) {}
+-    fn register_dynamic_texture(&self, _id: u32, _width: u32, _height: u32) {}
++    /// `Err` is the device refusing the allocation, with the reason; the
++    /// window forgets the id when it hears one.
++    fn register_dynamic_texture(
++        &self,
++        _id: u32,
++        _width: u32,
++        _height: u32,
++    ) -> std::result::Result<(), String> {
++        Ok(())
++    }
+     fn update_user_texture(&self, _id: u32, _rgba8: std::sync::Arc<Vec<u8>>) {}
+     fn release_user_texture(&self, _id: u32) {}
+     fn set_post_shader(&self, _chain: Option<&[ChainPassDesc]>) {}
+diff -ruN -x .rox-stamp -x target a/src/window.rs b/src/window.rs
+--- a/src/window.rs	2026-09-10 10:01:25.504716444 -0600
++++ b/src/window.rs	2026-09-10 10:02:38.284064303 -0600
+@@ -3548,7 +3548,8 @@
+     /// Feed it with [`Window::update_user_texture`] and free it with
+     /// [`Window::release_user_texture`]; a texture nobody releases lives until
+     /// the window closes, the way a registered image does. Backends without a
+-    /// shader pipeline return `Err("unsupported")`.
++    /// shader pipeline return `Err("unsupported")`, and a device that refuses
++    /// the allocation returns its reason, with no id kept for it.
+     ///
+     /// rox patch: the dynamic half of the shader chains, for a source that
+     /// produces a new frame faster than an upload-once texture can carry it.
+@@ -3568,8 +3569,17 @@
+                 return Err("unsupported".to_string());
+             }
+             let id = self.user_textures.register_dynamic(width, height)?;
+-            self.platform_window
+-                .register_dynamic_texture(id.0, width, height);
++            // A device that won't allocate the texture used to leave the id
++            // registered over nothing: updates were accepted and the chain
++            // sampled an unbound slot, which reads as black with no word
++            // about why. Now the refusal comes back to the caller.
++            if let Err(message) = self
++                .platform_window
++                .register_dynamic_texture(id.0, width, height)
++            {
++                self.user_textures.release(id);
++                return Err(message);
++            }
+             Ok(id)
+         }
+         #[cfg(not(any(

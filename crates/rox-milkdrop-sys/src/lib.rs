@@ -54,6 +54,31 @@ pub type projectm_preset_switch_failed_event = Option<
     ),
 >;
 
+/// Severity of a message handed to [`projectm_log_callback`]. The header
+/// declares a plain C enum, which is an `int` on every target we build for;
+/// it crosses the boundary as one rather than as a Rust enum, since a value
+/// outside the declared set would be undefined behaviour in a Rust enum and
+/// only an unknown level in an integer.
+pub type projectm_log_level = core::ffi::c_int;
+pub const PROJECTM_LOG_LEVEL_NOTSET: projectm_log_level = 0;
+pub const PROJECTM_LOG_LEVEL_TRACE: projectm_log_level = 1;
+pub const PROJECTM_LOG_LEVEL_DEBUG: projectm_log_level = 2;
+pub const PROJECTM_LOG_LEVEL_INFO: projectm_log_level = 3;
+pub const PROJECTM_LOG_LEVEL_WARN: projectm_log_level = 4;
+pub const PROJECTM_LOG_LEVEL_ERROR: projectm_log_level = 5;
+pub const PROJECTM_LOG_LEVEL_FATAL: projectm_log_level = 6;
+
+/// Receives every line projectM would log. Without one registered, every
+/// `LOG_*` inside libprojectM is a no-op. The message is only valid for the
+/// duration of the call and may hold line breaks.
+pub type projectm_log_callback = Option<
+    unsafe extern "C" fn(
+        message: *const c_char,
+        log_level: projectm_log_level,
+        user_data: *mut c_void,
+    ),
+>;
+
 extern "C" {
     // core.h
     pub fn projectm_create_with_opengl_load_proc(
@@ -103,6 +128,15 @@ extern "C" {
         samples: *const f32,
         count: u32,
         channels: projectm_channels,
+    );
+
+    // logging.h
+    /// Process-wide unless `current_thread_only`, and independent of any
+    /// instance. Pass `None` to remove it.
+    pub fn projectm_set_log_callback(
+        callback: projectm_log_callback,
+        current_thread_only: bool,
+        user_data: *mut c_void,
     );
 
     // callbacks.h

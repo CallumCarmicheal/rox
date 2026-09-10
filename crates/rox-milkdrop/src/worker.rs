@@ -46,6 +46,13 @@ const MAX_SIZE: u32 = 4096;
 const DEFAULT_PRESET_DURATION: f64 = 30.0;
 const DEFAULT_BEAT_SENSITIVITY: f32 = 1.0;
 
+/// Consecutive readback maps the driver can refuse before the worker gives
+/// up. One refusal is a hiccup and the next frame covers it. Thirty in a
+/// row, half a second at sixty frames, is a driver that is never going to
+/// map the buffer, and until this the panel sat black over it with nothing
+/// but a warning per frame in the log.
+const MAP_MISS_LIMIT: u32 = 30;
+
 /// What projectM's callbacks write down. Boxed and kept alive for as long as
 /// the instance is, because projectM holds the pointer.
 #[derive(Default)]
@@ -85,6 +92,12 @@ struct Worker {
     instance: pm::projectm_handle,
     callbacks: Box<Callbacks>,
     version: String,
+    /// `GL_RENDERER` and `GL_VERSION`, kept for the status and for the
+    /// message a readback failure names.
+    renderer: String,
+    gl_version: String,
+    /// Readback maps refused in a row. Reset by the next one that works.
+    map_misses: u32,
 
     targets: Targets,
     /// Where the next frame's pixels are written. Buffers come back here
@@ -117,17 +130,16 @@ struct Worker {
 
 impl Worker {
     fn start(options: EngineOptions, shared: Arc<Shared>) -> Result<Worker, String> {
+        forward_projectm_log();
         let headless = Box::new(context::create()?);
         if !headless.is_current() {
             return Err("the OpenGL context came up but is not current".to_string());
         }
 
         let gl = Gl::load(|name| headless.get_proc_address(name))?;
-        log::info!(
-            "milkdrop engine on {} ({})",
-            gl.string(gl::RENDERER),
-            gl.string(gl::VERSION)
-        );
+        let renderer = gl.string(gl::RENDERER);
+        let gl_version = gl.string(gl::VERSION);
+        log::info!("milkdrop engine on {renderer} ({gl_version})");
 
         let width = options.width.clamp(MIN_SIZE, MAX_SIZE);
         let height = options.height.clamp(MIN_SIZE, MAX_SIZE);
@@ -192,6 +204,9 @@ impl Worker {
             instance,
             callbacks,
             version,
+            renderer,
+            gl_version,
+            map_misses: 0,
             targets,
             scratch: Vec::new(),
             waiting: None,
@@ -245,7 +260,14 @@ impl Worker {
 
             self.feed_audio();
             if !self.paused {
-                self.render();
+                if let Err(message) = self.render() {
+                    // The loop ends here and the worker drops on its own
+                    // thread, context and all. The status is what the
+                    // panel shows over the last frame it got.
+                    log::warn!("milkdrop engine stopped: {message}");
+                    self.shared.set_status(Status::Failed(message));
+                    return;
+                }
             }
             self.drain_callbacks();
         }
@@ -337,7 +359,10 @@ impl Worker {
         }
     }
 
-    fn render(&mut self) {
+    /// One frame: render, start this frame's readback, publish the last
+    /// one. `Err` is a readback the driver refuses to map, which ends the
+    /// worker; see [`MAP_MISS_LIMIT`].
+    fn render(&mut self) -> Result<(), String> {
         let (width, height) = (self.targets.width, self.targets.height);
         let stride = width as usize * 4;
         let bytes = stride * height as usize;
@@ -371,7 +396,7 @@ impl Worker {
                 // buffer yet, so there's nothing to publish.
                 (self.gl.BindBuffer)(gl::PIXEL_PACK_BUFFER, 0);
                 (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, 0);
-                return;
+                return Ok(());
             }
 
             let started = Instant::now();
@@ -385,11 +410,24 @@ impl Worker {
             if mapped.is_null() {
                 (self.gl.BindBuffer)(gl::PIXEL_PACK_BUFFER, 0);
                 (self.gl.BindFramebuffer)(gl::FRAMEBUFFER, 0);
-                if let Some(error) = self.gl.take_error() {
-                    log::warn!("milkdrop readback could not map the pixel buffer: gl {error:#x}");
+                let error = match self.gl.take_error() {
+                    Some(error) => format!(" (gl error {error:#x})"),
+                    None => String::new(),
+                };
+                self.map_misses += 1;
+                // Once when it starts, not sixty times a second.
+                if self.map_misses == 1 {
+                    log::warn!("milkdrop readback could not map the pixel buffer{error}");
                 }
-                return;
+                if self.map_misses >= MAP_MISS_LIMIT {
+                    return Err(format!(
+                        "{} would not map the readback buffer {} frames in a row{error}",
+                        self.renderer, self.map_misses
+                    ));
+                }
+                return Ok(());
             }
+            self.map_misses = 0;
 
             self.scratch.resize(bytes, 0);
             let source = std::slice::from_raw_parts(mapped as *const u8, bytes);
@@ -408,6 +446,7 @@ impl Worker {
         }
 
         self.publish(width, height);
+        Ok(())
     }
 
     /// Swap the finished pixels into the shared slot and take the previous
@@ -561,6 +600,8 @@ impl Worker {
         self.shared.set_status(Status::Running {
             preset: self.preset.clone(),
             projectm_version: self.version.clone(),
+            renderer: self.renderer.clone(),
+            gl_version: self.gl_version.clone(),
         });
     }
 }
@@ -797,6 +838,42 @@ fn set_texture_paths(instance: pm::projectm_handle, library: &PresetLibrary) {
     }
     let paths: Vec<*const c_char> = owned.iter().map(|path| path.as_ptr()).collect();
     unsafe { pm::projectm_set_texture_search_paths(instance, paths.as_ptr(), paths.len()) };
+}
+
+/// Hand projectM's own log lines to `log`. Without a callback every `LOG_*`
+/// inside libprojectM is a no-op, so the GL probe's summary line, every
+/// shader compile error and every texture it couldn't load went nowhere,
+/// and a Windows release build has no stderr to catch them either. The
+/// callback is independent of any instance and covers every thread, so
+/// the thumbnailer's engine gets it for free, and it's set once because a
+/// second call would only replace it with itself.
+fn forward_projectm_log() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        pm::projectm_set_log_callback(Some(on_log), false, std::ptr::null_mut());
+    });
+}
+
+/// projectM's fatal and error both land as `error`: fatal is what precedes a
+/// null instance, error is a shader that didn't compile, and both are what
+/// someone reading a black panel's log is after. Trace and debug only exist
+/// in projectM's debug builds and go to `debug` for the one that has them.
+unsafe extern "C" fn on_log(
+    message: *const c_char,
+    level: pm::projectm_log_level,
+    _user_data: *mut c_void,
+) {
+    if message.is_null() {
+        return;
+    }
+    let message = CStr::from_ptr(message).to_string_lossy();
+    let level = match level {
+        pm::PROJECTM_LOG_LEVEL_FATAL | pm::PROJECTM_LOG_LEVEL_ERROR => log::Level::Error,
+        pm::PROJECTM_LOG_LEVEL_WARN => log::Level::Warn,
+        pm::PROJECTM_LOG_LEVEL_INFO => log::Level::Info,
+        _ => log::Level::Debug,
+    };
+    log::log!(level, "projectm: {}", message.trim_end());
 }
 
 /// The trampoline projectM's glad loads through.

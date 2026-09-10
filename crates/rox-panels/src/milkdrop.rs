@@ -73,6 +73,12 @@ const MAX_SIDE: u32 = 4096;
 /// How long a preset's name stays on screen after a switch.
 const BANNER_HOLD: Duration = Duration::from_secs(2);
 
+/// How long the panel waits on the worker before saying something. A cold
+/// driver can take a second to hand over a context and the first frame is
+/// two readbacks behind that, so this is well clear of a slow start and
+/// well short of somebody deciding the feature is broken.
+const STALL_GRACE: Duration = Duration::from_secs(5);
+
 /// The longest fade the slider offers. Past a few seconds the panel reads
 /// as broken rather than calm: the audio has been gone for ages and the
 /// visual is still limping down.
@@ -478,6 +484,10 @@ struct Draw {
     /// What the window said about the texture or the chain. A backend with
     /// no shader pipeline says so here, and the body shows it.
     error: Option<String>,
+    /// Renders that have gone up as a texture, across every target this
+    /// panel has had. Zero after the grace is a worker that says it's
+    /// running and has nothing to show for it, which the body reports.
+    frames: u64,
 }
 
 pub struct MilkdropPanel {
@@ -514,6 +524,10 @@ pub struct MilkdropPanel {
     /// Whether the worker is parked. Set at the bottom of a fade-out or
     /// on the first frame of a hold, cleared on play.
     parked: bool,
+    /// When the panel last asked the worker for frames: the spawn, or the
+    /// latest resume. The stall notices count from here, so a panel that
+    /// sat parked for an hour isn't declared stuck the moment it wakes.
+    since: Option<Instant>,
     /// Whether the worker has run for this panel yet. A hold with nothing
     /// ever rendered would pin an empty texture at full opacity, so until
     /// the first run a hold reads as a cut.
@@ -570,6 +584,7 @@ impl MilkdropPanel {
             banner: None,
             failed: None,
             parked: false,
+            since: None,
             held: false,
             // Settled and fully visible. The panel comes up drawing, and
             // the first render with nothing playing takes it down.
@@ -856,6 +871,7 @@ impl MilkdropPanel {
         // the whole library.
         engine.send(Command::SetRotation(self.rotation()));
         self.engine = Some(engine);
+        self.since = Some(Instant::now());
     }
 
     /// The preset a restored layout should come up on: the saved name,
@@ -940,6 +956,7 @@ impl MilkdropPanel {
             self.fade_to(1.0);
             if self.parked {
                 self.parked = false;
+                self.since = Some(Instant::now());
                 self.send(Command::Resume);
             }
             return;
@@ -1028,6 +1045,39 @@ impl MilkdropPanel {
         }
         match self.engine.as_ref().map(Engine::status) {
             Some(Status::Failed(message)) => Some(message),
+            _ => None,
+        }
+    }
+
+    /// What the panel says when the worker is alive and nothing is coming:
+    /// a start still waiting on the driver past the grace, or an engine
+    /// that reports running and has never delivered a frame. Both used to
+    /// be a black panel with no word, which on the machine it happens on
+    /// looks exactly like the feature working with the lights off. The
+    /// headline and the detail under it, or `None` while there's nothing
+    /// to say.
+    fn stall(&self) -> Option<(SharedString, SharedString)> {
+        let engine = self.engine.as_ref()?;
+        if self.parked || self.since?.elapsed() < STALL_GRACE {
+            return None;
+        }
+        match engine.status() {
+            Status::Starting => Some((
+                rox_i18n::t!("milkdrop-still-starting"),
+                rox_i18n::t!("milkdrop-still-starting-detail"),
+            )),
+            Status::Running {
+                renderer,
+                gl_version,
+                ..
+            } if self.draw.lock().unwrap().frames == 0 => Some((
+                rox_i18n::t!("milkdrop-no-frames"),
+                rox_i18n::t!(
+                    "milkdrop-no-frames-detail",
+                    renderer = renderer,
+                    version = gl_version
+                ),
+            )),
             _ => None,
         }
     }
@@ -1303,23 +1353,35 @@ fn paint(
         }
     }
 
-    let Some(target) = draw.target.as_mut() else {
-        return;
-    };
-
     // The newest render, if there is one past what's already up there. A
     // frame from before a resize is dropped rather than stretched: its seq
     // still moves on, so it's dropped once and not re-fetched every frame.
-    if let Some(frame) = engine.frame_after(target.last_seq) {
-        target.last_seq = frame.seq;
-        if frame.width == target.width && frame.height == target.height {
-            if let Err(message) = window.update_user_texture(target.texture, frame.rgba8) {
-                draw.error = Some(message);
-                cx.notify(panel);
-                return;
+    let uploaded = {
+        let Some(target) = draw.target.as_mut() else {
+            return;
+        };
+        match engine.frame_after(target.last_seq) {
+            Some(frame) => {
+                target.last_seq = frame.seq;
+                let fits = frame.width == target.width && frame.height == target.height;
+                if fits {
+                    if let Err(message) = window.update_user_texture(target.texture, frame.rgba8) {
+                        draw.error = Some(message);
+                        cx.notify(panel);
+                        return;
+                    }
+                }
+                fits
             }
+            None => false,
         }
+    };
+    if uploaded {
+        draw.frames += 1;
     }
+    let Some(target) = draw.target.as_mut() else {
+        return;
+    };
 
     if target.chain.is_none() {
         let chain = UserShaderChain {
@@ -2283,6 +2345,13 @@ impl MilkdropPanel {
             .map(|(text, _)| text.clone());
         let error = self.error();
         let controls = self.config.show_controls && error.is_none();
+        // A failure or a stall, over the body. The controls stay up under a
+        // stall: pressing Next and seeing a name land is how somebody tells
+        // a worker that's alive from one that isn't.
+        let overlay = match error {
+            Some(message) => Some((rox_i18n::t!("milkdrop-no-gl"), SharedString::from(message))),
+            None => self.stall(),
+        };
         let starred = self.current_is_favorite();
 
         let scale = self.config.scale;
@@ -2332,7 +2401,7 @@ impl MilkdropPanel {
                     .child(text)
             }))
             .when(controls, |body| body.child(self.controls(starred, cx)))
-            .children(error.map(|message| {
+            .children(overlay.map(|(headline, detail)| {
                 div()
                     .absolute()
                     .inset_0()
@@ -2345,8 +2414,8 @@ impl MilkdropPanel {
                     .text_center()
                     .text_xs()
                     .text_color(palette::text_muted())
-                    .child(rox_i18n::t!("milkdrop-no-gl"))
-                    .child(message)
+                    .child(headline)
+                    .child(detail)
             }))
     }
 }
